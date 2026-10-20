@@ -1,0 +1,38 @@
+[project]
+name = "security-notebook-tools"
+version = "0.1.0"
+description = "KQL helpers for Microsoft Sentinel and Azure Data Explorer, returning pandas DataFrames."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "azure-identity>=1.26.0",
+    "azure-kusto-data>=6.0.4",
+    "azure-monitor-query>=2.0.0",
+    "pandas>=2.2",
+]
+
+[project.optional-dependencies]
+notebook = ["ipython", "ipykernel"]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "D"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
