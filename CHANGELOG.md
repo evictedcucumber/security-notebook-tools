@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Licensed under MIT; added `LICENSE` and project URLs to the package metadata.
+- Time range messages now log under `security_notebook_tools.timerange` instead of
+  `security_notebook_tools.sentinel`.
+- README install instructions point at the `security-notebook-tools` GitHub repo.
+
 ## 0.1.0
 
 Initial release.

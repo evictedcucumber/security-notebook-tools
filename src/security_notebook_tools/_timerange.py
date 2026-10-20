@@ -10,7 +10,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 
-logger = logging.getLogger("security_notebook_tools.sentinel")
+logger = logging.getLogger("security_notebook_tools.timerange")
 
 Timespan = timedelta | tuple[datetime, datetime] | tuple[datetime, timedelta]
 DEFAULT_TIMESPAN = timedelta(days=1)

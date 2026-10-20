@@ -1,5 +1,5 @@
 {
-  description = "Dev shell for security_notebook_tools";
+  description = "Dev shell for security-notebook-tools";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

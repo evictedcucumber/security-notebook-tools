@@ -16,9 +16,9 @@ Prerequisites:
 Into another uv-managed project:
 
 ```sh
-uv add --editable ../security_notebook_tools
+uv add --editable ../security-notebook-tools
 # or
-uv add git+https://github.com/<you>/security_notebook_tools
+uv add git+https://github.com/evictedcucumber/security-notebook-tools
 ```
 
 For `display_df` inside notebooks add the extra: `uv add "security-notebook-tools[notebook]"`.
@@ -205,3 +205,7 @@ uv build
 
 Docstrings use Google style and are checked by ruff's `D` (pydocstyle) rules.
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
