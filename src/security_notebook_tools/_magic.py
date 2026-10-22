@@ -1,15 +1,18 @@
-"""IPython ``%%kql`` cell magic, a thin wrapper over ``exec_query``."""
+"""IPython ``%%kql`` cell magic for quick queries, shown with ``format_dataframe``."""
 
-import keyword
 import re
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from IPython.core.error import UsageError
 from IPython.core.magic import Magics, cell_magic, magics_class
 from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
 
+from ._format import format_dataframe
 from ._query import DEFAULT_TIMEOUT, exec_query
+
+if TYPE_CHECKING:
+    from pandas.io.formats.style import Styler
 
 _SHORTHAND = re.compile(r"(?:\d+[dhms])+", re.IGNORECASE)
 _PART = re.compile(r"(\d+)([dhms])", re.IGNORECASE)
@@ -50,7 +53,6 @@ class KqlMagics(Magics):
     """Magics provided by security_notebook_tools."""
 
     @magic_arguments()
-    @argument("var", nargs="?", help="Variable to assign the DataFrame to (nothing is displayed).")
     @argument(
         "-t",
         "--timespan",
@@ -68,15 +70,13 @@ class KqlMagics(Magics):
     )
     @argument("-v", "--verbose", action="store_true", help="Log the query and timing.")
     @cell_magic
-    def kql(self, line: str, cell: str) -> Any:
-        """Run the cell body as KQL with exec_query and get a DataFrame.
+    def kql(self, line: str, cell: str) -> Styler:
+        """Run the cell body as KQL with exec_query and display the result.
 
-        The body is passed verbatim (no ``{}`` or ``$`` expansion). With VAR the DataFrame is
-        assigned to it and nothing is shown; without VAR the DataFrame is the cell's output.
+        The body is passed verbatim (no ``{}`` or ``$`` expansion). The result is shown with
+        format_dataframe and not kept; call exec_query directly to work with the DataFrame.
         """
         args = parse_argstring(self.kql, line)
-        if args.var is not None and (not args.var.isidentifier() or keyword.iskeyword(args.var)):
-            raise UsageError(f"{args.var!r} is not a valid variable name.")
         if not cell.strip():
             raise UsageError("The cell body is empty: write a KQL query below %%kql.")
         user_ns = self.shell.user_ns
@@ -88,7 +88,4 @@ class KqlMagics(Magics):
             timeout=args.timeout,
             verbose=args.verbose,
         )
-        if args.var is None:
-            return df
-        user_ns[args.var] = df
-        return None
+        return format_dataframe(df)

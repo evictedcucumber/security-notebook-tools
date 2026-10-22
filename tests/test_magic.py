@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
+from pandas.io.formats.style import Styler
 
 pytest.importorskip("IPython")
 
@@ -39,13 +40,22 @@ def run(sh, line, body):
     return sh.run_cell_magic("kql", line, body)
 
 
-def test_assigns_variable_and_returns_none(shell):
-    assert run(shell, "out", "T | take 1") is None
-    assert shell.user_ns["out"] is DF
+def test_returns_formatted_result(shell):
+    out = run(shell, "", "T | take 1")
+    assert isinstance(out, Styler)
+    assert out.data.equals(DF)
 
 
-def test_no_var_returns_df(shell):
-    assert run(shell, "", "T | take 1") is DF
+def test_result_not_stored_in_namespace(shell):
+    before = set(shell.user_ns)
+    run(shell, "", "T")
+    assert set(shell.user_ns) == before
+
+
+def test_variable_argument_rejected(shell):
+    with pytest.raises(UsageError):
+        run(shell, "out", "T")
+    assert not shell.calls
 
 
 def test_defaults(shell):
@@ -98,13 +108,6 @@ def test_body_verbatim(shell):
     body = "T\n| extend d = dynamic({'a': 1})\n| where x == '${y}'\n"
     run(shell, "", body)
     assert shell.calls[0][0] == body
-
-
-@pytest.mark.parametrize("var", ["1abc", "for", "a-b"])
-def test_invalid_var(shell, var):
-    with pytest.raises(UsageError):
-        run(shell, var, "T")
-    assert not shell.calls
 
 
 def test_bad_timespan_expression(shell):

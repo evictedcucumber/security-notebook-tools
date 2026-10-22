@@ -149,29 +149,29 @@ df = exec_query("SigninLogs | summarize count() by UserPrincipalName", timeout=6
 
 ### Cell magic
 
-In a notebook you can write raw KQL in a cell instead of a Python string. Load the extension
-once per kernel:
+For quick looks in a notebook you can write raw KQL in a cell instead of a Python string. Load
+the extension once per kernel:
 
 ```python
 %load_ext security_notebook_tools
 ```
 
 ```text
-%%kql [VAR] [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
 SigninLogs
 | summarize count() by UserPrincipalName
 ```
 
 The cell body is passed to `exec_query` unchanged (no `{}` or `$` expansion), and every
-`exec_query` option is available. With `VAR` the DataFrame is assigned to that variable and
-nothing is displayed, so you can show it yourself in another cell; without `VAR` the DataFrame
-is the cell's output. `--timespan` takes a duration (`1d`, `12h`, `30m`, `90s`, or combined like
+`exec_query` option is available. The result is displayed with `format_dataframe` (see
+[Display](#display)) and not kept; call `exec_query` yourself when you want the DataFrame.
+`--timespan` takes a duration (`1d`, `12h`, `30m`, `90s`, or combined like
 `1d12h`) or a Python expression evaluated in the notebook, such as `ts`, `"(start, end)"` or
 `"timedelta(hours=3)"`. `--target` defaults to `sentinel`, `--timeout` to 300. `%%kql?` shows the
 usage. IPython comes with the `notebook` extra.
 
 ```text
-%%kql df --timespan 1d --timeout 600
+%%kql --timespan 1d --timeout 600
 SigninLogs | take 100
 ```
 

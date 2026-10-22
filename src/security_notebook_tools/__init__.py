@@ -24,7 +24,8 @@ Public API:
 * ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
 In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cell magic that
-runs the cell body as KQL through ``exec_query`` (see ``help(load_ipython_extension)``).
+runs the cell body as KQL through ``exec_query`` and displays it with ``format_dataframe``
+(see ``help(load_ipython_extension)``).
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
@@ -48,11 +49,11 @@ def load_ipython_extension(ipython) -> None:
 
     Run ``%load_ext security_notebook_tools`` in a notebook, then write raw KQL in a cell::
 
-        %%kql [VAR] [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
 
-    The body is passed verbatim to ``exec_query``, which does all validation. With ``VAR`` the
-    DataFrame is assigned to that variable and nothing is displayed; without it the DataFrame is
-    the cell's output. ``--timespan`` takes a duration such as ``1d``, ``12h``, ``30m``,
+    The body is passed verbatim to ``exec_query``, which does all validation, and the result is
+    displayed with ``format_dataframe``. The DataFrame is not kept; call ``exec_query`` directly
+    for that. ``--timespan`` takes a duration such as ``1d``, ``12h``, ``30m``,
     ``1d12h`` or ``90s``, or a Python expression evaluated in the notebook namespace (a
     variable, ``(start, end)``, ``timedelta(hours=3)``). IPython must be installed (it is with
     the ``notebook`` extra).

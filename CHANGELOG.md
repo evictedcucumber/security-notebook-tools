@@ -14,11 +14,11 @@
 
 ### Added
 
-- `%%kql` IPython cell magic (`%load_ext security_notebook_tools`): write raw KQL in a cell.
-  Supports every `exec_query` option (`--timespan`, `--target`, `--timeout`, `--verbose`);
-  `--timespan` accepts `1d`/`12h`/`30m`/`90s`/`1d12h` or a Python expression. With a variable
-  name the DataFrame is assigned and nothing is displayed. IPython is only needed when the
-  extension is loaded.
+- `%%kql` IPython cell magic (`%load_ext security_notebook_tools`) for quick queries: write raw
+  KQL in a cell and see the result rendered with `format_dataframe`. The DataFrame is not kept;
+  use `exec_query` when you need it. Supports every `exec_query` option (`--timespan`,
+  `--target`, `--timeout`, `--verbose`); `--timespan` accepts `1d`/`12h`/`30m`/`90s`/`1d12h` or
+  a Python expression. IPython is only needed when the extension is loaded.
 - `format_dataframe(df, *, max_rows=1000)` returns a pandas `Styler` that shows a query result
   the way Kusto returns it: values by KQL type, nulls blank, text left-aligned and numbers
   right-aligned. It shows at most 1000 rows with a caption; `max_rows=None` shows all of them.
