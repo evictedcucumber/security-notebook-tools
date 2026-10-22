@@ -1,10 +1,9 @@
 import logging
 from unittest import mock
 
-import pandas as pd
 import pytest
 
-from security_notebook_tools import disable_logging, drop_empty_columns, enable_logging
+from security_notebook_tools import disable_logging, enable_logging
 from security_notebook_tools._log import _NotebookHandler, logger, shorten, verbose_logging
 from security_notebook_tools._sentinel import SentinelClient
 
@@ -16,20 +15,24 @@ def _reset():
     disable_logging()
 
 
-def _df():
-    return pd.DataFrame({"a": [1, 2], "empty": [None, None]})
+child = logging.getLogger("security_notebook_tools.test")
+
+
+def _log_something(verbose=False):
+    with verbose_logging(verbose):
+        child.info("Did something")
 
 
 def test_quiet_by_default(capsys):
-    drop_empty_columns(_df())
+    _log_something()
     assert capsys.readouterr().out == ""
 
 
 def test_verbose_prints_to_stdout(capsys):
-    drop_empty_columns(_df(), verbose=True)
+    _log_something(verbose=True)
     out = capsys.readouterr().out
-    assert "Dropped 1 empty column(s): ['empty']" in out
-    assert "security_notebook_tools.formatting" in out
+    assert "Did something" in out
+    assert "security_notebook_tools.test" in out
 
 
 def test_verbose_cleans_up():
@@ -49,11 +52,11 @@ def test_nested_verbose_not_duplicated(capsys):
 
 def test_enable_logging_persists(capsys):
     enable_logging()
-    drop_empty_columns(_df())
-    drop_empty_columns(_df(), verbose=True)  # no duplicate handler
-    assert capsys.readouterr().out.count("Dropped") == 2
+    _log_something()
+    _log_something(verbose=True)  # no duplicate handler
+    assert capsys.readouterr().out.count("Did something") == 2
     disable_logging()
-    drop_empty_columns(_df())
+    _log_something()
     assert capsys.readouterr().out == ""
 
 

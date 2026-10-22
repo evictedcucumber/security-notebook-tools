@@ -900,7 +900,7 @@ wheels = [
 
 [[package]]
 name = "security-notebook-tools"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "azure-identity" },
@@ -912,7 +912,6 @@ dependencies = [
 [package.optional-dependencies]
 notebook = [
     { name = "ipykernel" },
-    { name = "ipython" },
 ]
 
 [package.dev-dependencies]
@@ -927,7 +926,6 @@ requires-dist = [
     { name = "azure-kusto-data", specifier = ">=6.0.4" },
     { name = "azure-monitor-query", specifier = ">=2.0.0" },
     { name = "ipykernel", marker = "extra == 'notebook'" },
-    { name = "ipython", marker = "extra == 'notebook'" },
     { name = "pandas", specifier = ">=2.2" },
 ]
 provides-extras = ["notebook"]

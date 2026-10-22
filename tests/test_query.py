@@ -10,16 +10,8 @@ from security_notebook_tools._exceptions import ConfigurationError
 
 PUBLIC = {
     "disable_logging",
-    "display_df",
-    "drop_empty_columns",
     "enable_logging",
     "exec_query",
-    "expand_column",
-    "format_timestamps",
-    "parse_json_columns",
-    "reorder_columns",
-    "summarize_df",
-    "truncate_strings",
 }
 
 
