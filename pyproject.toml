@@ -1,6 +1,6 @@
 [project]
 name = "security-notebook-tools"
-version = "0.1.0"
+version = "1.0.0"
 description = "KQL helpers for Microsoft Sentinel and Azure Data Explorer, returning pandas DataFrames."
 readme = "README.md"
 license = "MIT"
@@ -19,7 +19,7 @@ Issues = "https://github.com/evictedcucumber/security-notebook-tools/issues"
 Changelog = "https://github.com/evictedcucumber/security-notebook-tools/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-notebook = ["ipython", "ipykernel"]
+notebook = ["ipykernel"]
 
 [dependency-groups]
 dev = ["pytest", "ruff"]
