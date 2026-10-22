@@ -9,6 +9,7 @@ import security_notebook_tools as snt
 from security_notebook_tools._exceptions import ConfigurationError
 
 PUBLIC = {
+    "clear_cache",
     "disable_logging",
     "enable_logging",
     "exec_batch_query",
@@ -60,13 +61,17 @@ def test_defaults_to_sentinel(sentinel, monkeypatch):
     monkeypatch.setenv("AZURE_TENANT_ID", "env-tenant")
     df = snt.exec_query("T")
     assert list(df.columns) == ["a"]
-    cls.return_value.query_tables.assert_called_with("T", timedelta(days=1), server_timeout=300)
+    cls.return_value.query_tables.assert_called_with(
+        "T", timedelta(days=1), raise_on_partial=True, server_timeout=300
+    )
     snt.exec_query("T | where TimeGenerated > ago(7d)")
     cls.return_value.query_tables.assert_called_with(
-        "T | where TimeGenerated > ago(7d)", None, server_timeout=300
+        "T | where TimeGenerated > ago(7d)", None, raise_on_partial=True, server_timeout=300
     )
     snt.exec_query("T", timedelta(days=7), timeout=60)
-    cls.return_value.query_tables.assert_called_with("T", timedelta(days=7), server_timeout=60)
+    cls.return_value.query_tables.assert_called_with(
+        "T", timedelta(days=7), raise_on_partial=True, server_timeout=60
+    )
     cls.assert_called_once_with(
         "11111111-1111-1111-1111-111111111111",
         cred.return_value,
@@ -213,7 +218,7 @@ def test_batch_windows_and_prefix(sentinel):
         'let BatchStart = datetime("2026-01-01T00:00:00.000000Z"); '
         'let BatchEnd = datetime("2026-01-02T00:00:00.000000Z");\n' + FILTER
     )
-    assert all(c.kwargs == {"server_timeout": 300} for c in calls)
+    assert all(c.kwargs == {"raise_on_partial": True, "server_timeout": 300} for c in calls)
 
 
 def test_batch_timedelta_start_and_default_end(sentinel):
@@ -460,7 +465,7 @@ def test_batch_max_workers_is_never_exceeded(sentinel):
     barrier = threading.Barrier(3, timeout=10)  # proves 3 windows really run at once
     state = {"now": 0, "peak": 0}
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         if _window_no(timespan) > 1:  # window 1 runs alone, before the pool starts
             with lock:
                 state["now"] += 1
@@ -481,7 +486,7 @@ def test_batch_first_window_runs_alone_on_the_calling_thread(sentinel):
     cls, _ = sentinel
     events = []
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         n = _window_no(timespan)
         events.append(("start", n, threading.current_thread()))
         time.sleep(0.02)
@@ -499,7 +504,7 @@ def test_batch_results_in_window_order_when_completion_is_reversed(sentinel):
     cls, _ = sentinel
     done = {n: threading.Event() for n in range(1, 5)}
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         n = _window_no(timespan)
         if n in (2, 3):  # finish after the window behind them
             assert done[n + 1].wait(10)
@@ -516,7 +521,7 @@ def test_batch_default_is_sequential(sentinel):
     cls, _ = sentinel
     threads = set()
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         threads.add(threading.current_thread())
         return [pd.DataFrame({"a": [1]})]
 
@@ -550,7 +555,7 @@ def test_batch_throttled_window_is_retried(sentinel, backoff, caplog, workers):
     sleeps, caps = backoff
     throttled = []
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         n = _window_no(timespan)
         if n == 2 and len(throttled) < 2:
             throttled.append(n)
@@ -623,7 +628,7 @@ def test_batch_fail_fast_cancels_pending_and_raises_lowest_index(sentinel):
     called = []
     three_failed = threading.Event()
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         n = _window_no(timespan)
         called.append(n)
         if n == 3:
@@ -649,7 +654,7 @@ def test_batch_configuration_error_in_a_window_is_not_wrapped(sentinel):
     cls, _ = sentinel
     bad = ConfigurationError("no")
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         if _window_no(timespan) == 3:
             raise bad
         return [pd.DataFrame({"a": [1]})]
@@ -665,7 +670,7 @@ def test_batch_failure_interrupts_a_waiting_retry(sentinel):
     cls, _ = sentinel
     two_throttled = threading.Event()
 
-    def query(kql, timespan, server_timeout=None):
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
         n = _window_no(timespan)
         if n == 2:
             two_throttled.set()
@@ -847,3 +852,148 @@ def test_batch_without_merge_on_is_unchanged(two_days):
     df = snt.exec_batch_query(FILTER, D0, _days(2))
     assert len(df) == 4
     assert list(df.columns) == ["User", "n", "v"]
+
+
+# --- result cache -------------------------------------------------------------------------------
+
+
+def _sdk_calls(cls):
+    return cls.return_value.query_tables.call_count
+
+
+def test_sentinel_second_call_hits_cache(sentinel, caplog):
+    cls, _ = sentinel
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools.query"):
+        snt.exec_query("T")
+        assert "cached" not in caplog.text
+        snt.exec_query("T")
+    assert _sdk_calls(cls) == 1
+    assert "Returning cached result" in caplog.text
+
+
+def test_adx_query_and_show_hit_cache(adx):
+    cls, _ = adx
+    for kql in ("T", ".show tables"):
+        snt.exec_query(kql, target="adx")
+        snt.exec_query(kql, target="adx")
+    assert cls.return_value.query_tables.call_count == 1
+    assert cls.return_value.show.call_count == 1
+
+
+@pytest.mark.parametrize("fixture", ["sentinel", "adx"])
+def test_cache_false_bypasses_and_keeps_cache(fixture, request):
+    cls, _ = request.getfixturevalue(fixture)
+    kw = {"target": "adx"} if fixture == "adx" else {}
+    snt.exec_query("T", **kw)
+    snt.exec_query("T", cache=False, **kw)
+    assert _sdk_calls(cls) == 2
+    snt.exec_query("T", cache=False, **kw)
+    assert _sdk_calls(cls) == 3
+    snt.exec_query("T", **kw)  # the first result is still cached
+    assert _sdk_calls(cls) == 3
+
+
+def test_cache_false_does_not_store(sentinel):
+    cls, _ = sentinel
+    snt.exec_query("T", cache=False)
+    snt.exec_query("T")
+    assert _sdk_calls(cls) == 2
+
+
+def test_clear_cache_forces_refetch(sentinel):
+    cls, _ = sentinel
+    snt.exec_query("T")
+    snt.clear_cache()
+    snt.exec_query("T")
+    assert _sdk_calls(cls) == 2
+
+
+def test_different_inputs_miss(sentinel, monkeypatch):
+    cls, _ = sentinel
+    snt.exec_query("T")
+    snt.exec_query("T2")
+    snt.exec_query("T", timedelta(days=2))
+    snt.exec_query("T", timeout=60)
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "33333333-3333-3333-3333-333333333333")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "other")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    rid = RID.replace("sentinel-ws", "other")
+    monkeypatch.setattr("security_notebook_tools._query.resolve_workspace_resource_id", lambda: rid)
+    snt.exec_query("T")
+    assert _sdk_calls(cls) == 5
+
+
+def test_adx_different_database_and_cluster_miss(adx, monkeypatch):
+    cls, _ = adx
+    snt.exec_query("T", target="adx")
+    monkeypatch.setenv("ADX_DATABASE", "db2")
+    snt.exec_query("T", target="adx")
+    monkeypatch.setenv("ADX_CLUSTER_URI", "https://other.kusto.windows.net")
+    snt.exec_query("T", target="adx")
+    assert cls.return_value.query_tables.call_count == 3
+
+
+def test_mutating_result_does_not_change_cache(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.return_value[0].attrs["kql_types"] = {"a": "long"}
+    first = snt.exec_query("T")
+    first.loc[0, "a"] = 99
+    first.attrs["kql_types"]["a"] = "string"
+    second = snt.exec_query("T")
+    assert second.loc[0, "a"] == 1
+    assert second.attrs["kql_types"] == {"a": "long"}
+    assert _sdk_calls(cls) == 1
+
+
+def test_errors_are_not_cached(sentinel):
+    cls, _ = sentinel
+    ok = cls.return_value.query_tables.return_value
+    cls.return_value.query_tables.side_effect = [QueryError("boom"), ok]
+    with pytest.raises(QueryError):
+        snt.exec_query("T")
+    assert snt.exec_query("T").loc[0, "a"] == 1
+    assert _sdk_calls(cls) == 2
+
+
+def test_partial_results_are_not_cached_and_warn(monkeypatch):
+    import warnings
+
+    from azure.monitor.query import LogsQueryPartialResult, LogsTable
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    table = LogsTable(name="T", columns=["a"], columns_types=["long"], rows=[[1]])
+    with (
+        mock.patch("security_notebook_tools._query.get_credential"),
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as sdk,
+        mock.patch("security_notebook_tools._sentinel.get_policy"),
+        mock.patch("security_notebook_tools._sentinel.check_sentinel_query"),
+    ):
+        sdk.return_value.query_workspace.return_value = LogsQueryPartialResult(
+            partial_data=[table], partial_error="boom"
+        )
+        for _ in range(2):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                df = snt.exec_query("T")
+            assert [str(w.message) for w in caught if "partial" in str(w.message)] == [
+                "Sentinel query returned partial results: boom"
+            ]
+            assert df.loc[0, "a"] == 1
+            assert df.attrs["kql_types"] == {"a": "long"}
+        assert sdk.return_value.query_workspace.call_count == 2
+
+
+def test_batch_rerun_reuses_succeeded_windows(sentinel):
+    cls, _ = sentinel
+    ok = cls.return_value.query_tables.return_value
+    cls.return_value.query_tables.side_effect = [ok, QueryError("boom"), ok, ok, ok]
+    with pytest.raises(QueryError, match="window 2/2"):
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2))
+    assert _sdk_calls(cls) == 2
+    snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2))
+    assert _sdk_calls(cls) == 3  # only the failed window ran again
+    snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2), cache=False)
+    assert _sdk_calls(cls) == 5

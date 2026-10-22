@@ -1,7 +1,7 @@
 import pytest
 
-from security_notebook_tools import _auth, _query, _tablepolicy
 from security_notebook_tools import _config as config
+from security_notebook_tools import _query
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +17,6 @@ def _clean_env(monkeypatch):
         config.DATABASE_VAR,
     ):
         monkeypatch.delenv(var, raising=False)
-    _query._clear_clients()
-    _auth.clear_credential_cache()
-    _tablepolicy.clear_policy_cache()
+    _query.clear_cache()
     yield
-    _query._clear_clients()
-    _auth.clear_credential_cache()
-    _tablepolicy.clear_policy_cache()
+    _query.clear_cache()

@@ -68,6 +68,11 @@ class KqlMagics(Magics):
         default=DEFAULT_TIMEOUT,
         help=f"Server-side timeout in seconds. Default: {DEFAULT_TIMEOUT}.",
     )
+    @argument(
+        "--no-cache",
+        action="store_true",
+        help="Run the query even if an identical result is cached.",
+    )
     @argument("-v", "--verbose", action="store_true", help="Log the query and timing.")
     @cell_magic
     def kql(self, line: str, cell: str) -> Styler:
@@ -86,6 +91,7 @@ class KqlMagics(Magics):
             timespan,
             target=args.target,
             timeout=args.timeout,
+            cache=not args.no_cache,
             verbose=args.verbose,
         )
         return format_dataframe(df)

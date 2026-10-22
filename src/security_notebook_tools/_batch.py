@@ -170,6 +170,7 @@ def _run_window(
     kql: str,
     target: Target,
     timeout: int,
+    cache: bool,
     stop: threading.Event,
 ) -> pd.DataFrame:
     """Run one window, retrying throttled attempts; wrap a failure with the window's name.
@@ -184,9 +185,9 @@ def _run_window(
     while True:
         try:
             if target == "sentinel":
-                tables = _query_sentinel(prefix + kql, bounds, timeout)
+                tables = _query_sentinel(prefix + kql, bounds, timeout, cache=cache)
             else:
-                tables = _query_adx(prefix + kql, timeout)
+                tables = _query_adx(prefix + kql, timeout, cache=cache)
             break
         except QueryError as exc:
             if not isinstance(exc, QueryThrottledError) or retries >= _MAX_RETRIES:
@@ -350,6 +351,7 @@ def exec_batch_query(
     merge_on: str | Sequence[str] | None = None,
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable[..., Any] = _DEFAULT_AGG,
+    cache: bool = True,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
@@ -359,6 +361,10 @@ def exec_batch_query(
     ``[start, start + interval)``, ``[start + interval, start + 2 * interval)`` and so on, with
     the last window clipped to ``end``. Each run goes through the same checks as ``exec_query``,
     so the Sentinel cost guard applies to every window.
+
+    Each window is cached separately (see ``exec_query``), so re-running a batch with the same
+    absolute ``start`` and ``end`` after a failure re-uses the windows that succeeded. With a
+    relative ``start`` the windows move with "now", so they will not hit the cache.
 
     By default the windows run one after another, oldest first. With ``max_workers`` above 1 the
     first window still runs alone (so a bad query or configuration fails once, and the client,
@@ -422,6 +428,8 @@ def exec_batch_query(
             ``GroupBy.agg`` function name (``"sum"``, ``"min"``, ``"max"``, ``"mean"``,
             ``"count"``, ``"first"``, ``"last"`` ...) or a callable. Passing it without
             ``agg_column`` is an error.
+        cache: If true (default), each window may be served from, and kept in, the in-memory
+            result cache. Pass false to run every window.
         verbose: If true, print this call's logs (INFO and above) to the cell output.
 
     Returns:
@@ -517,7 +525,7 @@ def exec_batch_query(
 
     stop = threading.Event()
     jobs = [
-        partial(_run_window, index, total, bounds, kql, target, timeout, stop)
+        partial(_run_window, index, total, bounds, kql, target, timeout, cache, stop)
         for index, bounds in enumerate(windows, start=1)
     ]
     with verbose_logging(verbose):

@@ -45,7 +45,7 @@ See [docs/notebook-setup.md](docs/notebook-setup.md) for kernel and VS Code setu
 
 ## Import and quick start
 
-The public API is four names, all importable from the top-level package:
+The public API is these names, all importable from the top-level package:
 
 ```python
 from security_notebook_tools import (
@@ -53,6 +53,7 @@ from security_notebook_tools import (
     format_dataframe,
     enable_logging,
     disable_logging,
+    clear_cache,
 )
 ```
 
@@ -116,7 +117,7 @@ df = exec_query("Events | take 100", target="adx")
 df = exec_query(".show tables", target="adx")  # only .show commands are allowed
 ```
 
-`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, verbose=False)` returns the
+`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True, verbose=False)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
 columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
@@ -184,6 +185,25 @@ rest are skipped).
 df = exec_batch_query(kql, timedelta(days=30), max_workers=3)
 ```
 
+### Caching
+
+Results are cached in memory by default (up to 32 distinct queries, least recently used dropped
+first), so repeating a query in a notebook sends no request and costs nothing. A relative range
+(a `timedelta`, including the default last 1 day) is not re-evaluated on a hit, so you get the
+data from when the query first ran. Failures and partial results are not cached, and each call
+gets its own copy. `exec_batch_query` caches each window separately, so re-running it with the
+same absolute `start` and `end` after a failure reuses the windows that succeeded.
+
+```python
+df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call (`--no-cache` in %%kql)
+
+from security_notebook_tools import clear_cache
+
+clear_cache()  # drop cached results, clients, credentials and table plans
+```
+
+Large results stay in memory until evicted or cleared. Details: [docs/api.md](docs/api.md).
+
 ### Timeout
 
 `timeout` is the server-side timeout in seconds for both targets. Default 300; must be positive.
@@ -202,7 +222,7 @@ the extension once per kernel:
 ```
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
 SigninLogs
 | summarize count() by UserPrincipalName
 ```

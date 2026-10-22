@@ -61,7 +61,16 @@ def test_variable_argument_rejected(shell):
 def test_defaults(shell):
     run(shell, "", "T")
     assert shell.calls == [
-        ("T", None, {"target": "sentinel", "timeout": DEFAULT_TIMEOUT, "verbose": False})
+        (
+            "T",
+            None,
+            {
+                "target": "sentinel",
+                "timeout": DEFAULT_TIMEOUT,
+                "cache": True,
+                "verbose": False,
+            },
+        )
     ]
 
 
@@ -101,7 +110,17 @@ def test_timespan_call_expression(shell):
 
 def test_options_forwarded(shell):
     run(shell, "--target adx --timeout 60 -v", "T")
-    assert shell.calls[0][2] == {"target": "adx", "timeout": 60, "verbose": True}
+    assert shell.calls[0][2] == {
+        "target": "adx",
+        "timeout": 60,
+        "cache": True,
+        "verbose": True,
+    }
+
+
+def test_no_cache_flag(shell):
+    run(shell, "--no-cache", "T")
+    assert shell.calls[0][2]["cache"] is False
 
 
 def test_body_verbatim(shell):

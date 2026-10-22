@@ -14,6 +14,17 @@
 
 ### Added
 
+- Query result cache, on by default: `exec_query` and `exec_batch_query` gain a keyword
+  `cache: bool = True` (before `verbose`), and `%%kql` gains `--no-cache`. Results are kept in
+  memory for up to 32 distinct queries (least recently used dropped), keyed by target,
+  connection settings, exact KQL, resolved time range and timeout. A hit sends no request. A
+  relative time range (a `timedelta`, including the default last 1 day) is not re-evaluated, so a
+  hit returns the data from when the query first ran. Failures and partial Sentinel results are
+  not cached, and each call gets a copy. `exec_batch_query` caches each window separately, so a
+  re-run with the same absolute `start`/`end` after a failure reuses the windows that succeeded.
+  Pass `cache=False` for one fresh call.
+- `clear_cache()` forgets cached results and also the cached clients, credentials and table
+  plans, so the next query starts fresh.
 - `exec_batch_query(kql, start, end=None, *, interval=timedelta(days=1), target, timeout,
   max_workers=1, merge_on=None, agg_column=None, agg_func="sum", verbose)` runs the same KQL once
   per consecutive time window and merges the results into one DataFrame, for queries too big for one

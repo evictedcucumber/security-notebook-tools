@@ -1,20 +1,24 @@
 """The public ``exec_query`` entry point.
 
 Reads connection settings from the environment on every call and dispatches to the Sentinel or
-ADX client. Clients are created on first use and cached per workspace/cluster and tenant.
+ADX client. Clients are created on first use and cached per workspace/cluster and tenant. Results
+are cached in memory per resolved query (see :func:`exec_query`).
 """
 
 from __future__ import annotations
 
+import logging
+import threading
+import warnings
 from datetime import timedelta
-from functools import cache
+from functools import cache, lru_cache
 from typing import Literal
 
 import pandas as pd
 from azure.kusto.data import ClientRequestProperties
 
 from ._adx import ADXClient
-from ._auth import get_credential
+from ._auth import clear_credential_cache, get_credential
 from ._config import (
     DATABASE_VAR,
     require,
@@ -24,13 +28,30 @@ from ._config import (
     resolve_workspace_resource_id,
     validate_database,
 )
-from ._exceptions import ConfigurationError
+from ._exceptions import ConfigurationError, PartialResultError
 from ._log import verbose_logging
-from ._sentinel import SentinelClient
+from ._sentinel import SentinelClient, _table_to_df
+from ._tablepolicy import clear_policy_cache
 from ._timerange import Timespan, resolve_timespan
+
+logger = logging.getLogger("security_notebook_tools.query")
 
 Target = Literal["sentinel", "adx"]
 DEFAULT_TIMEOUT = 300
+RESULT_CACHE_SIZE = 32
+
+# Set by the cached fetch functions when they actually run, so the caller can tell a hit from a
+# miss without racing on ``cache_info()``.
+_fetch = threading.local()
+
+
+class _PartialResult(Exception):  # noqa: N818 - internal control flow, not an error
+    """Raised inside a cached fetch so a partial Sentinel result is returned but not cached."""
+
+    def __init__(self, tables: tuple[pd.DataFrame, ...], message: str) -> None:
+        super().__init__(message)
+        self.tables = tables
+        self.message = message
 
 
 @cache
@@ -54,25 +75,111 @@ def _clear_clients() -> None:
     _adx_client.cache_clear()
 
 
-def _query_sentinel(kql: str, timespan: Timespan | None, timeout: int) -> list[pd.DataFrame]:
-    """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables."""
-    tenant_id = resolve_tenant_id()
-    client = _sentinel_client(resolve_workspace_id(), resolve_workspace_resource_id(), tenant_id)
-    return client.query_tables(kql, timespan, server_timeout=timeout)
+@lru_cache(maxsize=RESULT_CACHE_SIZE)
+def _sentinel_tables(
+    workspace_id: str,
+    resource_id: str,
+    tenant_id: str | None,
+    kql: str,
+    timespan: Timespan | None,
+    timeout: int,
+) -> tuple[pd.DataFrame, ...]:
+    """Fetch (and cache) all tables of a Sentinel query; partial results are not cached."""
+    _fetch.ran = True
+    client = _sentinel_client(workspace_id, resource_id, tenant_id)
+    try:
+        return tuple(
+            client.query_tables(kql, timespan, raise_on_partial=True, server_timeout=timeout)
+        )
+    except PartialResultError as exc:
+        # query_tables already logged it; hand the data back without caching it.
+        tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
+        raise _PartialResult(tables, str(exc)) from exc
 
 
-def _query_adx(kql: str, timeout: int) -> list[pd.DataFrame]:
-    """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables."""
-    tenant_id = resolve_tenant_id()
-    client = _adx_client(resolve_cluster_uri(), tenant_id)
-    database = validate_database(require(None, DATABASE_VAR, "database"))
+@lru_cache(maxsize=RESULT_CACHE_SIZE)
+def _adx_tables(
+    cluster_uri: str, tenant_id: str | None, database: str, kql: str, timeout: int
+) -> tuple[pd.DataFrame, ...]:
+    """Fetch (and cache) all result tables of an ADX query or ``.show`` command."""
+    _fetch.ran = True
+    client = _adx_client(cluster_uri, tenant_id)
     props = ClientRequestProperties()
     props.set_option(
         ClientRequestProperties.request_timeout_option_name, timedelta(seconds=timeout)
     )
     if kql.lstrip().startswith("."):
-        return [client.show(kql, database, properties=props)]
-    return client.query_tables(kql, database, properties=props)
+        return (client.show(kql, database, properties=props),)
+    return tuple(client.query_tables(kql, database, properties=props))
+
+
+def _copies(tables: tuple[pd.DataFrame, ...] | list[pd.DataFrame]) -> list[pd.DataFrame]:
+    """Return copies (attrs included) so callers cannot change a cached frame."""
+    copies = []
+    for df in tables:
+        copy = df.copy()
+        copy.attrs = {
+            key: value.copy() if hasattr(value, "copy") else value
+            for key, value in df.attrs.items()
+        }
+        copies.append(copy)
+    return copies
+
+
+def _cached_call(fetch, args: tuple, *, cache: bool) -> list[pd.DataFrame]:
+    """Call the cached ``fetch`` (or its uncached function), logging a cache hit."""
+    if not cache:
+        return _copies(fetch.__wrapped__(*args))
+    _fetch.ran = False
+    tables = fetch(*args)
+    if not _fetch.ran:
+        logger.info("Returning cached result (clear_cache() or cache=False for fresh data)")
+    return _copies(tables)
+
+
+def _query_sentinel(
+    kql: str, timespan: Timespan | None, timeout: int, *, cache: bool = True
+) -> list[pd.DataFrame]:
+    """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables."""
+    args = (
+        resolve_workspace_id(),
+        resolve_workspace_resource_id(),
+        resolve_tenant_id(),
+        kql,
+        timespan,
+        timeout,
+    )
+    try:
+        return _cached_call(_sentinel_tables, args, cache=cache)
+    except _PartialResult as partial:
+        warnings.warn(partial.message, stacklevel=2)
+        return _copies(partial.tables)
+
+
+def _query_adx(kql: str, timeout: int, *, cache: bool = True) -> list[pd.DataFrame]:
+    """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables."""
+    tenant_id = resolve_tenant_id()
+    cluster_uri = resolve_cluster_uri()
+    database = validate_database(require(None, DATABASE_VAR, "database"))
+    return _cached_call(_adx_tables, (cluster_uri, tenant_id, database, kql, timeout), cache=cache)
+
+
+def clear_cache() -> None:
+    """Forget cached query results, and the cached clients, credentials and table plans.
+
+    The next query fetches fresh data, creates new clients and credentials, and re-reads the
+    Sentinel table plans.
+
+    Example:
+        >>> from security_notebook_tools import clear_cache
+        >>> clear_cache()
+    """
+    _sentinel_tables.cache_clear()
+    _adx_tables.cache_clear()
+    _clear_clients()
+    clear_credential_cache()
+    clear_policy_cache()
+    logger.debug("Cleared cached results, clients, credentials and table plans")
 
 
 def exec_query(
@@ -81,6 +188,7 @@ def exec_query(
     *,
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
+    cache: bool = True,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Run KQL against Microsoft Sentinel (default) or Azure Data Explorer (ADX).
@@ -152,6 +260,14 @@ def exec_query(
     query, is not detected, so the 1-day default is applied on top of it. Pass ``timespan``
     explicitly in that case.
 
+    Caching: results are kept in memory for up to 32 distinct queries (the least recently used
+    is dropped), keyed by target, connection settings, exact KQL text, resolved time range and
+    timeout. A relative time range (a ``timedelta``, including the default 1 day) is not
+    re-evaluated on a hit, so the data is from when the query first ran. Failures and partial
+    results are not cached, and a copy is returned each time. On a hit no request is sent, so
+    the cost guard check is not re-run and nothing is billed. Use ``cache=False`` or
+    ``clear_cache()`` for fresh data.
+
     Args:
         kql: The KQL query. With ``target="adx"``, text starting with ``.`` (after leading
             whitespace) is run as a management command, but only ``.show`` commands (such as
@@ -169,6 +285,9 @@ def exec_query(
         target: ``"sentinel"`` (default) or ``"adx"``.
         timeout: Server-side timeout in seconds (default 300); must be positive. Applies to
             both targets.
+        cache: If true (default), return a cached result for an identical earlier query and
+            keep this one for later. Pass false to always run the query (the result is not
+            stored and does not replace a cached one). See Caching above.
         verbose: If true, print this call's logs (INFO and above) to the cell output.
 
     Returns:
@@ -204,13 +323,13 @@ def exec_query(
         raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
     with verbose_logging(verbose):
         if target == "sentinel":
-            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout)
+            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
         elif target == "adx":
             if timespan is not None:
                 raise ConfigurationError(
                     "timespan only applies to Sentinel; filter on time in the KQL for ADX."
                 )
-            tables = _query_adx(kql, timeout)
+            tables = _query_adx(kql, timeout, cache=cache)
         else:
             raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
     return tables[0] if tables else pd.DataFrame()

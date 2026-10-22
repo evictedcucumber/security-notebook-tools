@@ -3,7 +3,13 @@
 The public API is exactly these names, importable from `security_notebook_tools`:
 
 ```python
-from security_notebook_tools import exec_query, format_dataframe, enable_logging, disable_logging
+from security_notebook_tools import (
+    exec_query,
+    format_dataframe,
+    enable_logging,
+    disable_logging,
+    clear_cache,
+)
 import security_notebook_tools
 
 security_notebook_tools.__version__  # "2.0.0"
@@ -20,6 +26,7 @@ exec_query(
     *,
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
+    cache: bool = True,
     verbose: bool = False,
 ) -> pandas.DataFrame
 ```
@@ -37,9 +44,10 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `timespan` | Sentinel only. A `timedelta` (the period ending now), a `(start, end)` tuple of datetimes, or a `(start, timedelta)` tuple. Passing it with `target="adx"` raises `ConfigurationError`; filter on time in the KQL instead. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds (default 300); must be positive. Applies to both targets. |
+| `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
-`target`, `timeout` and `verbose` are keyword-only.
+`target`, `timeout`, `cache` and `verbose` are keyword-only.
 
 ### Environment variables
 
@@ -235,6 +243,7 @@ exec_batch_query(
     merge_on: str | Sequence[str] | None = None,
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable = "sum",
+    cache: bool = True,
     verbose: bool = False,
 ) -> pandas.DataFrame
 ```
@@ -287,6 +296,7 @@ after the first window, so a typo fails before the other windows run.
 | `merge_on` | Column name or names to group the merged rows by. Give it together with `agg_column`; non-empty, no overlap with `agg_column`. |
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
 | `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
+| `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
 ### Returns
@@ -378,7 +388,7 @@ format_dataframe(df, max_rows=None)  # every row
 ## %%kql
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
 <KQL>
 ```
 
@@ -393,6 +403,7 @@ the package does not import IPython; it is only needed when the extension is loa
 | `-t`, `--timespan` | Duration shorthand (`<number><unit>` parts, units `d`, `h`, `m`, `s`, case-insensitive: `1d`, `12h`, `30m`, `1d12h`, `90s`) giving a `timedelta`, otherwise a Python expression evaluated in the notebook namespace (`ts`, `"(start, end)"`, `"timedelta(hours=3)"`). The value is passed to `exec_query` as `timespan`. |
 | `--target` | `sentinel` (default) or `adx`. |
 | `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
+| `--no-cache` | Same as `cache=False`: skip the [result cache](#caching) for this cell. |
 | `-v`, `--verbose` | Same as `verbose=True`. |
 
 The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, a positional
@@ -431,6 +442,52 @@ disable_logging() -> None
 
 Stop printing package logs to the notebook (undo `enable_logging`). Resets the package
 logger's level to `NOTSET`. Handlers you attached yourself are left alone.
+
+## clear_cache
+
+```python
+clear_cache() -> None
+```
+
+Forget every cached query result, and also the cached clients, credentials and table plans, so
+the next query starts fresh (new sign-in check, new cost guard lookup). See [Caching](#caching).
+
+```python
+from security_notebook_tools import clear_cache
+
+clear_cache()
+```
+
+## Caching
+
+Query results are cached in memory (`functools.lru_cache`), on by default, for `exec_query` and
+for each window of `exec_batch_query`. Up to 32 distinct queries are kept; the least recently
+used are dropped first.
+
+- **Key:** the target, the connection settings (Sentinel: workspace ID, resource ID and tenant;
+  ADX: cluster, tenant and database), the exact KQL text, the resolved time range and the timeout.
+  Changing any of them is a miss.
+- **Relative time ranges are not re-evaluated.** A `timedelta` (including the default last 1 day)
+  is resolved when the query first runs; a hit returns the data from then, not from now. Pass
+  absolute datetimes, or `cache=False`, when you need current data.
+- **Not cached:** failures and partial Sentinel results. ADX `.show` commands are cached.
+- **Copies:** each call gets its own copy, so changing the returned DataFrame does not affect the
+  cache.
+- **A hit sends no request**, so nothing is billed and the cost guard check is not needed. An
+  INFO log line says the result came from the cache.
+- **Batch:** each window is cached separately, so re-running `exec_batch_query` with the same
+  absolute `start` and `end` after a failure reuses the windows that already succeeded. With a
+  relative `start` (a `timedelta`) the windows move with "now" and do not hit.
+
+Use `cache=False` (or `--no-cache` in `%%kql`) for one fresh call, or `clear_cache()` to drop
+everything. Large results stay in memory until evicted or cleared, so use `cache=False` or call
+`clear_cache()` for very large pulls.
+
+```python
+df = exec_query("SigninLogs | take 100")  # runs the query
+df = exec_query("SigninLogs | take 100")  # served from the cache, no request
+df = exec_query("SigninLogs | take 100", cache=False)  # runs again
+```
 
 ## Logging
 

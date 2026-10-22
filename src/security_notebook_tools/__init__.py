@@ -4,7 +4,7 @@ Run ``az login`` first, set the connection environment variables (``SENTINEL_WOR
 ``SENTINEL_SUBSCRIPTION_ID``, ``SENTINEL_RESOURCE_GROUP`` and ``SENTINEL_WORKSPACE_NAME``, or
 ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``; optionally ``AZURE_TENANT_ID``), then:
 
-    >>> from security_notebook_tools import exec_query
+    >>> from security_notebook_tools import clear_cache, exec_query
     >>> df = exec_query("SigninLogs | take 100")
 
 Sentinel queries are cost-guarded: only tables on the Log Analytics Analytics plan may be read
@@ -22,6 +22,7 @@ Public API:
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
+* ``clear_cache``: forget cached query results (and clients, credentials and table plans).
 * ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
 In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cell magic that
@@ -34,11 +35,12 @@ Use ``help(function)`` for details. Submodules are private and may change.
 from ._batch import exec_batch_query
 from ._format import format_dataframe
 from ._log import disable_logging, enable_logging
-from ._query import exec_query
+from ._query import clear_cache, exec_query
 
 __version__ = "2.0.0"
 
 __all__ = [
+    "clear_cache",
     "disable_logging",
     "enable_logging",
     "exec_batch_query",
@@ -52,7 +54,7 @@ def load_ipython_extension(ipython) -> None:
 
     Run ``%load_ext security_notebook_tools`` in a notebook, then write raw KQL in a cell::
 
-        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
 
     The body is passed verbatim to ``exec_query``, which does all validation, and the result is
     displayed with ``format_dataframe``. The DataFrame is not kept; call ``exec_query`` directly
