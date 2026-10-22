@@ -6,19 +6,21 @@ Guide for AI agents working in this repository.
 
 `security-notebook-tools` is a Python package (>=3.14) for running KQL against Microsoft
 Sentinel and Azure Data Explorer from Jupyter notebooks and getting pandas DataFrames back.
-Version 1.0.0. MIT licence.
+Version 2.0.0. MIT licence.
 
 ## Layout
 
-- `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_log.py`,
-  `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`, `_exceptions.py`,
-  `_kql.py`, `_tablepolicy.py`).
+- `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_batch.py`,
+  `_log.py`, `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`,
+  `_exceptions.py`, `_kql.py`, `_tablepolicy.py`, `_format.py`, `_magic.py`). `_magic.py` is the
+  `%%kql` cell magic, registered by `load_ipython_extension` in `__init__.py`.
 - `_kql.py` (tokenizer) and `_tablepolicy.py` (ARM table-plan check) are the cost guard: Sentinel
   queries may only read Analytics-plan tables. They fail closed; treat any loosening as a
   security change and add a regression test for every bypass.
-- Public API is only what `__init__.py` lists in `__all__`: `exec_query`, `enable_logging`,
-  `disable_logging` (plus `__version__`). `tests/test_query.py::test_public_surface` pins it;
-  changing the API means updating that test deliberately.
+- Public API is only what `__init__.py` lists in `__all__`: `exec_query`, `exec_batch_query`,
+  `format_dataframe`, `clear_cache`, `enable_logging`, `disable_logging` (plus `__version__`).
+  `tests/test_query.py::test_public_surface` pins it; changing the API means
+  updating that test deliberately.
 - `tests/`: pytest. `docs/`: `api.md`, `notebook-setup.md`. `.vscode/`, `.env.example`: workspace
   config for this repo.
 
@@ -43,7 +45,10 @@ Flakes only see git-tracked files; `git add` new files before relying on `nix de
   `logging.getLogger("security_notebook_tools.sentinel")`). Notebook output is via
   `verbose_logging` / `enable_logging`.
 - Environment variables are read on every call (`_config.py`), never at import time. Clients and
-  credentials are cached.
+  credentials are cached, table plans for 5 minutes (`_tablepolicy.py`), and query results in
+  `functools.lru_cache` functions in `_query.py` (on by default, `cache=False` per call).
+  `clear_cache()` resets all of them; `tests/conftest.py` calls it around every test. A new
+  cache must be cleared by `clear_cache()` too.
 - Docstrings are the source of truth for behaviour; keep README and docs in line with them.
 
 ## Keeping docs in sync
