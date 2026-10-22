@@ -23,7 +23,7 @@ Changelog = "https://github.com/evictedcucumber/security-notebook-tools/blob/mai
 notebook = ["ipykernel"]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = ["ipython", "pytest", "ruff"]
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14"]

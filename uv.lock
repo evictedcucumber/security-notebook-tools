@@ -1007,6 +1007,7 @@ notebook = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "ipython" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -1024,6 +1025,7 @@ provides-extras = ["notebook"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "ipython" },
     { name = "pytest" },
     { name = "ruff" },
 ]
