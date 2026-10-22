@@ -67,9 +67,9 @@ def exec_query(
     Authentication uses the Azure CLI, so run ``az login`` first. Connection details come from
     environment variables, read on every call:
 
-    * Sentinel: ``SENTINEL_WORKSPACE_ID`` and ``SENTINEL_WORKSPACE_RESOURCE_ID`` (the
-      workspace's ARM resource ID, ``/subscriptions/<GUID>/resourceGroups/<group>/providers/
-      Microsoft.OperationalInsights/workspaces/<name>``; used by the cost guard below).
+    * Sentinel: ``SENTINEL_WORKSPACE_ID``, ``SENTINEL_SUBSCRIPTION_ID``,
+      ``SENTINEL_RESOURCE_GROUP`` and ``SENTINEL_WORKSPACE_NAME`` (the last three locate the
+      workspace in Azure for the cost guard below).
     * ADX: ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``.
     * Both: ``AZURE_TENANT_ID`` (optional; defaults to the Azure CLI's current tenant).
 

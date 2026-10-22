@@ -18,7 +18,9 @@ from ._exceptions import ConfigurationError
 
 TENANT_ID_VAR = "AZURE_TENANT_ID"
 WORKSPACE_ID_VAR = "SENTINEL_WORKSPACE_ID"
-WORKSPACE_RESOURCE_ID_VAR = "SENTINEL_WORKSPACE_RESOURCE_ID"
+SUBSCRIPTION_ID_VAR = "SENTINEL_SUBSCRIPTION_ID"
+RESOURCE_GROUP_VAR = "SENTINEL_RESOURCE_GROUP"
+WORKSPACE_NAME_VAR = "SENTINEL_WORKSPACE_NAME"
 CLUSTER_URI_VAR = "ADX_CLUSTER_URI"
 DATABASE_VAR = "ADX_DATABASE"
 
@@ -28,11 +30,15 @@ _GUID_RE = re.compile(
 _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
 _DOMAIN_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
 # ASCII-only so IGNORECASE cannot match look-alike characters (such as U+212A KELVIN SIGN).
+_RESOURCE_GROUP_PATTERN = r"[A-Za-z0-9_.()-]{0,89}[A-Za-z0-9_()-]"  # 1-90 chars, not ending in '.'
+_WORKSPACE_NAME_PATTERN = r"[A-Za-z0-9-]{4,63}"
+_RESOURCE_GROUP_RE = re.compile(_RESOURCE_GROUP_PATTERN, re.ASCII)
+_WORKSPACE_NAME_RE = re.compile(_WORKSPACE_NAME_PATTERN, re.ASCII)
 _RESOURCE_ID_RE = re.compile(
     rf"/subscriptions/{_GUID_RE.pattern}"
-    r"/resourceGroups/[A-Za-z0-9_.()-]{0,89}[A-Za-z0-9_()-]"  # 1-90 chars, not ending in '.'
+    rf"/resourceGroups/{_RESOURCE_GROUP_PATTERN}"
     r"/providers/Microsoft\.OperationalInsights"
-    r"/workspaces/[A-Za-z0-9-]{4,63}",
+    rf"/workspaces/{_WORKSPACE_NAME_PATTERN}",
     re.IGNORECASE | re.ASCII,
 )
 # Kusto cluster domains, taken from the trusted-endpoint list of azure-kusto-data
@@ -98,7 +104,56 @@ def validate_guid(value: str, var: str) -> str:
     return value
 
 
-def validate_workspace_resource_id(value: str, var: str = WORKSPACE_RESOURCE_ID_VAR) -> str:
+def validate_resource_group(value: str, var: str = RESOURCE_GROUP_VAR) -> str:
+    """Check that ``value`` is an Azure resource group name.
+
+    The name is 1-90 ASCII letters, digits and ``_ - . ( )``, not ending in ``.``. Slashes,
+    spaces and non-ASCII look-alike characters are rejected.
+
+    Args:
+        value: The candidate name; surrounding whitespace is ignored.
+        var: Environment variable name, used in the error message.
+
+    Returns:
+        The name with surrounding whitespace removed.
+
+    Raises:
+        ConfigurationError: ``value`` is not a valid resource group name.
+    """
+    value = value.strip()
+    if not _RESOURCE_GROUP_RE.fullmatch(value):
+        raise ConfigurationError(
+            f"Invalid ${var}: expected 1-90 letters, digits and '_', '-', '.', '(', ')' "
+            f"(not ending in '.'), got {value!r}."
+        )
+    return value
+
+
+def validate_workspace_name(value: str, var: str = WORKSPACE_NAME_VAR) -> str:
+    """Check that ``value`` is a Log Analytics workspace name.
+
+    The name is 4-63 ASCII letters, digits and ``-``. Slashes, dots and non-ASCII look-alike
+    characters are rejected.
+
+    Args:
+        value: The candidate name; surrounding whitespace is ignored.
+        var: Environment variable name, used in the error message.
+
+    Returns:
+        The name with surrounding whitespace removed.
+
+    Raises:
+        ConfigurationError: ``value`` is not a valid workspace name.
+    """
+    value = value.strip()
+    if not _WORKSPACE_NAME_RE.fullmatch(value):
+        raise ConfigurationError(
+            f"Invalid ${var}: expected 4-63 letters, digits and '-', got {value!r}."
+        )
+    return value
+
+
+def validate_workspace_resource_id(value: str, var: str | None = None) -> str:
     """Check that ``value`` is a Log Analytics workspace resource ID.
 
     The form is ``/subscriptions/<GUID>/resourceGroups/<group>/providers/
@@ -108,7 +163,7 @@ def validate_workspace_resource_id(value: str, var: str = WORKSPACE_RESOURCE_ID_
 
     Args:
         value: The candidate value; surrounding whitespace is ignored.
-        var: Environment variable name, used in the error message.
+        var: Optional environment variable name to mention in the error message.
 
     Returns:
         The value with surrounding whitespace removed (its case is preserved).
@@ -118,8 +173,9 @@ def validate_workspace_resource_id(value: str, var: str = WORKSPACE_RESOURCE_ID_
     """
     value = value.strip()
     if not _RESOURCE_ID_RE.fullmatch(value):
+        subject = f"${var}" if var else "workspace resource ID"
         raise ConfigurationError(
-            f"Invalid ${var}: expected /subscriptions/<GUID>/resourceGroups/<group>/providers/"
+            f"Invalid {subject}: expected /subscriptions/<GUID>/resourceGroups/<group>/providers/"
             f"Microsoft.OperationalInsights/workspaces/<name>, got {value!r}."
         )
     return value
@@ -241,9 +297,26 @@ def resolve_workspace_id(value: str | None = None) -> str:
 
 
 def resolve_workspace_resource_id(value: str | None = None) -> str:
-    """Return the validated workspace resource ID (argument, else the environment variable)."""
+    """Return the validated workspace ARM resource ID.
+
+    An explicit ``value`` (internal and test use) is validated as a full resource ID. Otherwise
+    the ID is assembled from ``$SENTINEL_SUBSCRIPTION_ID``, ``$SENTINEL_RESOURCE_GROUP`` and
+    ``$SENTINEL_WORKSPACE_NAME``, all three required and each validated; the assembled string is
+    validated again as defense in depth.
+
+    Raises:
+        ConfigurationError: A variable is missing or invalid.
+    """
+    if value:
+        return validate_workspace_resource_id(value)
+    subscription = validate_guid(
+        require(None, SUBSCRIPTION_ID_VAR, "subscription_id"), SUBSCRIPTION_ID_VAR
+    )
+    group = validate_resource_group(require(None, RESOURCE_GROUP_VAR, "resource_group"))
+    name = validate_workspace_name(require(None, WORKSPACE_NAME_VAR, "workspace_name"))
     return validate_workspace_resource_id(
-        require(value, WORKSPACE_RESOURCE_ID_VAR, "workspace_resource_id")
+        f"/subscriptions/{subscription}/resourceGroups/{group}"
+        f"/providers/Microsoft.OperationalInsights/workspaces/{name}"
     )
 
 

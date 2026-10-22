@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- `SENTINEL_WORKSPACE_RESOURCE_ID` is removed, with no fallback. Set three plain values instead,
+  all required for `target="sentinel"`: `SENTINEL_SUBSCRIPTION_ID` (GUID),
+  `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME`. The package assembles the ARM
+  resource ID itself. To migrate, split your old value
+  `/subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>`
+  into those three parts. They must still name the same workspace as `SENTINEL_WORKSPACE_ID`.
+  Errors now name the specific variable that is missing or invalid.
+
+### Docs
+
+- `docs/notebook-setup.md` has a "Find the values with the Azure CLI" section with a command per
+  environment variable and a snippet that prints ready-to-paste `.env` lines.
+
 ## 2.0.0 - 2026-10-22
 
 ### Breaking

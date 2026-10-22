@@ -94,7 +94,9 @@ def test_failure(client):
 def test_workspace_from_env(monkeypatch):
     with mock.patch("security_notebook_tools._sentinel.LogsQueryClient"):
         monkeypatch.setenv("SENTINEL_WORKSPACE_ID", WS)
-        monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", RID)
+        monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+        monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+        monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
         c = SentinelClient(credential=mock.Mock())
         assert (c.workspace_id, c.resource_id) == (WS, RID)
         other = "22222222-2222-2222-2222-222222222222"
@@ -112,13 +114,13 @@ def test_workspace_missing():
 def test_resource_id_missing_or_invalid(monkeypatch):
     with (
         mock.patch("security_notebook_tools._sentinel.LogsQueryClient"),
-        pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"),
+        pytest.raises(ConfigurationError, match="SENTINEL_SUBSCRIPTION_ID"),
     ):
         SentinelClient(WS, credential=mock.Mock())
-    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", "/subscriptions/nope")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "nope")
     with (
         mock.patch("security_notebook_tools._sentinel.LogsQueryClient"),
-        pytest.raises(ConfigurationError, match="Invalid .SENTINEL_WORKSPACE_RESOURCE_ID"),
+        pytest.raises(ConfigurationError, match="Invalid .SENTINEL_SUBSCRIPTION_ID"),
     ):
         SentinelClient(WS, credential=mock.Mock())
 

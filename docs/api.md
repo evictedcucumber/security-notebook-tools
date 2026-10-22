@@ -48,20 +48,24 @@ Read on every call (not cached), so changing `os.environ` takes effect immediate
 | Variable | Used for | Required |
 | --- | --- | --- |
 | `SENTINEL_WORKSPACE_ID` | Sentinel workspace ID (a GUID) | `target="sentinel"` |
-| `SENTINEL_WORKSPACE_RESOURCE_ID` | ARM resource ID of the same workspace (used by the cost guard) | `target="sentinel"` |
+| `SENTINEL_SUBSCRIPTION_ID` | Subscription ID (a GUID) of the workspace (used by the cost guard) | `target="sentinel"` |
+| `SENTINEL_RESOURCE_GROUP` | Resource group name of the workspace (used by the cost guard) | `target="sentinel"` |
+| `SENTINEL_WORKSPACE_NAME` | Log Analytics workspace name (used by the cost guard) | `target="sentinel"` |
 | `ADX_CLUSTER_URI` | ADX cluster URI (`https://<host>`) | `target="adx"` |
 | `ADX_DATABASE` | ADX database | `target="adx"` |
 | `AZURE_TENANT_ID` | Tenant for the Azure CLI credential (GUID or domain name) | No (defaults to the CLI's current tenant) |
+
+[notebook-setup.md](notebook-setup.md) shows Azure CLI commands that print every value.
 
 An empty variable counts as unset. Values are validated on every call; an invalid one raises
 `ConfigurationError` naming the variable:
 
 - Workspace ID: a GUID in the 8-4-4-4-12 hex form.
-- Workspace resource ID: `/subscriptions/<GUID>/resourceGroups/<group>/providers/
-  Microsoft.OperationalInsights/workspaces/<name>`, compared case-insensitively. The group is
-  1-90 letters, digits and `_ - . ( )` and does not end in `.`; the name is 4-63 letters, digits
-  and `-`. No trailing slash, query string or other characters. It must name the same workspace
-  as `SENTINEL_WORKSPACE_ID` (checked against the workspace's `customerId`).
+- Subscription ID: a GUID in the 8-4-4-4-12 hex form.
+- Resource group: 1-90 ASCII letters, digits and `_ - . ( )`, not ending in `.`.
+- Workspace name: 4-63 ASCII letters, digits and `-`.
+- The package assembles these three into the workspace's ARM resource ID. They must name the
+  same workspace as `SENTINEL_WORKSPACE_ID` (checked against the workspace's `customerId`).
 - Tenant ID: a GUID, or a DNS-style domain (dot-separated labels of letters, digits and `-`).
 - Cluster URI: scheme exactly `https`, a DNS host name, no user info, no port other than 443,
   no query, fragment or path (a trailing `/` is dropped). The host must end in a Kusto
@@ -84,11 +88,11 @@ API cannot refuse them, so a Sentinel query may only read tables on the **Analyt
 runs client-side before the query is sent, in `exec_query` and in the Sentinel client:
 
 1. The workspace, its tables (with their plan) and its saved functions are read from Azure
-   Resource Manager using `SENTINEL_WORKSPACE_RESOURCE_ID` and the Azure CLI credential
-   (needs `Microsoft.OperationalInsights/workspaces/tables/read` and
-   `.../savedSearches/read`, for example Log Analytics Reader). The workspace's `customerId`
-   must equal `SENTINEL_WORKSPACE_ID`. The result is cached for 5 minutes per resource ID and
-   tenant.
+   Resource Manager for the workspace named by `SENTINEL_SUBSCRIPTION_ID`,
+   `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME`, using the Azure CLI credential
+   (needs `Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read`,
+   for example Log Analytics Reader). The workspace's `customerId` must equal
+   `SENTINEL_WORKSPACE_ID`. The result is cached for 5 minutes per workspace and tenant.
 2. If that fails for any reason the query is not sent (`QueryError`: the tiers could not be
    verified). There is no fallback to "allow".
 3. The KQL is tokenized (comments and string literals are ignored) and rejected if it contains:
@@ -192,7 +196,8 @@ warning is logged and the data received is returned.
 
 - `ConfigurationError` (also a `ValueError`): `timeout` is not positive, `target` is unknown,
   `timespan` is combined with `target="adx"`, a required environment variable is unset or invalid,
-  `SENTINEL_WORKSPACE_ID` and `SENTINEL_WORKSPACE_RESOURCE_ID` name different workspaces, an ADX
+  `SENTINEL_WORKSPACE_ID` and the workspace named by `SENTINEL_SUBSCRIPTION_ID`,
+  `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME` differ, an ADX
   management command is not `.show`, ADX KQL uses `cluster()`, `external_table()`,
   `externaldata` or a blocked plugin, or the Sentinel cost guard rejects the query.
 - `QueryError`: the service rejected or failed the query (bad KQL, authorisation, timeout, ...),

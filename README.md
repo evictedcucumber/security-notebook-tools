@@ -65,10 +65,9 @@ import os
 from security_notebook_tools import exec_query
 
 os.environ["SENTINEL_WORKSPACE_ID"] = "<workspace-id>"  # or load from a .env file
-os.environ["SENTINEL_WORKSPACE_RESOURCE_ID"] = (
-    "/subscriptions/<subscription-id>/resourceGroups/<group>"
-    "/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>"
-)
+os.environ["SENTINEL_SUBSCRIPTION_ID"] = "<subscription-id>"  # for the cost guard
+os.environ["SENTINEL_RESOURCE_GROUP"] = "<resource-group>"
+os.environ["SENTINEL_WORKSPACE_NAME"] = "<workspace-name>"
 
 df = exec_query("SigninLogs | take 100")  # last 1 day by default
 df.head()
@@ -76,7 +75,8 @@ df.head()
 
 Instead of setting variables in a cell, put them in a `.env` file (copy
 [.env.example](.env.example)) and let VS Code load it into the kernel; see
-[docs/notebook-setup.md](docs/notebook-setup.md).
+[docs/notebook-setup.md](docs/notebook-setup.md), which also shows how to look up every value with
+the Azure CLI.
 
 ## Configuration
 
@@ -84,12 +84,15 @@ Instead of setting variables in a cell, put them in a `.env` file (copy
 | --- | --- | --- |
 | `AZURE_TENANT_ID` | Tenant passed to `AzureCliCredential` | No (defaults to the CLI's current tenant) |
 | `SENTINEL_WORKSPACE_ID` | Sentinel / Log Analytics workspace ID (the GUID) | For `target="sentinel"` (the default) |
-| `SENTINEL_WORKSPACE_RESOURCE_ID` | ARM resource ID of the same workspace, `/subscriptions/<GUID>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>`; used by the cost guard | For `target="sentinel"` (the default) |
+| `SENTINEL_SUBSCRIPTION_ID` | Azure subscription ID (GUID) of the workspace; the cost guard builds the workspace's ARM resource ID from this and the next two | For `target="sentinel"` (the default) |
+| `SENTINEL_RESOURCE_GROUP` | Resource group name of the workspace | For `target="sentinel"` (the default) |
+| `SENTINEL_WORKSPACE_NAME` | Log Analytics workspace name (not the ID); must be the same workspace as `SENTINEL_WORKSPACE_ID` | For `target="sentinel"` (the default) |
 | `ADX_CLUSTER_URI` | ADX cluster URI | For `target="adx"` |
 | `ADX_DATABASE` | ADX database | For `target="adx"` |
 
 Env vars are read on every call, so changing `os.environ` in a cell takes effect on the next
-query. Clients are created on first use and reused.
+query. Clients are created on first use and reused. Every value can be looked up with the Azure
+CLI; see "Find the values with the Azure CLI" in [docs/notebook-setup.md](docs/notebook-setup.md).
 
 ## Usage
 
@@ -196,11 +199,12 @@ this client-side before every Sentinel query is sent.
 How it works:
 
 - It reads the workspace, its tables (with their plan) and its saved functions from Azure
-  Resource Manager (`SENTINEL_WORKSPACE_RESOURCE_ID`), using the Azure CLI credential. Needs
+  Resource Manager (the workspace named by `SENTINEL_SUBSCRIPTION_ID`, `SENTINEL_RESOURCE_GROUP`
+  and `SENTINEL_WORKSPACE_NAME`), using the Azure CLI credential. Needs
   `Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read` (for
   example Log Analytics Reader on the workspace). The workspace's `customerId` must equal
   `SENTINEL_WORKSPACE_ID`, otherwise the query is refused.
-- The result is cached for 5 minutes (plans can change), per resource ID and tenant.
+- The result is cached for 5 minutes (plans can change), per workspace and tenant.
 - **It fails closed.** If the plans cannot be read (no network, no access, unexpected response)
   the query is not sent and a `QueryError` says the tiers could not be verified.
 - Any plan other than exactly `Analytics`, or a missing plan, counts as forbidden.
@@ -299,15 +303,17 @@ The exception classes are not part of the public API; read the message. Messages
 
 - `No workspace_id configured: set the $SENTINEL_WORKSPACE_ID environment variable.` (similarly for
   `cluster_uri` / `$ADX_CLUSTER_URI` and `database` / `$ADX_DATABASE`): set the env var.
-- `No workspace_resource_id configured: set the $SENTINEL_WORKSPACE_RESOURCE_ID environment
-  variable.`: the cost guard needs the workspace's ARM resource ID.
-- `Invalid $SENTINEL_WORKSPACE_ID: ...` (similarly `$SENTINEL_WORKSPACE_RESOURCE_ID`,
-  `$AZURE_TENANT_ID`, `$ADX_CLUSTER_URI`, `$ADX_DATABASE`): the value failed validation; see
-  Security. An `$ADX_CLUSTER_URI` that is not a Kusto cluster domain (the Sentinel data lake and the Log
-  Analytics proxy included) says so.
-- `$SENTINEL_WORKSPACE_ID (...) does not match the workspace behind
-  $SENTINEL_WORKSPACE_RESOURCE_ID (customerId ...)`: the two variables name different
-  workspaces.
+- `No ... configured: set the $SENTINEL_RESOURCE_GROUP environment variable.` (similarly
+  `$SENTINEL_SUBSCRIPTION_ID` and `$SENTINEL_WORKSPACE_NAME`): the cost guard needs all three to
+  locate the workspace.
+- `Invalid $SENTINEL_WORKSPACE_ID: ...` (similarly `$SENTINEL_SUBSCRIPTION_ID`,
+  `$SENTINEL_RESOURCE_GROUP`, `$SENTINEL_WORKSPACE_NAME`, `$AZURE_TENANT_ID`, `$ADX_CLUSTER_URI`,
+  `$ADX_DATABASE`): the value failed validation; see Security. An `$ADX_CLUSTER_URI` that is
+  not a Kusto cluster domain (the Sentinel data lake and the Log Analytics proxy included) says
+  so.
+- `$SENTINEL_WORKSPACE_ID (...) does not match the workspace behind $SENTINEL_SUBSCRIPTION_ID /
+  $SENTINEL_RESOURCE_GROUP / $SENTINEL_WORKSPACE_NAME (customerId ...)`: the ID and the three
+  name variables point at different workspaces.
 - `Could not verify Sentinel table tiers (...), so the query was not sent.`: the cost guard
   could not read table plans from Azure Resource Manager; check `az login` and the
   `tables/read` and `savedSearches/read` permissions. Nothing was sent.

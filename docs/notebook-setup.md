@@ -45,24 +45,67 @@ Then select "Security notebooks" in the kernel picker. Without adding the depend
 az login
 ```
 
-The package reads `SENTINEL_WORKSPACE_ID`, `SENTINEL_WORKSPACE_RESOURCE_ID`, `ADX_CLUSTER_URI`,
-`ADX_DATABASE` and optionally `AZURE_TENANT_ID` on every call.
+The package reads `SENTINEL_WORKSPACE_ID`, `SENTINEL_SUBSCRIPTION_ID`,
+`SENTINEL_RESOURCE_GROUP`, `SENTINEL_WORKSPACE_NAME`, `ADX_CLUSTER_URI`, `ADX_DATABASE` and
+optionally `AZURE_TENANT_ID` on every call.
 
-`SENTINEL_WORKSPACE_RESOURCE_ID` is the workspace's ARM resource ID
-(`/subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>`;
-in the portal: the workspace's Properties page, "Resource ID"). Sentinel queries use it to read
-the workspace's table plans and saved functions, so that only Analytics-plan tables are ever
-queried (Basic, Auxiliary and data lake tables bill per GB scanned). Your identity needs
-`Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read` on the
-workspace (Log Analytics Reader includes both). If the plans cannot be read, queries are not
-sent. See the README's Cost guard section for what is rejected.
+`SENTINEL_SUBSCRIPTION_ID`, `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME` identify the
+workspace in Azure (the name, not the ID). Sentinel queries use them to read the workspace's table
+plans and saved functions, so that only Analytics-plan tables are ever queried (Basic, Auxiliary
+and data lake tables bill per GB scanned). They must be the same workspace as
+`SENTINEL_WORKSPACE_ID`. Your identity needs `Microsoft.OperationalInsights/workspaces/tables/read`
+and `.../savedSearches/read` on the workspace (Log Analytics Reader includes both). If the plans
+cannot be read, queries are not sent. See the README's Cost guard section for what is rejected.
+
+### Find the values with the Azure CLI
+
+Sign in, optionally to a specific tenant, and pick the subscription that holds your workspace:
+
+```sh
+az login                               # or: az login --tenant <tenant>
+az account list -o table
+az account set --subscription <name-or-id>
+```
+
+| Variable | Command |
+| --- | --- |
+| `AZURE_TENANT_ID` | `az account show --query tenantId -o tsv` |
+| `SENTINEL_SUBSCRIPTION_ID` | `az account show --query id -o tsv` |
+| `SENTINEL_RESOURCE_GROUP`, `SENTINEL_WORKSPACE_NAME` | `az monitor log-analytics workspace list --query "[].{name:name, resourceGroup:resourceGroup, customerId:customerId}" -o table` |
+| `SENTINEL_WORKSPACE_ID` | `az monitor log-analytics workspace show -g <rg> -n <workspace-name> --query customerId -o tsv` |
+| `ADX_CLUSTER_URI` | `az kusto cluster list --query "[].{name:name, resourceGroup:resourceGroup, uri:uri}" -o table`, or `az kusto cluster show -g <rg> -n <cluster> --query uri -o tsv` |
+| `ADX_DATABASE` | `az kusto database list -g <rg> --cluster-name <cluster> --query "[].name" -o tsv` |
+
+Notes:
+
+- The `az kusto` commands need the `kusto` extension. `az` offers to install it on first use, or
+  run `az extension add --name kusto`.
+- Database names come back as `<cluster>/<database>`; use only the part after the slash.
+- Fabric Eventhouse URIs (`*.kusto.fabric.microsoft.com`) are not listed by `az`. Copy the
+  Query URI from the Fabric portal.
+
+To print ready-to-paste `.env` lines for Sentinel (set `RG` and `WS` from the workspace list):
+
+```sh
+RG=<resource-group>
+WS=<workspace-name>
+echo "AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)"
+echo "SENTINEL_WORKSPACE_ID=$(az monitor log-analytics workspace show -g "$RG" -n "$WS" --query customerId -o tsv)"
+echo "SENTINEL_SUBSCRIPTION_ID=$(az account show --query id -o tsv)"
+echo "SENTINEL_RESOURCE_GROUP=$RG"
+echo "SENTINEL_WORKSPACE_NAME=$WS"
+```
+
+For ADX, add `ADX_CLUSTER_URI` and `ADX_DATABASE` from the last two rows of the table.
 
 **Option A: `.env` file.** Create `.env` in the project root (add it to `.gitignore`):
 
 ```sh
 AZURE_TENANT_ID=
 SENTINEL_WORKSPACE_ID=<workspace-id>
-SENTINEL_WORKSPACE_RESOURCE_ID=/subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>
+SENTINEL_SUBSCRIPTION_ID=<subscription-id>
+SENTINEL_RESOURCE_GROUP=<resource-group>
+SENTINEL_WORKSPACE_NAME=<workspace-name>
 ADX_CLUSTER_URI=https://<cluster>.<region>.kusto.windows.net
 ADX_DATABASE=<database>
 ```
@@ -76,7 +119,9 @@ Restart the kernel after editing `.env`. Jupyter outside VS Code does not read i
 import os
 
 os.environ["SENTINEL_WORKSPACE_ID"] = "<workspace-id>"
-os.environ["SENTINEL_WORKSPACE_RESOURCE_ID"] = "<workspace-resource-id>"
+os.environ["SENTINEL_SUBSCRIPTION_ID"] = "<subscription-id>"
+os.environ["SENTINEL_RESOURCE_GROUP"] = "<resource-group>"
+os.environ["SENTINEL_WORKSPACE_NAME"] = "<workspace-name>"
 ```
 
 Variables are read per call, so changing them takes effect on the next query.
