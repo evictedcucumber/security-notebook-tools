@@ -262,6 +262,34 @@ format_dataframe(df)  # at most 1000 rows, with a caption
 format_dataframe(df, max_rows=None)  # every row
 ```
 
+## %%kql
+
+```text
+%%kql [VAR] [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [-v]
+<KQL>
+```
+
+IPython cell magic, a thin wrapper over `exec_query`. Enable it with
+`%load_ext security_notebook_tools` (`load_ipython_extension`, not part of `__all__`). Importing
+the package does not import IPython; it is only needed when the extension is loaded.
+
+| Argument | Description |
+| --- | --- |
+| `VAR` | Optional. Valid, non-keyword Python identifier. The DataFrame is assigned to it and nothing is displayed. Without it the DataFrame is returned as the cell's output. |
+| `-t`, `--timespan` | Duration shorthand (`<number><unit>` parts, units `d`, `h`, `m`, `s`, case-insensitive: `1d`, `12h`, `30m`, `1d12h`, `90s`) giving a `timedelta`, otherwise a Python expression evaluated in the notebook namespace (`ts`, `"(start, end)"`, `"timedelta(hours=3)"`). The value is passed to `exec_query` as `timespan`. |
+| `--target` | `sentinel` (default) or `adx`. |
+| `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
+| `-v`, `--verbose` | Same as `verbose=True`. |
+
+The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, an invalid
+`VAR` or a timespan expression that fails to evaluate raises `UsageError` before any query runs.
+All other validation and errors come from `exec_query` unchanged.
+
+```text
+%%kql df --timespan 1d12h
+SigninLogs | take 100
+```
+
 ## enable_logging
 
 ```python
