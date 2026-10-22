@@ -50,7 +50,9 @@ The public API is these names, all importable from the top-level package:
 ```python
 from security_notebook_tools import (
     exec_query,
+    exec_batch_query,
     format_dataframe,
+    pivot_dataframe,
     enable_logging,
     disable_logging,
     clear_cache,
@@ -250,6 +252,24 @@ pass `max_rows=None`.
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # last expression in the cell renders the table
 format_dataframe(df, max_rows=None)  # every row
+```
+
+The full rules are in [docs/api.md](docs/api.md).
+
+### Pivot
+
+`pivot_dataframe(df, index, columns)` counts rows per combination (for example sign-ins per user
+and `ResultType`); add `values` and `agg_func` to aggregate a column instead. The result is a flat
+DataFrame that goes straight into `format_dataframe`. Null keys are kept as their own row or
+column (`(null)`), `totals=True` adds a `Total` row and column, and `max_columns` (default 100)
+stops a high-cardinality `columns` key from building a huge table.
+
+```python
+df = exec_query("SigninLogs | project UserPrincipalName, ResultType, Duration")
+format_dataframe(pivot_dataframe(df, "UserPrincipalName", "ResultType"))
+format_dataframe(
+    pivot_dataframe(df, "UserPrincipalName", "ResultType", "Duration", agg_func="mean", totals=True)
+)
 ```
 
 The full rules are in [docs/api.md](docs/api.md).

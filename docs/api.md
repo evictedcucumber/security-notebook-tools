@@ -6,6 +6,7 @@ The public API is exactly these names, importable from `security_notebook_tools`
 from security_notebook_tools import (
     exec_query,
     format_dataframe,
+    pivot_dataframe,
     enable_logging,
     disable_logging,
     clear_cache,
@@ -383,6 +384,66 @@ from security_notebook_tools import exec_query, format_dataframe
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # at most 1000 rows, with a caption
 format_dataframe(df, max_rows=None)  # every row
+```
+
+## pivot_dataframe
+
+```python
+pivot_dataframe(
+    df: pandas.DataFrame,
+    index: str | Sequence[str],
+    columns: str | Sequence[str],
+    values: str | Sequence[str] | None = None,
+    *,
+    agg_func: str | Callable[..., Any] = "sum",
+    fill_value: Any = None,
+    totals: bool = False,
+    max_columns: int | None = 100,
+) -> pandas.DataFrame
+```
+
+Pivot a query result: one row per distinct `index` key, one column per distinct `columns` key.
+Without `values` the cells count the rows of each combination (missing combinations are 0, typed
+`long`). With `values` the cells aggregate those columns with `agg_func`; missing combinations are
+null unless `fill_value` is given. Null keys are kept as their own group and rows and columns are
+sorted by key.
+
+The result is a flat DataFrame with a new `RangeIndex`: the `index` columns first (as regular
+columns), then one column per distinct `columns` key. Headers are strings: the key as text, `(null)`
+for a null key, several `columns` joined with `_`, and prefixed `<value>_` when there are several
+`values`. A header that equals an `index` column or another header raises an error. The result's
+`kql_types` carry the `index` columns' original types and the cells' aggregated type (`count` and
+`nunique` are `long`, `mean`, `median`, `std` and `var` are `real`, `sum`, `min`, `max`, `first`
+and `last` keep the value's type, and a callable is left untyped), so it goes straight into
+`format_dataframe`. `df` is not modified, and a `df` with no rows gives just the `index` columns
+(and `Total` if requested).
+
+| Name | Description |
+| --- | --- |
+| `df` | The DataFrame to pivot, usually the result of `exec_query`. |
+| `index` | Column name or names whose distinct values become the rows. |
+| `columns` | Column name or names whose distinct values become the new columns. |
+| `values` | Column name or names to aggregate. `None` (default) counts rows. |
+| `agg_func` | A pandas aggregation name (`"sum"` by default, `"mean"`, `"max"`, `"nunique"`, ...) or a callable. Not allowed without `values`. |
+| `fill_value` | Cell value for combinations with no rows. Not allowed without `values`. |
+| `totals` | Add a `Total` column and a `Total` row (named in the first `index` column), aggregated with the same function over the underlying rows. With several `values` the total columns are `<value>_Total`. |
+| `max_columns` | Raise instead of building more than this many value columns (totals not counted). Default 100; `None` disables. |
+
+`agg_func`, `fill_value`, `totals` and `max_columns` are keyword-only. It raises `ValueError`
+(`ConfigurationError`) if a name is empty, repeated, used in more than one of `index`, `columns` and
+`values` or missing from `df` (the message lists the available columns); if `agg_func` or
+`fill_value` is given without `values`; if `agg_func` is not a non-empty string or a callable; if
+`max_columns` is not a positive integer or `None`, or the pivot would exceed it; if headers
+collide; or if pandas cannot aggregate.
+
+```python
+from security_notebook_tools import exec_query, format_dataframe, pivot_dataframe
+
+df = exec_query("SigninLogs | project UserPrincipalName, ResultType, AppDisplayName")
+format_dataframe(pivot_dataframe(df, "UserPrincipalName", "ResultType"))  # sign-in counts
+format_dataframe(
+    pivot_dataframe(df, "UserPrincipalName", "ResultType", "AppDisplayName", agg_func="nunique")
+)  # distinct apps per user and result
 ```
 
 ## %%kql

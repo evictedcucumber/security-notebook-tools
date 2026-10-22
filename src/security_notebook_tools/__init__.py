@@ -22,6 +22,7 @@ Public API:
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
+* ``pivot_dataframe``: pivot a result into one row per key and one column per value of another.
 * ``clear_cache``: forget cached query results (and clients, credentials and table plans).
 * ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
@@ -35,6 +36,7 @@ Use ``help(function)`` for details. Submodules are private and may change.
 from ._batch import exec_batch_query
 from ._format import format_dataframe
 from ._log import disable_logging, enable_logging
+from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
 __version__ = "2.0.0"
@@ -46,6 +48,7 @@ __all__ = [
     "exec_batch_query",
     "exec_query",
     "format_dataframe",
+    "pivot_dataframe",
 ]
 
 
