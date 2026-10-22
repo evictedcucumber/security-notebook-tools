@@ -5,8 +5,19 @@ import pytest
 from azure.core.exceptions import HttpResponseError
 from azure.monitor.query import LogsQueryPartialResult, LogsQueryResult, LogsTable
 
-from security_notebook_tools._exceptions import PartialResultError, QueryError
+from security_notebook_tools._exceptions import ConfigurationError, PartialResultError, QueryError
 from security_notebook_tools._sentinel import SentinelClient
+from security_notebook_tools._tablepolicy import TablePolicy
+
+WS = "11111111-1111-1111-1111-111111111111"
+RID = (
+    "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg"
+    "/providers/Microsoft.OperationalInsights/workspaces/sentinel-ws"
+)
+POLICY = TablePolicy(
+    WS,
+    tables={"t": ("T", "Analytics"), "u": ("U", "Analytics"), "aux_cl": ("Aux_CL", "Auxiliary")},
+)
 
 
 def _table(name="T"):
@@ -20,9 +31,13 @@ def _table(name="T"):
 
 @pytest.fixture
 def client():
-    with mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as m:
-        c = SentinelClient("ws", credential=mock.Mock())
+    with (
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as m,
+        mock.patch("security_notebook_tools._sentinel.get_policy", return_value=POLICY) as gp,
+    ):
+        c = SentinelClient(WS, credential=mock.Mock(), resource_id=RID)
         c._mock = m.return_value
+        c._get_policy = gp
         yield c
 
 
@@ -35,13 +50,13 @@ def test_success(client):
     assert df["TimeGenerated"].dt.tz is not None
     kwargs = client._mock.query_workspace.call_args.kwargs
     assert kwargs["timespan"] is None
-    assert len(client.query_tables("x")) == 2
+    assert len(client.query_tables("T")) == 2
 
 
 def test_timespan_tuple_and_timeout(client):
     client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
     span = (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC))
-    client.query("x", span, server_timeout=60)
+    client.query("T", span, server_timeout=60)
     kwargs = client._mock.query_workspace.call_args.kwargs
     assert kwargs["timespan"] == span
     assert kwargs["server_timeout"] == 60
@@ -49,7 +64,7 @@ def test_timespan_tuple_and_timeout(client):
 
 def test_no_tables(client):
     client._mock.query_workspace.return_value = LogsQueryResult(tables=[])
-    assert client.query("x").empty
+    assert client.query("T").empty
 
 
 def test_partial_warns(client):
@@ -57,7 +72,7 @@ def test_partial_warns(client):
         partial_data=[_table()], partial_error="boom"
     )
     with pytest.warns(UserWarning, match="partial"):
-        df = client.query("x")
+        df = client.query("T")
     assert len(df) == 2
 
 
@@ -66,28 +81,65 @@ def test_partial_raises(client):
         partial_data=[_table()], partial_error="boom"
     )
     with pytest.raises(PartialResultError) as ei:
-        client.query("x", raise_on_partial=True)
+        client.query("T", raise_on_partial=True)
     assert ei.value.partial_error == "boom"
 
 
 def test_failure(client):
     client._mock.query_workspace.side_effect = HttpResponseError(message="bad kql")
     with pytest.raises(QueryError, match="bad kql"):
-        client.query("x")
+        client.query("T")
 
 
 def test_workspace_from_env(monkeypatch):
     with mock.patch("security_notebook_tools._sentinel.LogsQueryClient"):
-        monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "env-ws")
-        assert SentinelClient(credential=mock.Mock()).workspace_id == "env-ws"
-        assert SentinelClient("arg-ws", credential=mock.Mock()).workspace_id == "arg-ws"
+        monkeypatch.setenv("SENTINEL_WORKSPACE_ID", WS)
+        monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", RID)
+        c = SentinelClient(credential=mock.Mock())
+        assert (c.workspace_id, c.resource_id) == (WS, RID)
+        other = "22222222-2222-2222-2222-222222222222"
+        assert SentinelClient(other, credential=mock.Mock()).workspace_id == other
 
 
 def test_workspace_missing():
-    from security_notebook_tools._exceptions import ConfigurationError
-
     with (
         mock.patch("security_notebook_tools._sentinel.LogsQueryClient"),
         pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_ID"),
     ):
-        SentinelClient(credential=mock.Mock())
+        SentinelClient(credential=mock.Mock(), resource_id=RID)
+
+
+def test_resource_id_missing_or_invalid(monkeypatch):
+    with (
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient"),
+        pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"),
+    ):
+        SentinelClient(WS, credential=mock.Mock())
+    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", "/subscriptions/nope")
+    with (
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient"),
+        pytest.raises(ConfigurationError, match="Invalid .SENTINEL_WORKSPACE_RESOURCE_ID"),
+    ):
+        SentinelClient(WS, credential=mock.Mock())
+
+
+def test_policy_fetched_with_workspace_and_resource(client):
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client.query("T")
+    args = client._get_policy.call_args.args
+    assert args[:2] == (RID, WS)
+
+
+def test_rejected_query_is_not_sent(client):
+    with pytest.raises(ConfigurationError, match="Aux_CL"):
+        client.query("Aux_CL | take 1")
+    with pytest.raises(ConfigurationError, match="search"):
+        client.query_tables("search *")
+    client._mock.query_workspace.assert_not_called()
+
+
+def test_unverifiable_tiers_do_not_send(client):
+    client._get_policy.side_effect = QueryError("Could not verify Sentinel table tiers")
+    with pytest.raises(QueryError, match="Could not verify"):
+        client.query("T")
+    client._mock.query_workspace.assert_not_called()

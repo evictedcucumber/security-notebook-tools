@@ -10,18 +10,13 @@ import logging
 import re
 from datetime import datetime, timedelta
 
+from ._kql import strip_noise
+
 logger = logging.getLogger("security_notebook_tools.timerange")
 
 Timespan = timedelta | tuple[datetime, datetime] | tuple[datetime, timedelta]
 DEFAULT_TIMESPAN = timedelta(days=1)
 
-# Comments and string literals (incl. verbatim @"..." and h"..." obfuscated strings), removed
-# before scanning so text like `where Msg == "TimeGenerated"` doesn't count as a time filter.
-_NOISE = re.compile(
-    r"//[^\n]*"
-    r"|[@hH]?\"(?:\\.|[^\"\\\n])*\""
-    r"|[@hH]?'(?:\\.|[^'\\\n])*'"
-)
 _FILTER_START = re.compile(r"\b(?:where|filter)\b", re.IGNORECASE)
 _TIME_REF = re.compile(
     r"\b(?:TimeGenerated|Timestamp)\b"
@@ -40,7 +35,9 @@ def has_time_filter(kql: str) -> bool:
     ``let`` variables assigned from a time function (``let start = ago(1d);``) count too.
     This is a text heuristic: filters inside stored functions or saved queries are not seen.
     """
-    text = _NOISE.sub(" ", kql)
+    # Comments and string literals are removed so text like `where Msg == "TimeGenerated"`
+    # doesn't count as a time filter.
+    text = strip_noise(kql)
     time_vars = [name for name, value in _LET.findall(text) if _TIME_REF.search(value)]
     var_ref = (
         re.compile(r"\b(?:" + "|".join(map(re.escape, time_vars)) + r")\b") if time_vars else None

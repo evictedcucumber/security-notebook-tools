@@ -1,6 +1,7 @@
 """Microsoft Sentinel / Log Analytics queries via ``azure-monitor-query``.
 
-Results are converted to DataFrames, with ``datetime`` columns as UTC-aware timestamps.
+Results are converted to DataFrames, with ``datetime`` columns as UTC-aware timestamps. Every
+query passes the cost guard (:mod:`._tablepolicy`) first: only Analytics-plan tables may be read.
 """
 
 from __future__ import annotations
@@ -15,9 +16,10 @@ from azure.identity import AzureCliCredential
 from azure.monitor.query import LogsQueryClient, LogsQueryStatus, LogsTable
 
 from ._auth import get_credential
-from ._config import WORKSPACE_ID_VAR, require
+from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_resource_id
 from ._exceptions import PartialResultError, QueryError
 from ._log import shorten, verbose_logging
+from ._tablepolicy import check_sentinel_query, get_policy
 from ._timerange import Timespan
 
 logger = logging.getLogger("security_notebook_tools.sentinel")
@@ -40,6 +42,8 @@ class SentinelClient:
         workspace_id: str | None = None,
         credential: AzureCliCredential | None = None,
         *,
+        resource_id: str | None = None,
+        tenant_id: str | None = None,
         verbose: bool = False,
     ) -> None:
         """Create a client.
@@ -47,15 +51,22 @@ class SentinelClient:
         Args:
             workspace_id: Log Analytics workspace ID. Defaults to ``$SENTINEL_WORKSPACE_ID``.
             credential: Credential to use. Defaults to :func:`get_credential`.
+            resource_id: ARM resource ID of the same workspace, used to read table plans for
+                the cost guard. Defaults to ``$SENTINEL_WORKSPACE_RESOURCE_ID``.
+            tenant_id: Tenant, used for the credential and the policy cache. Defaults to
+                ``$AZURE_TENANT_ID``.
             verbose: Default for this client's methods; each method can override it.
 
         Raises:
-            ConfigurationError: No workspace ID was given or set.
+            ConfigurationError: No workspace ID or resource ID was given or set, or one is
+                malformed.
         """
         self.verbose = verbose
         with verbose_logging(verbose):
-            self.workspace_id = require(workspace_id, WORKSPACE_ID_VAR, "workspace_id")
-            self.credential = credential or get_credential()
+            self.workspace_id = resolve_workspace_id(workspace_id)
+            self.resource_id = resolve_workspace_resource_id(resource_id)
+            self.tenant_id = resolve_tenant_id(tenant_id)
+            self.credential = credential or get_credential(self.tenant_id)
             self._client = LogsQueryClient(self.credential)
             logger.info("Sentinel client ready for workspace %s", self.workspace_id)
 
@@ -70,6 +81,9 @@ class SentinelClient:
     ) -> list[pd.DataFrame]:
         """Run ``kql`` and return every result table as a DataFrame.
 
+        Before anything is sent, the query is checked against the workspace's table plans: it
+        may only read Analytics-plan tables (see :func:`check_sentinel_query`).
+
         Args:
             kql: The KQL query.
             timespan: A ``timedelta``, a ``(start, end)`` / ``(start, timedelta)`` tuple, or
@@ -82,10 +96,17 @@ class SentinelClient:
             One DataFrame per result table.
 
         Raises:
-            QueryError: The service returned an error.
+            ConfigurationError: The query is rejected by the cost guard (it could read a table
+                that is not on the Analytics plan), or the workspace ID does not match the
+                resource ID.
+            QueryError: The table plans could not be verified, or the service returned an error.
             PartialResultError: The result was partial and ``raise_on_partial`` is set.
         """
         with verbose_logging(self.verbose if verbose is None else verbose):
+            policy = get_policy(
+                self.resource_id, self.workspace_id, self.credential, self.tenant_id
+            )
+            check_sentinel_query(kql, policy)
             logger.info("Running Sentinel query (timespan=%s): %s", timespan, shorten(kql))
             start = time.perf_counter()
             try:

@@ -1,6 +1,6 @@
 [project]
 name = "security-notebook-tools"
-version = "1.0.0"
+version = "2.0.0"
 description = "KQL helpers for Microsoft Sentinel and Azure Data Explorer, returning pandas DataFrames."
 readme = "README.md"
 license = "MIT"
