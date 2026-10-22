@@ -21,6 +21,11 @@
 - `format_dataframe` shows the `Total` row and columns of a `pivot_dataframe(..., totals=True)`
   result in bold, set off by a rule. They are recorded in `df.attrs["pivot_totals"]`, so a row or
   column that merely contains or is named `Total` is not styled as a total.
+- `format_dataframe` gains a keyword `column_styles: Mapping[str, str] | None = None` mapping
+  column names to a display style. The one style, `"readable_numbers"`, groups the integer digits
+  of a numeric (`int`, `long`, `real`, `decimal`) column with spaces: `1 000 000 000.00000`.
+  Unknown styles or columns raise `ValueError`; a style on a column of a type it does not fit
+  (such as a `string`) raises `TypeError`.
 - Query result cache, on by default: `exec_query` and `exec_batch_query` gain a keyword
   `cache: bool = True` (before `verbose`), and `%%kql` gains `--no-cache`. Results are kept in
   memory for up to 32 distinct queries (least recently used dropped), keyed by target,

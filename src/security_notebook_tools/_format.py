@@ -10,7 +10,8 @@ from __future__ import annotations
 import html
 import json
 import math
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,7 @@ _INTEGER_TYPES = {"int", "int32", "int64", "long"}
 _REAL_TYPES = {"real", "double", "decimal"}
 _NUMERIC_TYPES = _INTEGER_TYPES | _REAL_TYPES
 _TICKS_PER_SECOND = 10_000_000  # Kusto datetimes and timespans have 100 ns resolution.
+_PLAIN_NUMBER = re.compile(r"(-?)(\d+)(\.\d+)?")
 
 _TABLE_STYLES = [
     {
@@ -136,6 +138,26 @@ _FORMATTERS: dict[str, Callable[[Any], str]] = {
 }
 
 
+def _group_digits(text: str) -> str:
+    """Split the integer part of a plain decimal number into groups of three with spaces.
+
+    ``1000000000.00000`` becomes ``1 000 000 000.00000``; the fraction is left alone. Anything
+    else (exponent form such as ``1e+20``, ``Infinity``, text) is returned unchanged.
+    """
+    match = _PLAIN_NUMBER.fullmatch(text)
+    if match is None:
+        return text
+    sign, whole, fraction = match.groups()
+    return f"{sign}{int(whole):_}".replace("_", " ") + (fraction or "")
+
+
+# Column styles for ``format_dataframe(column_styles=...)``: each name maps to the KQL types it
+# may be applied to and a function that rewrites the cell text produced by the type's formatter.
+_COLUMN_STYLES: dict[str, tuple[frozenset[str], Callable[[str], str]]] = {
+    "readable_numbers": (frozenset(_NUMERIC_TYPES), _group_digits),
+}
+
+
 def _infer_type(column: pd.Series) -> str:
     """Guess the KQL type of a column with no recorded type from its dtype and values."""
     dtype = column.dtype
@@ -167,15 +189,19 @@ def _infer_type(column: pd.Series) -> str:
     return "string"
 
 
-def _cell_formatter(kql_type: str) -> Callable[[Any], str]:
+def _cell_formatter(kql_type: str, style: str | None = None) -> Callable[[Any], str]:
     """Return a formatter that renders one cell as escaped HTML, nulls as empty."""
     fmt = _FORMATTERS.get(kql_type, str)
+    restyle = _COLUMN_STYLES[style][1] if style is not None else None
 
     def format_cell(value: Any) -> str:
         if _is_null(value):
             return ""
+        text = fmt(value)
+        if restyle is not None:
+            text = restyle(text)
         # Escape the final text: query results are untrusted and must not inject HTML.
-        return html.escape(fmt(value))
+        return html.escape(text)
 
     return format_cell
 
@@ -207,7 +233,32 @@ def _pivot_totals(df: pd.DataFrame, view: pd.DataFrame) -> tuple[list[Any], Any]
     return columns, row if found else None
 
 
-def format_dataframe(df: pd.DataFrame, *, max_rows: int | None = DEFAULT_MAX_ROWS) -> Styler:
+def _check_column_styles(df: pd.DataFrame, column_styles: Any) -> dict[Any, str]:
+    """Validate ``column_styles`` names and columns; types are checked once they are known."""
+    if column_styles is None:
+        return {}
+    if not isinstance(column_styles, Mapping):
+        raise TypeError(
+            "column_styles must be a mapping of column name to style name, "
+            f"got {type(column_styles).__name__}."
+        )
+    for column, style in column_styles.items():
+        if column not in df.columns:
+            raise ValueError(f"column_styles names column {column!r}, which is not in df.")
+        if not isinstance(style, str) or style not in _COLUMN_STYLES:
+            valid = ", ".join(repr(name) for name in _COLUMN_STYLES)
+            raise ValueError(
+                f"Unknown style {style!r} for column {column!r}; valid styles: {valid}."
+            )
+    return dict(column_styles)
+
+
+def format_dataframe(
+    df: pd.DataFrame,
+    *,
+    max_rows: int | None = DEFAULT_MAX_ROWS,
+    column_styles: Mapping[Any, str] | None = None,
+) -> Styler:
     """Format a query result for display in a notebook.
 
     Values are shown the way Kusto returns them, by each column's KQL type: ``long`` and
@@ -230,40 +281,64 @@ def format_dataframe(df: pd.DataFrame, *, max_rows: int | None = DEFAULT_MAX_ROW
     sorting; the row is no longer marked once its index label changes (for example after
     ``reset_index``) or it is cut off by ``max_rows``.
 
+    ``column_styles`` applies an extra display style to named columns. The only style is
+    ``"readable_numbers"``, for numeric columns (``int``, ``long``, ``real``, ``decimal``): it
+    splits the integer part into groups of three digits with spaces, so ``1000000000.00000`` is
+    shown as ``1 000 000 000.00000``. The fraction is not grouped, and a ``real`` that Kusto
+    shows in exponent form (``1e+20``) is left as it is. A style is checked against the column's
+    KQL type (recorded or inferred), so it cannot be put on a column it does not fit.
+
     Args:
         df: The DataFrame to format, usually the result of :func:`exec_query`. It is not
             modified.
         max_rows: Show at most this many rows (default 1000), with a caption giving the total;
             ``None`` shows every row. Rendering very large tables can make a notebook slow.
+        column_styles: Optional mapping of column name to style name, for example
+            ``{"Bytes": "readable_numbers"}``. ``None`` (the default) styles no column.
 
     Returns:
         A pandas ``Styler``. Jupyter renders it as an HTML table when it is the last
         expression in a cell; chain further ``Styler`` methods on it if you like.
 
     Raises:
-        ValueError: ``max_rows`` is not a positive integer or ``None``.
+        ValueError: ``max_rows`` is not a positive integer or ``None``; or ``column_styles``
+            names a column that is not in ``df`` or a style that does not exist.
+        TypeError: ``column_styles`` is not a mapping, or a style is given for a column whose
+            KQL type it does not apply to (for example ``"readable_numbers"`` on a string).
 
     Example:
         >>> from security_notebook_tools import exec_query, format_dataframe
         >>> df = exec_query("SigninLogs | take 100")
         >>> format_dataframe(df)
         >>> format_dataframe(df, max_rows=None)  # every row
+        >>> format_dataframe(df, column_styles={"Bytes": "readable_numbers"})
     """
     if max_rows is not None and (
         isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
     ):
         raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
+    styles = _check_column_styles(df, column_styles)
     view = df if max_rows is None or len(df) <= max_rows else df.head(max_rows)
     recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
 
-    styler = view.style
-    numeric: list[Any] = []
+    kql_types: list[str] = []
     for position, name in enumerate(view.columns):
         kql_type = recorded.get(name)
         if not isinstance(kql_type, str):
             kql_type = _infer_type(view.iloc[:, position])
         kql_type = kql_type.lower()
-        styler = styler.format(_cell_formatter(kql_type), subset=[name])
+        style = styles.get(name)
+        if style is not None and kql_type not in _COLUMN_STYLES[style][0]:
+            raise TypeError(
+                f"Style {style!r} does not apply to column {name!r} of type {kql_type!r}; "
+                f"it needs one of: {', '.join(sorted(_COLUMN_STYLES[style][0]))}."
+            )
+        kql_types.append(kql_type)
+
+    styler = view.style
+    numeric: list[Any] = []
+    for name, kql_type in zip(view.columns, kql_types, strict=True):
+        styler = styler.format(_cell_formatter(kql_type, styles.get(name)), subset=[name])
         if kql_type in _NUMERIC_TYPES:
             numeric.append(name)
 

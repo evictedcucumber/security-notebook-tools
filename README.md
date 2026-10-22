@@ -246,12 +246,15 @@ SigninLogs | take 100
 
 `format_dataframe(df)` returns a styled table for a notebook cell. Values are shown the way
 Kusto returns them (by KQL type), nulls are blank, and it shows at most 1000 rows unless you
-pass `max_rows=None`.
+pass `max_rows=None`. `column_styles={"Bytes": "readable_numbers"}` groups the digits of a
+numeric column with spaces (`1 000 000 000.00000`); a style on a column of the wrong type raises
+`TypeError`.
 
 ```python
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # last expression in the cell renders the table
 format_dataframe(df, max_rows=None)  # every row
+format_dataframe(df, column_styles={"Bytes": "readable_numbers"})  # 1 000 000 000
 ```
 
 The full rules are in [docs/api.md](docs/api.md).

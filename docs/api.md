@@ -351,6 +351,7 @@ format_dataframe(
     df: pandas.DataFrame,
     *,
     max_rows: int | None = 1000,
+    column_styles: Mapping[str, str] | None = None,
 ) -> pandas.io.formats.style.Styler
 ```
 
@@ -377,12 +378,23 @@ not by name, so an ordinary row or column that is called or contains `Total` loo
 other. The marking survives filtering, sorting and selecting columns; the row loses it once its
 index label changes (for example after `reset_index`) or `max_rows` cuts it off.
 
+`column_styles` applies an extra display style to named columns. The only style is
+`"readable_numbers"`, for numeric columns (`int`, `long`, `real`, `decimal`): it splits the
+integer part into groups of three digits with spaces, so `1000000000.00000` is shown as
+`1 000 000 000.00000`. The fraction is not grouped, and a `real` shown in exponent form
+(`1e+20`) is left as it is. Each style is checked against the column's KQL type (recorded or
+inferred).
+
 | Name | Description |
 | --- | --- |
 | `df` | The DataFrame to format, usually the result of `exec_query`. |
 | `max_rows` | Show at most this many rows (default 1000), with a caption giving the total. `None` shows every row. Rendering very large tables can make a notebook slow. |
+| `column_styles` | Mapping of column name to style name, for example `{"Bytes": "readable_numbers"}`. `None` (default) styles no column. |
 
-`max_rows` is keyword-only. It raises `ValueError` if it is not a positive integer or `None`.
+`max_rows` and `column_styles` are keyword-only. `ValueError` is raised if `max_rows` is not a
+positive integer or `None`, or if `column_styles` names a column not in `df` or a style that does
+not exist. `TypeError` is raised if `column_styles` is not a mapping, or a style is given for a
+column whose type it does not fit (for example `"readable_numbers"` on a `string` column).
 
 ```python
 from security_notebook_tools import exec_query, format_dataframe
@@ -390,6 +402,7 @@ from security_notebook_tools import exec_query, format_dataframe
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # at most 1000 rows, with a caption
 format_dataframe(df, max_rows=None)  # every row
+format_dataframe(df, column_styles={"Bytes": "readable_numbers"})  # 1 000 000 000
 ```
 
 ## pivot_dataframe
