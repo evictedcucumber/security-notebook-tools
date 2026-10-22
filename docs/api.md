@@ -3,7 +3,7 @@
 The public API is exactly these names, importable from `security_notebook_tools`:
 
 ```python
-from security_notebook_tools import exec_query, enable_logging, disable_logging
+from security_notebook_tools import exec_query, format_dataframe, enable_logging, disable_logging
 import security_notebook_tools
 
 security_notebook_tools.__version__  # "2.0.0"
@@ -189,8 +189,9 @@ explicitly in that case.
 ### Returns
 
 The first result table as a `pandas.DataFrame`, or an empty DataFrame if the query returned no
-tables. Sentinel datetime columns are UTC-aware. If Sentinel returns only a partial result, a
-warning is logged and the data received is returned.
+tables. Sentinel datetime columns are UTC-aware. `df.attrs["kql_types"]` maps each column name
+to its lowercase KQL type (`"long"`, `"dynamic"` ...), which `format_dataframe` uses. If Sentinel
+returns only a partial result, a warning is logged and the data received is returned.
 
 ### Raises
 
@@ -217,6 +218,48 @@ df = exec_query("SigninLogs | take 100", timedelta(days=7))  # explicit range
 df = exec_query("SigninLogs | take 100", (datetime(2026, 10, 1), timedelta(hours=6)))
 df = exec_query("Events | take 100", target="adx", timeout=600)
 df = exec_query(".show tables", target="adx")  # management command
+```
+
+## format_dataframe
+
+```python
+format_dataframe(
+    df: pandas.DataFrame,
+    *,
+    max_rows: int | None = 1000,
+) -> pandas.io.formats.style.Styler
+```
+
+Format a query result for display in a notebook. Jupyter renders the returned `Styler` as an
+HTML table when it is the last expression in a cell. Values are shown the way Kusto returns
+them, by each column's KQL type from `df.attrs["kql_types"]` (set by `exec_query`):
+
+- `long` and `int` as integers, also when nulls made pandas store them as floats.
+- `real` as the shortest float that round-trips.
+- `bool` as `true` or `false`.
+- `datetime` as ISO 8601, with `Z` for UTC.
+- `timespan` as `[d.]hh:mm:ss[.fffffff]`.
+- `dynamic` as single-line JSON (a list stays a list, an object an object).
+
+Columns with no recorded type (for example ones you added) are typed from their dtype and
+values. Nulls are empty cells. Text is left-aligned and numbers (`int`, `long`, `real`,
+`decimal`) are right-aligned, headers included. Cells never wrap and columns have no maximum
+width, so wide tables scroll horizontally. All text is HTML-escaped and an unnamed index is
+hidden. The DataFrame is not modified.
+
+| Name | Description |
+| --- | --- |
+| `df` | The DataFrame to format, usually the result of `exec_query`. |
+| `max_rows` | Show at most this many rows (default 1000), with a caption giving the total. `None` shows every row. Rendering very large tables can make a notebook slow. |
+
+`max_rows` is keyword-only. It raises `ValueError` if it is not a positive integer or `None`.
+
+```python
+from security_notebook_tools import exec_query, format_dataframe
+
+df = exec_query("SigninLogs | take 100")
+format_dataframe(df)  # at most 1000 rows, with a caption
+format_dataframe(df, max_rows=None)  # every row
 ```
 
 ## enable_logging

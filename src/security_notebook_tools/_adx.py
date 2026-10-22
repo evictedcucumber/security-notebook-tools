@@ -22,10 +22,19 @@ from azure.kusto.data.helpers import dataframe_from_result_table
 from ._auth import get_credential
 from ._config import DATABASE_VAR, require, resolve_cluster_uri, resolve_database, validate_database
 from ._exceptions import ConfigurationError, QueryError
+from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import shorten, verbose_logging
 
 logger = logging.getLogger("security_notebook_tools.adx")
+
+
+def _table_to_df(table: Any) -> pd.DataFrame:
+    """Convert a primary result table, recording each column's KQL type in ``df.attrs``."""
+    df = dataframe_from_result_table(table)
+    df.attrs[KQL_TYPES_ATTR] = {c.column_name: str(c.column_type).lower() for c in table.columns}
+    return df
+
 
 Properties = dict[str, Any] | ClientRequestProperties | None
 
@@ -112,7 +121,7 @@ class ADXClient:
         except KustoServiceError as exc:
             logger.error("ADX %s failed: %s", kind, exc)
             raise QueryError(f"ADX {kind} failed: {exc}") from exc
-        dfs = [dataframe_from_result_table(t) for t in response.primary_results]
+        dfs = [_table_to_df(t) for t in response.primary_results]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",
             kind,

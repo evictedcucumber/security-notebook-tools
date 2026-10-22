@@ -145,3 +145,17 @@ def test_unverifiable_tiers_do_not_send(client):
     with pytest.raises(QueryError, match="Could not verify"):
         client.query("T")
     client._mock.query_workspace.assert_not_called()
+
+
+def test_table_to_df_records_kql_types():
+    from security_notebook_tools._sentinel import _table_to_df
+
+    table = LogsTable(
+        name="T",
+        columns=["A", "B", "C"],
+        columns_types=["Datetime", "LONG", "string"],
+        rows=[["2024-01-01T00:00:00Z", 1, "x"]],
+    )
+    df = _table_to_df(table)
+    assert df.attrs["kql_types"] == {"A": "datetime", "B": "long", "C": "string"}
+    assert df["A"].dt.tz is not None

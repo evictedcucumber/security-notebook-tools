@@ -152,8 +152,10 @@ def exec_query(
 
     Returns:
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
-        tables. Sentinel datetime columns are UTC-aware. If Sentinel returns only a partial
-        result, a warning is emitted and the data received is returned.
+        tables. Sentinel datetime columns are UTC-aware. ``df.attrs["kql_types"]`` maps each
+        column to its KQL type (``"long"``, ``"dynamic"`` ...), which ``format_dataframe`` uses.
+        If Sentinel returns only a partial result, a warning is emitted and the data received is
+        returned.
 
     Raises:
         ConfigurationError: ``timeout`` is not positive, ``target`` is unknown, ``timespan``

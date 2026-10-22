@@ -12,6 +12,15 @@
   into those three parts. They must still name the same workspace as `SENTINEL_WORKSPACE_ID`.
   Errors now name the specific variable that is missing or invalid.
 
+### Added
+
+- `format_dataframe(df, *, max_rows=1000)` returns a pandas `Styler` that shows a query result
+  the way Kusto returns it: values by KQL type, nulls blank, text left-aligned and numbers
+  right-aligned. It shows at most 1000 rows with a caption; `max_rows=None` shows all of them.
+- `exec_query` records each column's lowercase KQL type in `df.attrs["kql_types"]`, which
+  `format_dataframe` uses.
+- New runtime dependency `jinja2>=3.1`, which pandas' `Styler` needs.
+
 ### Docs
 
 - `docs/notebook-setup.md` has a "Find the values with the Azure CLI" section with a command per

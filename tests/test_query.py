@@ -12,6 +12,7 @@ PUBLIC = {
     "disable_logging",
     "enable_logging",
     "exec_query",
+    "format_dataframe",
 }
 
 

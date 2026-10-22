@@ -1,5 +1,6 @@
 from unittest import mock
 
+import pandas as pd
 import pytest
 from azure.kusto.data import ClientRequestProperties
 from azure.kusto.data.exceptions import KustoServiceError
@@ -13,7 +14,7 @@ def patched():
     with (
         mock.patch("security_notebook_tools._adx.KustoClient") as kc,
         mock.patch("security_notebook_tools._adx.KustoConnectionStringBuilder") as kcsb,
-        mock.patch("security_notebook_tools._adx.dataframe_from_result_table") as conv,
+        mock.patch("security_notebook_tools._adx._table_to_df") as conv,
     ):
         yield kc.return_value, kcsb, conv
 
@@ -238,3 +239,19 @@ def test_show_with_escape_hatch_text_in_a_string_is_allowed(patched):
     client.execute_mgmt.return_value.primary_results = []
     c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
     assert c.show(".show tables | where TableName == 'cluster(x)'").empty
+
+
+def test_table_to_df_records_kql_types():
+    from security_notebook_tools._adx import _table_to_df
+
+    table = mock.Mock()
+    table.columns = [
+        mock.Mock(column_name="A", column_type="Long"),
+        mock.Mock(column_name="B", column_type="DateTime"),
+    ]
+    frame = pd.DataFrame({"A": [1], "B": ["x"]})
+    with mock.patch("security_notebook_tools._adx.dataframe_from_result_table") as conv:
+        conv.return_value = frame
+        df = _table_to_df(table)
+    conv.assert_called_once_with(table)
+    assert df.attrs["kql_types"] == {"A": "long", "B": "datetime"}

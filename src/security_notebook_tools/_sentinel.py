@@ -18,6 +18,7 @@ from azure.monitor.query import LogsQueryClient, LogsQueryStatus, LogsTable
 from ._auth import get_credential
 from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_resource_id
 from ._exceptions import PartialResultError, QueryError
+from ._format import KQL_TYPES_ATTR
 from ._log import shorten, verbose_logging
 from ._tablepolicy import check_sentinel_query, get_policy
 from ._timerange import Timespan
@@ -26,11 +27,17 @@ logger = logging.getLogger("security_notebook_tools.sentinel")
 
 
 def _table_to_df(table: LogsTable) -> pd.DataFrame:
-    """Convert a result table to a DataFrame, parsing datetime columns as UTC."""
+    """Convert a result table to a DataFrame, parsing datetime columns as UTC.
+
+    Each column's KQL type is recorded in ``df.attrs["kql_types"]`` for :func:`format_dataframe`.
+    """
     df = pd.DataFrame([list(row) for row in table.rows], columns=list(table.columns))
+    kql_types = {}
     for name, typ in zip(table.columns, table.columns_types, strict=False):
-        if str(typ).lower() == "datetime":
+        kql_types[name] = str(typ).lower()
+        if kql_types[name] == "datetime":
             df[name] = pd.to_datetime(df[name], utc=True)
+    df.attrs[KQL_TYPES_ATTR] = kql_types
     return df
 
 

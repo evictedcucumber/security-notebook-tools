@@ -45,10 +45,15 @@ See [docs/notebook-setup.md](docs/notebook-setup.md) for kernel and VS Code setu
 
 ## Import and quick start
 
-The public API is three names, all importable from the top-level package:
+The public API is four names, all importable from the top-level package:
 
 ```python
-from security_notebook_tools import exec_query, enable_logging, disable_logging
+from security_notebook_tools import (
+    exec_query,
+    format_dataframe,
+    enable_logging,
+    disable_logging,
+)
 ```
 
 Submodules (`security_notebook_tools._query` and so on) are private; do not import from them.
@@ -141,6 +146,20 @@ explicitly in that case. The exact rules are in [docs/api.md](docs/api.md).
 ```python
 df = exec_query("SigninLogs | summarize count() by UserPrincipalName", timeout=600)
 ```
+
+### Display
+
+`format_dataframe(df)` returns a styled table for a notebook cell. Values are shown the way
+Kusto returns them (by KQL type), nulls are blank, and it shows at most 1000 rows unless you
+pass `max_rows=None`.
+
+```python
+df = exec_query("SigninLogs | take 100")
+format_dataframe(df)  # last expression in the cell renders the table
+format_dataframe(df, max_rows=None)  # every row
+```
+
+The full rules are in [docs/api.md](docs/api.md).
 
 ## Logging
 

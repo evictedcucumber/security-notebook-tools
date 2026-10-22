@@ -1,4 +1,3 @@
-import html as htmllib
 import math
 import re
 from datetime import UTC, datetime, timedelta
@@ -17,7 +16,7 @@ def _typed(values, kql_type, name="c"):
 
 def _cells(df, **kwargs):
     html = format_dataframe(df, **kwargs).to_html()
-    return [htmllib.unescape(m) if False else m for m in re.findall(r"<td[^>]*>(.*?)</td>", html)]
+    return re.findall(r"<td[^>]*>(.*?)</td>", html)
 
 
 @pytest.mark.parametrize(
@@ -153,10 +152,13 @@ def test_non_numeric_types_not_right_aligned(kql_type):
     assert not re.search(r"col0[^{]*\{[^}]*right", html)
 
 
-def test_nowrap_and_left_alignment():
+@pytest.mark.parametrize("tag", ["th", "td"])
+def test_nowrap_and_left_alignment(tag):
     html = format_dataframe(_typed(["x"], "string")).to_html()
-    assert re.search(r"th,\s*td\s*\{[^}]*white-space:\s*nowrap", html)
-    assert re.search(r"th,\s*td\s*\{[^}]*text-align:\s*left", html)
+    match = re.search(rf"#T_\w+\s+{tag} \{{([^}}]*)\}}", html)
+    assert match
+    assert "white-space: nowrap" in match.group(1)
+    assert "text-align: left" in match.group(1)
 
 
 def test_unnamed_index_hidden():
@@ -223,15 +225,23 @@ def test_inference_fallback():
             "i": [1, 2],
             "f": [1.5, 2.0],
             "b": [True, False],
-            "d": pd.to_datetime(["2024-01-01T00:00:00", "2024-01-01T00:00:01.5"]),
-            "t": pd.to_timedelta(["1h", "2d"]),
+            "d": pd.to_datetime(["2024-01-01T00:00:00.0", "2024-01-01T00:00:01.5"]),
+            "t": pd.to_timedelta(["1h", "2D"]),
             "o": [{"a": 1}, [1, 2]],
             "s": ["x", "y"],
         }
     )
     cells = _cells(df)
     rows = [cells[i : i + 7] for i in range(0, 14, 7)]
-    assert rows[0] == ["1", "1.5", "true", "2024-01-01T00:00:00", "01:00:00", "{&quot;a&quot;: 1}", "x"]
+    assert rows[0] == [
+        "1",
+        "1.5",
+        "true",
+        "2024-01-01T00:00:00",
+        "01:00:00",
+        "{&quot;a&quot;: 1}",
+        "x",
+    ]
     assert rows[1] == ["2", "2.0", "false", "2024-01-01T00:00:01.5", "2.00:00:00", "[1, 2]", "y"]
 
 

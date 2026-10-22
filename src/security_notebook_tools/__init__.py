@@ -20,11 +20,13 @@ Connection settings are validated and invalid ones raise an error.
 Public API:
 
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
+* ``format_dataframe``: display a result with values formatted by their KQL type.
 * ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
+from ._format import format_dataframe
 from ._log import disable_logging, enable_logging
 from ._query import exec_query
 
@@ -34,6 +36,7 @@ __all__ = [
     "disable_logging",
     "enable_logging",
     "exec_query",
+    "format_dataframe",
 ]
 
 
