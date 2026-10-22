@@ -3,6 +3,7 @@ from unittest import mock
 import pytest
 
 from security_notebook_tools import _auth as auth
+from security_notebook_tools._exceptions import ConfigurationError
 
 
 @pytest.fixture(autouse=True)
@@ -36,3 +37,22 @@ def test_tenant_from_env(monkeypatch):
         auth.get_credential(tenant_id="arg-tenant")
     m.assert_any_call(tenant_id="env-tenant")
     m.assert_any_call(tenant_id="arg-tenant")
+
+
+@pytest.mark.parametrize("tenant", ["a b", "t/../x", "https://x", "t;id", "-", "a..b", "é"])
+def test_invalid_tenant(tenant):
+    with mock.patch.object(auth, "AzureCliCredential") as m, pytest.raises(ConfigurationError):
+        auth.get_credential(tenant_id=tenant)
+    m.assert_not_called()
+
+
+def test_invalid_tenant_from_env(monkeypatch):
+    monkeypatch.setenv("AZURE_TENANT_ID", "bad tenant")
+    with pytest.raises(ConfigurationError, match="AZURE_TENANT_ID"):
+        auth.get_credential()
+
+
+def test_valid_tenants():
+    with mock.patch.object(auth, "AzureCliCredential"):
+        auth.get_credential(tenant_id="11111111-1111-1111-1111-111111111111")
+        auth.get_credential(tenant_id="contoso.onmicrosoft.com")

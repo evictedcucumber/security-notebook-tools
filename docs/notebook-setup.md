@@ -8,8 +8,15 @@ developing this repository itself, see the README and `.vscode/` in the repo.
 ```sh
 uv init my-sec-notebooks
 cd my-sec-notebooks
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v1.0.0
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v2.0.0
 uv add --dev ipykernel
+```
+
+For sensitive environments, pin to a full commit SHA instead of a tag (tags can be moved) and
+install with `uv sync --locked`:
+
+```sh
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
 ```
 
 The project needs Python 3.14 or newer. Other install options (latest main, editable local
@@ -38,14 +45,24 @@ Then select "Security notebooks" in the kernel picker. Without adding the depend
 az login
 ```
 
-The package reads `SENTINEL_WORKSPACE_ID`, `ADX_CLUSTER_URI`, `ADX_DATABASE` and optionally
-`AZURE_TENANT_ID` on every call.
+The package reads `SENTINEL_WORKSPACE_ID`, `SENTINEL_WORKSPACE_RESOURCE_ID`, `ADX_CLUSTER_URI`,
+`ADX_DATABASE` and optionally `AZURE_TENANT_ID` on every call.
+
+`SENTINEL_WORKSPACE_RESOURCE_ID` is the workspace's ARM resource ID
+(`/subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>`;
+in the portal: the workspace's Properties page, "Resource ID"). Sentinel queries use it to read
+the workspace's table plans and saved functions, so that only Analytics-plan tables are ever
+queried (Basic, Auxiliary and data lake tables bill per GB scanned). Your identity needs
+`Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read` on the
+workspace (Log Analytics Reader includes both). If the plans cannot be read, queries are not
+sent. See the README's Cost guard section for what is rejected.
 
 **Option A: `.env` file.** Create `.env` in the project root (add it to `.gitignore`):
 
 ```sh
 AZURE_TENANT_ID=
 SENTINEL_WORKSPACE_ID=<workspace-id>
+SENTINEL_WORKSPACE_RESOURCE_ID=/subscriptions/<subscription-id>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>
 ADX_CLUSTER_URI=https://<cluster>.<region>.kusto.windows.net
 ADX_DATABASE=<database>
 ```
@@ -59,6 +76,7 @@ Restart the kernel after editing `.env`. Jupyter outside VS Code does not read i
 import os
 
 os.environ["SENTINEL_WORKSPACE_ID"] = "<workspace-id>"
+os.environ["SENTINEL_WORKSPACE_RESOURCE_ID"] = "<workspace-resource-id>"
 ```
 
 Variables are read per call, so changing them takes effect on the next query.
@@ -71,6 +89,9 @@ from security_notebook_tools import exec_query
 df = exec_query("SigninLogs | take 100")
 df.head()
 ```
+
+A query that reads a non-Analytics table (or uses `search`, `union *`, saved functions and so on)
+raises an error naming the reason and is not sent.
 
 Add `verbose=True` or call `enable_logging()` to see what is being run.
 

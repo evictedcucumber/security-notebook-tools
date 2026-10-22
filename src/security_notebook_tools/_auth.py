@@ -10,7 +10,7 @@ from typing import Any
 
 from azure.identity import AzureCliCredential
 
-from ._config import TENANT_ID_VAR, from_env
+from ._config import resolve_tenant_id
 from ._log import verbose_logging
 
 logger = logging.getLogger("security_notebook_tools.auth")
@@ -35,9 +35,12 @@ def get_credential(
 
     Returns:
         The cached credential for the tenant.
+
+    Raises:
+        ConfigurationError: The tenant is not a GUID or domain name.
     """
     with verbose_logging(verbose):
-        tenant_id = from_env(tenant_id, TENANT_ID_VAR)
+        tenant_id = resolve_tenant_id(tenant_id)
         tenant_desc = tenant_id or "CLI default tenant"
         if tenant_id not in _cache:
             logger.info("Creating AzureCliCredential (%s)", tenant_desc)

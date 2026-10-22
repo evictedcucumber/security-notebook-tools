@@ -6,6 +6,7 @@ import pytest
 from security_notebook_tools import disable_logging, enable_logging
 from security_notebook_tools._log import _NotebookHandler, logger, shorten, verbose_logging
 from security_notebook_tools._sentinel import SentinelClient
+from security_notebook_tools._tablepolicy import TablePolicy
 
 
 @pytest.fixture(autouse=True)
@@ -61,10 +62,23 @@ def test_enable_logging_persists(capsys):
 
 
 def test_client_verbose_default_and_override(capsys):
-    with mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as m:
+    policy = TablePolicy("11111111-1111-1111-1111-111111111111", {"t": ("T", "Analytics")})
+    rid = (
+        "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/rg"
+        "/providers/Microsoft.OperationalInsights/workspaces/sentinel-ws"
+    )
+    with (
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as m,
+        mock.patch("security_notebook_tools._sentinel.get_policy", return_value=policy),
+    ):
         m.return_value.query_workspace.side_effect = RuntimeError("stop")
-        client = SentinelClient("ws", credential=mock.Mock(), verbose=True)
-        assert "workspace ws" in capsys.readouterr().out
+        client = SentinelClient(
+            "11111111-1111-1111-1111-111111111111",
+            credential=mock.Mock(),
+            resource_id=rid,
+            verbose=True,
+        )
+        assert "workspace 11111111-1111-1111-1111-111111111111" in capsys.readouterr().out
         with pytest.raises(RuntimeError):
             client.query("T", verbose=False)
         assert capsys.readouterr().out == ""

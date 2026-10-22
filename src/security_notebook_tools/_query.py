@@ -16,12 +16,13 @@ from azure.kusto.data import ClientRequestProperties
 from ._adx import ADXClient
 from ._auth import get_credential
 from ._config import (
-    CLUSTER_URI_VAR,
     DATABASE_VAR,
-    TENANT_ID_VAR,
-    WORKSPACE_ID_VAR,
-    from_env,
     require,
+    resolve_cluster_uri,
+    resolve_tenant_id,
+    resolve_workspace_id,
+    resolve_workspace_resource_id,
+    validate_database,
 )
 from ._exceptions import ConfigurationError
 from ._log import verbose_logging
@@ -33,9 +34,11 @@ DEFAULT_TIMEOUT = 300
 
 
 @cache
-def _sentinel_client(workspace_id: str, tenant_id: str | None) -> SentinelClient:
-    """Return the cached Sentinel client for this workspace and tenant."""
-    return SentinelClient(workspace_id, get_credential(tenant_id))
+def _sentinel_client(workspace_id: str, resource_id: str, tenant_id: str | None) -> SentinelClient:
+    """Return the cached Sentinel client for this workspace, resource ID and tenant."""
+    return SentinelClient(
+        workspace_id, get_credential(tenant_id), resource_id=resource_id, tenant_id=tenant_id
+    )
 
 
 @cache
@@ -64,9 +67,52 @@ def exec_query(
     Authentication uses the Azure CLI, so run ``az login`` first. Connection details come from
     environment variables, read on every call:
 
-    * Sentinel: ``SENTINEL_WORKSPACE_ID``.
+    * Sentinel: ``SENTINEL_WORKSPACE_ID`` and ``SENTINEL_WORKSPACE_RESOURCE_ID`` (the
+      workspace's ARM resource ID, ``/subscriptions/<GUID>/resourceGroups/<group>/providers/
+      Microsoft.OperationalInsights/workspaces/<name>``; used by the cost guard below).
     * ADX: ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``.
     * Both: ``AZURE_TENANT_ID`` (optional; defaults to the Azure CLI's current tenant).
+
+    Cost guard (Sentinel only): Basic, Auxiliary and Sentinel data lake tables bill per GB
+    scanned, so a query may only read tables on the Log Analytics Analytics plan (this includes
+    Defender XDR tables streamed into the workspace). Before each query the table plans and
+    saved functions of the workspace are read from Azure Resource Manager (cached for 5
+    minutes; needs ``tables/read`` and ``savedSearches/read``, e.g. Log Analytics Reader) and
+    the KQL is checked client-side; a query that fails the check is never sent. Rejected:
+
+    * Any table that is not on the Analytics plan, wherever its name appears, and unknown names.
+      Table names are case-sensitive: ``signinlogs`` is rejected, use ``SigninLogs``.
+    * Every tabular source (start of a statement, ``let`` value, ``union``/``join``/``lookup``
+      operand, subquery, ``materialize()``/``toscalar()``/``view()`` argument) must be a
+      ``let``-bound name or an Analytics table.
+    * Any call to a function that is not a built-in KQL scalar, aggregate or window function
+      and not defined with ``let f = (...) { ... }`` in the query. This includes saved
+      functions and parsers, the built-in Sentinel parsers (``_Im_*``, ``_ASim_*``) and
+      ``_GetWatchlist()``.
+    * Any operator after a pipe that is not a known tabular operator (``where``, ``project``,
+      ``extend``, ``summarize``, ``top``, ``sort``, ``join``, ``union``, ``mv-expand``,
+      ``parse``, ``make-series``, ``render``, ``partition``, ``fork``, ``graph-match`` ...; for
+      example ``graph-merge`` and ``macro-expand`` are rejected). The tabular operands of
+      ``join``, ``lookup``, ``union``, ``invoke``, ``make-graph``, ``fork``, ``facet``,
+      ``partition`` and ``mv-apply`` are checked like any other source.
+    * ``search``, ``find``, ``union`` with a wildcard, ``table()``, ``workspace()``, ``app()``,
+      ``resource()``, ``adx()``, ``arg()`` (other than the form above), ``cluster()``,
+      ``database()``, ``external_table()``, ``externaldata``, calls through escaped names, and
+      ``evaluate`` plugins that read external data or run code (``sql_request``,
+      ``http_request``, ``python`` ...). Ordinary plugins such as ``bag_unpack`` are fine.
+    * KQL it cannot analyse with certainty (unterminated strings, control characters,
+      non-ASCII outside strings and comments, unbalanced brackets).
+
+    Azure Resource Graph is allowed (it is free and read-only): ``arg("").<table>`` with an
+    empty plain string and one of the documented ARG tables (``Resources``,
+    ``ResourceContainers``, ``SecurityResources`` ...; case-insensitive) is a valid table
+    source. It is an Azure Monitor Preview feature capped at 1,000 rows, and a ``join`` with a
+    Log Analytics table needs ``hint.remote=left`` or ``hint.remote=right``. Any other
+    ``arg()`` form is rejected.
+
+    If the table plans cannot be read, the query is not sent (it fails closed). The check is a
+    conservative text analysis (it may reject unusual but harmless KQL) and is a guard, not a
+    guarantee: use an identity limited to Analytics tables for a server-enforced limit.
 
     Time range (Sentinel only) works like the Log Analytics portal's time picker:
 
@@ -87,7 +133,14 @@ def exec_query(
 
     Args:
         kql: The KQL query. With ``target="adx"``, text starting with ``.`` (after leading
-            whitespace) is run as a management command such as ``.show tables``.
+            whitespace) is run as a management command, but only ``.show`` commands (such as
+            ``.show tables``, case-insensitive) are allowed; any other command raises
+            ``ConfigurationError`` without contacting the service. Every ADX request is sent
+            read-only (``request_readonly``), so the server also refuses writes. ADX text
+            using ``cluster()``, ``external_table()``, ``externaldata`` or a data-reading
+            ``evaluate`` plugin is rejected too, and the cluster URI may not be the Sentinel
+            data lake or the Log Analytics proxy. With ``target="sentinel"`` the query must
+            pass the cost guard above.
         timespan: Sentinel only. A ``timedelta`` (the period ending now), a
             ``(start, end)`` tuple of datetimes, or a ``(start, timedelta)`` tuple. See the
             time range rules above. Passing it with ``target="adx"`` raises an error; filter
@@ -104,9 +157,16 @@ def exec_query(
 
     Raises:
         ConfigurationError: ``timeout`` is not positive, ``target`` is unknown, ``timespan``
-            is combined with ``target="adx"``, or a required environment variable is unset.
-            It is also a ``ValueError``.
-        QueryError: The service rejected or failed the query (bad KQL, authorisation, ...).
+            is combined with ``target="adx"``, a required environment variable is unset or
+            invalid (workspace ID not a GUID, workspace resource ID not an
+            ``/subscriptions/.../workspaces/<name>`` ID, tenant not a GUID or domain name,
+            cluster URI not a plain ``https://host`` URI on a Kusto cluster domain, blank
+            database), the workspace ID and resource ID name different workspaces, an ADX
+            management command is not ``.show``, ADX KQL uses ``cluster()``,
+            ``external_table()``, ``externaldata`` or a data-reading plugin, or the Sentinel
+            cost guard rejects the query. It is also a ``ValueError``.
+        QueryError: The service rejected or failed the query (bad KQL, authorisation, ...), or
+            the Sentinel table plans could not be verified (the query was then not sent).
 
     Example:
         >>> from datetime import timedelta
@@ -120,9 +180,11 @@ def exec_query(
     if timeout <= 0:
         raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
     with verbose_logging(verbose):
-        tenant_id = from_env(None, TENANT_ID_VAR)
+        tenant_id = resolve_tenant_id()
         if target == "sentinel":
-            client = _sentinel_client(require(None, WORKSPACE_ID_VAR, "workspace_id"), tenant_id)
+            client = _sentinel_client(
+                resolve_workspace_id(), resolve_workspace_resource_id(), tenant_id
+            )
             tables = client.query_tables(
                 kql, resolve_timespan(kql, timespan), server_timeout=timeout
             )
@@ -131,8 +193,8 @@ def exec_query(
                 raise ConfigurationError(
                     "timespan only applies to Sentinel; filter on time in the KQL for ADX."
                 )
-            client = _adx_client(require(None, CLUSTER_URI_VAR, "cluster_uri"), tenant_id)
-            database = require(None, DATABASE_VAR, "database")
+            client = _adx_client(resolve_cluster_uri(), tenant_id)
+            database = validate_database(require(None, DATABASE_VAR, "database"))
             props = ClientRequestProperties()
             props.set_option(
                 ClientRequestProperties.request_timeout_option_name, timedelta(seconds=timeout)

@@ -11,7 +11,11 @@ Version 1.0.0. MIT licence.
 ## Layout
 
 - `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_log.py`,
-  `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`, `_exceptions.py`).
+  `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`, `_exceptions.py`,
+  `_kql.py`, `_tablepolicy.py`).
+- `_kql.py` (tokenizer) and `_tablepolicy.py` (ARM table-plan check) are the cost guard: Sentinel
+  queries may only read Analytics-plan tables. They fail closed; treat any loosening as a
+  security change and add a regression test for every bypass.
 - Public API is only what `__init__.py` lists in `__all__`: `exec_query`, `enable_logging`,
   `disable_logging` (plus `__version__`). `tests/test_query.py::test_public_surface` pins it;
   changing the API means updating that test deliberately.
