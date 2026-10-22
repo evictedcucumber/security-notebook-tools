@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from pandas.io.formats.style import Styler
 
 KQL_TYPES_ATTR = "kql_types"
+PIVOT_TOTALS_ATTR = "pivot_totals"
+_TOTAL_LABEL = "Total"
 DEFAULT_MAX_ROWS = 1000
 
 _INTEGER_TYPES = {"int", "int32", "int64", "long"}
@@ -42,6 +44,8 @@ _TABLE_STYLES = [
     {"selector": "tbody tr:hover", "props": "background: rgba(127, 127, 127, 0.18);"},
     {"selector": "caption", "props": "caption-side: top; text-align: left; padding: 4px 0;"},
 ]
+_TOTAL_COLUMN_CSS = "font-weight: 600; border-left: 2px solid;"
+_TOTAL_ROW_CSS = "font-weight: 600; border-top: 2px solid; background: rgba(127, 127, 127, 0.14);"
 
 
 def _is_null(value: Any) -> bool:
@@ -176,6 +180,33 @@ def _cell_formatter(kql_type: str) -> Callable[[Any], str]:
     return format_cell
 
 
+def _pivot_totals(df: pd.DataFrame, view: pd.DataFrame) -> tuple[list[Any], Any]:
+    """Return the total columns and total row label of ``view`` recorded by ``pivot_dataframe``.
+
+    Only what ``df.attrs["pivot_totals"]`` names is returned, never a row or column just because
+    it holds ``"Total"``. Columns no longer in ``view`` are dropped, and the row only counts if its
+    label is in ``view`` once and its ``label_column`` still reads ``"Total"`` (so a stale label
+    left by, say, ``reset_index`` is ignored). The row is ``None`` when there is none.
+    """
+    meta = df.attrs.get(PIVOT_TOTALS_ATTR)
+    if not isinstance(meta, dict):
+        return [], None
+    columns = meta.get("columns")
+    columns = [c for c in columns if c in view.columns] if isinstance(columns, list) else []
+    row, label_column = meta.get("row"), meta.get("label_column")
+    try:
+        found = (
+            row is not None
+            and label_column in view.columns
+            and view.columns.is_unique
+            and (view.index == row).sum() == 1
+            and view.at[row, label_column] == _TOTAL_LABEL
+        )
+    except TypeError, ValueError:
+        found = False
+    return columns, row if found else None
+
+
 def format_dataframe(df: pd.DataFrame, *, max_rows: int | None = DEFAULT_MAX_ROWS) -> Styler:
     """Format a query result for display in a notebook.
 
@@ -191,6 +222,13 @@ def format_dataframe(df: pd.DataFrame, *, max_rows: int | None = DEFAULT_MAX_ROW
     Text is left-aligned and numbers (``int``, ``long``, ``real``, ``decimal``) right-aligned,
     headers included. Cells never wrap and columns have no maximum width; wide tables scroll
     horizontally. All text is HTML-escaped. An unnamed index is hidden.
+
+    The total row and columns of a :func:`pivot_dataframe` result with ``totals=True`` are shown
+    bold and set off by a rule (and the row by a shaded background). They are found from
+    ``df.attrs["pivot_totals"]``, not by name, so an ordinary row or column that happens to be
+    called or contain ``"Total"`` is formatted like any other. The marking survives filtering and
+    sorting; the row is no longer marked once its index label changes (for example after
+    ``reset_index``) or it is cut off by ``max_rows``.
 
     Args:
         df: The DataFrame to format, usually the result of :func:`exec_query`. It is not
@@ -236,6 +274,19 @@ def format_dataframe(df: pd.DataFrame, *, max_rows: int | None = DEFAULT_MAX_ROW
         },
         overwrite=False,
     )
+    total_columns, total_row = _pivot_totals(df, view)
+    if total_columns:
+        styler = styler.set_table_styles(
+            {
+                name: [{"selector": sel, "props": _TOTAL_COLUMN_CSS} for sel in ("th", "td")]
+                for name in total_columns
+            },
+            overwrite=False,
+        )
+    if total_row is not None:
+        styler = styler.set_table_styles(
+            {total_row: [{"selector": "td", "props": _TOTAL_ROW_CSS}]}, axis=1, overwrite=False
+        )
     if all(name is None for name in df.index.names):
         styler = styler.hide(axis="index")
     if len(view) < len(df):

@@ -261,8 +261,9 @@ The full rules are in [docs/api.md](docs/api.md).
 `pivot_dataframe(df, index, columns)` counts rows per combination (for example sign-ins per user
 and `ResultType`); add `values` and `agg_func` to aggregate a column instead. The result is a flat
 DataFrame that goes straight into `format_dataframe`. Null keys are kept as their own row or
-column (`(null)`), `totals=True` adds a `Total` row and column, and `max_columns` (default 100)
-stops a high-cardinality `columns` key from building a huge table.
+column (`(null)`), `totals=True` adds a `Total` row and column (which `format_dataframe` shows in
+bold, set off from the rest), and `max_columns` (default 100) stops a high-cardinality `columns`
+key from building a huge table.
 
 ```python
 df = exec_query("SigninLogs | project UserPrincipalName, ResultType, Duration")

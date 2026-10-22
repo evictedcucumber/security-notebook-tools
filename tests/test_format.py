@@ -5,7 +5,8 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
-from security_notebook_tools._format import KQL_TYPES_ATTR, format_dataframe
+from security_notebook_tools import pivot_dataframe
+from security_notebook_tools._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR, format_dataframe
 
 
 def _typed(values, kql_type, name="c"):
@@ -294,3 +295,59 @@ def test_returns_styler():
     from pandas.io.formats.style import Styler
 
     assert isinstance(format_dataframe(pd.DataFrame({"a": [1]})), Styler)
+
+
+def _total_selectors(html):
+    """Return the ``(selector, border side)`` pairs that carry the pivot-totals styling."""
+    return set(re.findall(r"(\S+) \{\s*font-weight: 600;\s*border-(left|top)", html))
+
+
+@pytest.fixture
+def pivoted():
+    # The user literally named "Total" must not be styled as the totals row.
+    df = pd.DataFrame({"User": ["a", "Total", "b", "a"], "R": ["x", "y", "z", "x"]})
+    return pivot_dataframe(df, "User", "R", totals=True)
+
+
+def test_pivot_totals_styled(pivoted):
+    assert list(pivoted["User"]) == ["Total", "a", "b", "Total"]
+    html = format_dataframe(pivoted).to_html()
+    assert _total_selectors(html) == {("th.col4", "left"), ("td.col4", "left"), ("td.row3", "top")}
+
+
+def test_total_named_column_and_row_without_metadata_not_styled():
+    df = pd.DataFrame({"User": ["a", "Total"], "Total": [1, 2]})
+    assert _total_selectors(format_dataframe(df).to_html()) == set()
+
+
+def test_pivot_totals_follow_sorting_and_column_selection(pivoted):
+    html = format_dataframe(pivoted.sort_values("Total", ascending=False)).to_html()
+    assert ("td.row0", "top") in _total_selectors(html)
+    assert _total_selectors(format_dataframe(pivoted[["User", "x"]]).to_html()) == {
+        ("td.row3", "top")
+    }
+
+
+def test_pivot_totals_row_dropped_or_relabelled(pivoted):
+    assert ("td.row3", "top") not in _total_selectors(format_dataframe(pivoted.iloc[:3]).to_html())
+    assert ("td.row3", "top") not in _total_selectors(
+        format_dataframe(pivoted, max_rows=2).to_html()
+    )
+    moved = pivoted.sort_values("Total", ascending=False).reset_index(drop=True)
+    # Label 3 now holds an ordinary row, so nothing is marked as the total row.
+    assert not any(side == "top" for _, side in _total_selectors(format_dataframe(moved).to_html()))
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        "junk",
+        {"columns": "Total", "row": "x", "label_column": "missing"},
+        {"columns": ["nope"], "row": 99, "label_column": "User"},
+        {"columns": None, "row": [1, 2], "label_column": ["User"]},
+    ],
+)
+def test_malformed_pivot_totals_ignored(meta):
+    df = pd.DataFrame({"User": ["a", "Total"], "Total": [1, 2]})
+    df.attrs[PIVOT_TOTALS_ATTR] = meta
+    assert _total_selectors(format_dataframe(df).to_html()) == set()

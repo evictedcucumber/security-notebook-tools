@@ -371,6 +371,12 @@ values. Nulls are empty cells. Text is left-aligned and numbers (`int`, `long`, 
 width, so wide tables scroll horizontally. All text is HTML-escaped and an unnamed index is
 hidden. The DataFrame is not modified.
 
+The `Total` row and columns of a `pivot_dataframe(..., totals=True)` result are bold and set off
+by a rule, the row also by a shaded background. They are found from `df.attrs["pivot_totals"]`,
+not by name, so an ordinary row or column that is called or contains `Total` looks like any
+other. The marking survives filtering, sorting and selecting columns; the row loses it once its
+index label changes (for example after `reset_index`) or `max_rows` cuts it off.
+
 | Name | Description |
 | --- | --- |
 | `df` | The DataFrame to format, usually the result of `exec_query`. |
@@ -415,7 +421,10 @@ for a null key, several `columns` joined with `_`, and prefixed `<value>_` when 
 `kql_types` carry the `index` columns' original types and the cells' aggregated type (`count` and
 `nunique` are `long`, `mean`, `median`, `std` and `var` are `real`, `sum`, `min`, `max`, `first`
 and `last` keep the value's type, and a callable is left untyped), so it goes straight into
-`format_dataframe`. `df` is not modified, and a `df` with no rows gives just the `index` columns
+`format_dataframe`. With `totals=True`, `df.attrs["pivot_totals"]` records the total columns, the
+total row's index label (`None` if there are no rows) and the column holding its `Total` label,
+as `{"columns": [...], "row": ..., "label_column": ...}`; `format_dataframe` uses it to make the
+totals stand out. `df` is not modified, and a `df` with no rows gives just the `index` columns
 (and `Total` if requested).
 
 | Name | Description |

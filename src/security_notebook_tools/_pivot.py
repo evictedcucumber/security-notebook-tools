@@ -9,7 +9,7 @@ import pandas as pd
 
 from ._batch import _DEFAULT_AGG, _agg_type, _names
 from ._exceptions import ConfigurationError
-from ._format import KQL_TYPES_ATTR
+from ._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR
 
 _NULL_LABEL = "(null)"
 _TOTAL = "Total"
@@ -43,7 +43,10 @@ def pivot_dataframe(
     of the ``index`` columns and the aggregated type of the cells (``count``/``nunique`` are
     ``long``, ``mean``/``median``/``std``/``var`` are ``real``, ``sum``/``min``/``max``/``first``/
     ``last`` keep the value's type; unknown for a callable), so it goes straight into
-    ``format_dataframe``. ``df`` is not modified.
+    ``format_dataframe``. With ``totals`` its ``pivot_totals`` attr records which column(s) and
+    row are totals (``{"columns": [...], "row": <index label or None>, "label_column": <first
+    index column>}``), so ``format_dataframe`` sets them apart from rows or columns that merely
+    hold the text ``"Total"``. ``df`` is not modified.
 
     Args:
         df: The DataFrame to pivot, usually the result of ``exec_query``.
@@ -123,13 +126,15 @@ def pivot_dataframe(
     def total_name(value: str | None) -> str:
         return f"{value}_{_TOTAL}" if prefixed else _TOTAL
 
+    total_columns = [total_name(v) for v in cell_names] if totals else []
+
     if df.empty:
         out = df[idx].reset_index(drop=True)
         if totals:
             for value in cell_names:
                 out[total_name(value)] = pd.Series(dtype="int64" if vals is None else "float64")
-        pairs = [(total_name(v), v) for v in cell_names] if totals else []
-        return _finish(out, idx, pairs, old, agg_func)
+        pairs = list(zip(total_columns, cell_names, strict=False))
+        return _finish(out, idx, pairs, old, agg_func, total_columns)
 
     work = df[named].copy()
     work[_ALL] = 0
@@ -146,7 +151,7 @@ def pivot_dataframe(
         )
     headers = {(v, k): header(v, k) for v in cell_names for k in keys}
     pairs = [(h, v) for (v, _), h in headers.items()]
-    pairs += [(total_name(v), v) for v in cell_names] if totals else []
+    pairs += list(zip(total_columns, cell_names, strict=False))
     generated = [name for name, _ in pairs]
     clash = sorted({h for h in generated if generated.count(h) > 1 or h in idx})
     if clash:
@@ -207,7 +212,7 @@ def pivot_dataframe(
         first = {n: (_TOTAL if n == idx[0] else None) for n in idx}
         total_row = pd.DataFrame([{**first, **extra}], columns=list(out.columns))
         out = pd.concat([out, total_row], ignore_index=True)
-    return _finish(out, idx, pairs, old, agg_func)
+    return _finish(out, idx, pairs, old, agg_func, total_columns)
 
 
 def _listable(value: Any, label: str) -> Any:
@@ -223,8 +228,13 @@ def _finish(
     pairs: list[tuple[str, str | None]],
     old: dict[str, str],
     agg_func: str | Callable[..., Any],
+    total_columns: list[str],
 ) -> pd.DataFrame:
-    """Attach ``kql_types`` to ``out``; ``pairs`` maps each cell column to its source value."""
+    """Attach ``kql_types`` and ``pivot_totals`` to ``out``.
+
+    ``pairs`` maps each cell column to its source value. If ``total_columns`` is non-empty, the
+    last row of ``out`` (if it has rows) is the total row.
+    """
     types = {n: old[n] for n in idx if n in old}
     for name, value in pairs:
         kql_type = "long" if value is None else _agg_type(agg_func, old.get(value))
@@ -232,4 +242,11 @@ def _finish(
             types[name] = kql_type
     if types:
         out.attrs[KQL_TYPES_ATTR] = types
+    out.attrs.pop(PIVOT_TOTALS_ATTR, None)  # never inherit a stale one from ``df``
+    if total_columns:
+        out.attrs[PIVOT_TOTALS_ATTR] = {
+            "columns": total_columns,
+            "row": len(out) - 1 if len(out) else None,  # ``out`` has a RangeIndex
+            "label_column": idx[0],
+        }
     return out

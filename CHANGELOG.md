@@ -18,6 +18,9 @@
   totals=False, max_columns=100)` pivots a result into one row per `index` key and one column per
   `columns` key, counting rows or aggregating `values`. The flat result keeps `kql_types` and goes
   straight into `format_dataframe`.
+- `format_dataframe` shows the `Total` row and columns of a `pivot_dataframe(..., totals=True)`
+  result in bold, set off by a rule. They are recorded in `df.attrs["pivot_totals"]`, so a row or
+  column that merely contains or is named `Total` is not styled as a total.
 - Query result cache, on by default: `exec_query` and `exec_batch_query` gain a keyword
   `cache: bool = True` (before `verbose`), and `%%kql` gains `--no-cache`. Results are kept in
   memory for up to 32 distinct queries (least recently used dropped), keyed by target,

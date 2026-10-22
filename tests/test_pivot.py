@@ -5,7 +5,7 @@ import pytest
 
 from security_notebook_tools import format_dataframe, pivot_dataframe
 from security_notebook_tools._exceptions import ConfigurationError
-from security_notebook_tools._format import KQL_TYPES_ATTR
+from security_notebook_tools._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR
 
 
 @pytest.fixture
@@ -116,6 +116,31 @@ def test_totals_multiple_values(df):
     assert out.iloc[-1]["Bytes_Total"] == 21
     assert out.iloc[-1]["N_Total"] == 6
     assert out.attrs[KQL_TYPES_ATTR]["N_Total"] == "long"
+    assert out.attrs[PIVOT_TOTALS_ATTR]["columns"] == ["Bytes_Total", "N_Total"]
+
+
+def test_totals_metadata(df):
+    out = pivot_dataframe(df, ["User", "App"], "Result", totals=True)
+    assert out.attrs[PIVOT_TOTALS_ATTR] == {
+        "columns": ["Total"],
+        "row": len(out) - 1,
+        "label_column": "User",
+    }
+    assert out.loc[out.attrs[PIVOT_TOTALS_ATTR]["row"], "User"] == "Total"
+
+
+def test_no_totals_metadata_without_totals(df):
+    df.attrs[PIVOT_TOTALS_ATTR] = {"columns": ["Bytes"], "row": 0, "label_column": "User"}
+    assert PIVOT_TOTALS_ATTR not in pivot_dataframe(df, "User", "Result").attrs
+
+
+def test_totals_metadata_empty(df):
+    out = pivot_dataframe(df.iloc[0:0], "User", "Result", totals=True)
+    assert out.attrs[PIVOT_TOTALS_ATTR] == {
+        "columns": ["Total"],
+        "row": None,
+        "label_column": "User",
+    }
 
 
 def test_max_columns(df):
