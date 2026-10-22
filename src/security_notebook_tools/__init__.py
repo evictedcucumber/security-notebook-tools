@@ -1,8 +1,8 @@
 """Query Microsoft Sentinel and Azure Data Explorer into pandas DataFrames.
 
-Run ``az login`` first, set the connection environment variables (``SENTINEL_WORKSPACE_ID`` and
-``SENTINEL_WORKSPACE_RESOURCE_ID``, or ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``; optionally
-``AZURE_TENANT_ID``), then:
+Run ``az login`` first, set the connection environment variables (``SENTINEL_WORKSPACE_ID``,
+``SENTINEL_SUBSCRIPTION_ID``, ``SENTINEL_RESOURCE_GROUP`` and ``SENTINEL_WORKSPACE_NAME``, or
+``ADX_CLUSTER_URI`` and ``ADX_DATABASE``; optionally ``AZURE_TENANT_ID``), then:
 
     >>> from security_notebook_tools import exec_query
     >>> df = exec_query("SigninLogs | take 100")

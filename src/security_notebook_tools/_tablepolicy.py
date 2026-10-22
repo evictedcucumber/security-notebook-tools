@@ -307,8 +307,9 @@ def get_policy(
     if policy.customer_id.lower() != workspace_id.lower():
         raise ConfigurationError(
             f"$SENTINEL_WORKSPACE_ID ({workspace_id}) does not match the workspace behind "
-            f"$SENTINEL_WORKSPACE_RESOURCE_ID (customerId {policy.customer_id}). The two must "
-            "name the same workspace. The query was not sent."
+            f"$SENTINEL_SUBSCRIPTION_ID / $SENTINEL_RESOURCE_GROUP / $SENTINEL_WORKSPACE_NAME "
+            f"(customerId {policy.customer_id}). They must name the same workspace. The query "
+            "was not sent."
         )
     return policy
 

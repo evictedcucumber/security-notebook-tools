@@ -133,7 +133,7 @@ _P = "/providers/Microsoft.OperationalInsights/workspaces/"
     ],
 )
 def test_workspace_resource_id_invalid(bad):
-    with pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"):
+    with pytest.raises(ConfigurationError, match="Invalid workspace resource ID"):
         config.validate_workspace_resource_id(bad)
 
 
@@ -214,12 +214,81 @@ def test_resolvers(monkeypatch):
     with pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_ID"):
         config.resolve_workspace_id()
     assert config.resolve_workspace_id(GUID) == GUID  # explicit value wins
-    with pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"):
-        config.resolve_workspace_resource_id()  # unset
-    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", "nope")
-    with pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"):
-        config.resolve_workspace_resource_id()
     assert config.resolve_workspace_resource_id(RID) == RID  # explicit value wins
     monkeypatch.setenv("ADX_CLUSTER_URI", "http://c.kusto.windows.net")
     with pytest.raises(ConfigurationError, match="ADX_CLUSTER_URI"):
         config.resolve_cluster_uri()
+
+
+_SUB_VARS = {
+    "SENTINEL_SUBSCRIPTION_ID": GUID,
+    "SENTINEL_RESOURCE_GROUP": "my-rg_1.(x)",
+    "SENTINEL_WORKSPACE_NAME": "Sentinel-ws1",
+}
+
+
+def _set_resource_vars(monkeypatch, **overrides):
+    for var, val in {**_SUB_VARS, **overrides}.items():
+        monkeypatch.setenv(var, val)
+
+
+def test_resolve_resource_id_from_parts(monkeypatch):
+    _set_resource_vars(monkeypatch)
+    assert config.resolve_workspace_resource_id() == RID
+    _set_resource_vars(
+        monkeypatch,
+        SENTINEL_SUBSCRIPTION_ID=f"  {GUID}\n",
+        SENTINEL_RESOURCE_GROUP=" my-rg_1.(x) ",
+        SENTINEL_WORKSPACE_NAME="\tSentinel-ws1 ",
+    )
+    assert config.resolve_workspace_resource_id() == RID  # whitespace stripped
+
+
+@pytest.mark.parametrize("missing", list(_SUB_VARS))
+def test_resolve_resource_id_missing_var(monkeypatch, missing):
+    _set_resource_vars(monkeypatch)
+    monkeypatch.delenv(missing)
+    with pytest.raises(ConfigurationError, match=f"No .* configured: set the \\${missing} "):
+        config.resolve_workspace_resource_id()
+    monkeypatch.setenv(missing, "   ")  # blank counts as invalid, never as valid
+    with pytest.raises(ConfigurationError, match=missing):
+        config.resolve_workspace_resource_id()
+
+
+def test_resolve_resource_id_all_unset():
+    with pytest.raises(ConfigurationError, match="SENTINEL_SUBSCRIPTION_ID"):
+        config.resolve_workspace_resource_id()
+
+
+@pytest.mark.parametrize(
+    ("var", "bad"),
+    [
+        ("SENTINEL_SUBSCRIPTION_ID", "not-a-guid"),
+        ("SENTINEL_SUBSCRIPTION_ID", GUID + "/x"),
+        ("SENTINEL_SUBSCRIPTION_ID", RID),
+        ("SENTINEL_RESOURCE_GROUP", "a/b"),
+        ("SENTINEL_RESOURCE_GROUP", "rg."),
+        ("SENTINEL_RESOURCE_GROUP", "r g"),
+        ("SENTINEL_RESOURCE_GROUP", "r" * 91),
+        ("SENTINEL_RESOURCE_GROUP", "rg/providers/x/workspaces/y"),
+        ("SENTINEL_RESOURCE_GROUP", "\u212a"),
+        ("SENTINEL_WORKSPACE_NAME", "ws/x"),
+        ("SENTINEL_WORKSPACE_NAME", ".."),
+        ("SENTINEL_WORKSPACE_NAME", "ws/../x"),
+        ("SENTINEL_WORKSPACE_NAME", "abc"),
+        ("SENTINEL_WORKSPACE_NAME", "w" * 64),
+        ("SENTINEL_WORKSPACE_NAME", "ab_cd"),
+        ("SENTINEL_WORKSPACE_NAME", "abc\u212a"),
+        ("SENTINEL_WORKSPACE_NAME", "abcd?x=1"),
+    ],
+)
+def test_resolve_resource_id_invalid_var(monkeypatch, var, bad):
+    _set_resource_vars(monkeypatch, **{var: bad})
+    with pytest.raises(ConfigurationError, match=f"Invalid .{var}"):
+        config.resolve_workspace_resource_id()
+
+
+def test_resolve_resource_id_ignores_old_variable(monkeypatch):
+    monkeypatch.setenv("SENTINEL_WORKSPACE_" + "RESOURCE_ID", RID)  # removed variable
+    with pytest.raises(ConfigurationError, match="SENTINEL_SUBSCRIPTION_ID"):
+        config.resolve_workspace_resource_id()

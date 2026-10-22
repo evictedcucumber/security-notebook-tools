@@ -52,7 +52,9 @@ class SentinelClient:
             workspace_id: Log Analytics workspace ID. Defaults to ``$SENTINEL_WORKSPACE_ID``.
             credential: Credential to use. Defaults to :func:`get_credential`.
             resource_id: ARM resource ID of the same workspace, used to read table plans for
-                the cost guard. Defaults to ``$SENTINEL_WORKSPACE_RESOURCE_ID``.
+                the cost guard. Defaults to the ID built from
+                ``$SENTINEL_SUBSCRIPTION_ID``, ``$SENTINEL_RESOURCE_GROUP`` and
+                ``$SENTINEL_WORKSPACE_NAME``.
             tenant_id: Tenant, used for the credential and the policy cache. Defaults to
                 ``$AZURE_TENANT_ID``.
             verbose: Default for this client's methods; each method can override it.

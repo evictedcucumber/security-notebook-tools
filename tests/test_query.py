@@ -29,7 +29,9 @@ RID = (
 @pytest.fixture
 def sentinel(monkeypatch):
     monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
-    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", RID)
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
     with (
         mock.patch("security_notebook_tools._query.SentinelClient") as cls,
         mock.patch("security_notebook_tools._query.get_credential") as cred,
@@ -78,19 +80,32 @@ def test_sentinel_missing_workspace(sentinel, monkeypatch):
         snt.exec_query("T")
 
 
-def test_sentinel_missing_resource_id(sentinel, monkeypatch):
-    monkeypatch.delenv("SENTINEL_WORKSPACE_RESOURCE_ID")
-    with pytest.raises(ConfigurationError, match="SENTINEL_WORKSPACE_RESOURCE_ID"):
+@pytest.mark.parametrize(
+    "var", ["SENTINEL_SUBSCRIPTION_ID", "SENTINEL_RESOURCE_GROUP", "SENTINEL_WORKSPACE_NAME"]
+)
+def test_sentinel_missing_or_invalid_resource_part(sentinel, monkeypatch, var):
+    cls, _ = sentinel
+    monkeypatch.delenv(var)
+    with pytest.raises(ConfigurationError, match=var):
         snt.exec_query("T")
-    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", RID + "/")
-    with pytest.raises(ConfigurationError, match="Invalid .SENTINEL_WORKSPACE_RESOURCE_ID"):
+    monkeypatch.setenv(var, "a/b")
+    with pytest.raises(ConfigurationError, match=f"Invalid .{var}"):
         snt.exec_query("T")
+    cls.assert_not_called()
 
 
-def test_sentinel_new_resource_id_gets_new_client(sentinel, monkeypatch):
+@pytest.mark.parametrize(
+    ("var", "value"),
+    [
+        ("SENTINEL_SUBSCRIPTION_ID", "33333333-3333-3333-3333-333333333333"),
+        ("SENTINEL_RESOURCE_GROUP", "other-rg"),
+        ("SENTINEL_WORKSPACE_NAME", "other-ws"),
+    ],
+)
+def test_sentinel_changed_resource_var_gets_new_client(sentinel, monkeypatch, var, value):
     cls, _ = sentinel
     snt.exec_query("T")
-    monkeypatch.setenv("SENTINEL_WORKSPACE_RESOURCE_ID", RID.replace("sentinel-ws", "other-ws"))
+    monkeypatch.setenv(var, value)
     snt.exec_query("T")
     assert cls.call_count == 2
 

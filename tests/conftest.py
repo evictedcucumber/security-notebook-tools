@@ -10,7 +10,9 @@ def _clean_env(monkeypatch):
     for var in (
         config.TENANT_ID_VAR,
         config.WORKSPACE_ID_VAR,
-        config.WORKSPACE_RESOURCE_ID_VAR,
+        config.SUBSCRIPTION_ID_VAR,
+        config.RESOURCE_GROUP_VAR,
+        config.WORKSPACE_NAME_VAR,
         config.CLUSTER_URI_VAR,
         config.DATABASE_VAR,
     ):
