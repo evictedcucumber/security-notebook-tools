@@ -18,6 +18,13 @@ class QueryError(SecurityNotebookToolsError):
     """A query failed (service error, bad KQL, authorisation failure, ...)."""
 
 
+class QueryThrottledError(QueryError):
+    """The service throttled the request (HTTP 429 or a "too many requests" error).
+
+    ``exec_batch_query`` retries a window that fails with this; otherwise it is a ``QueryError``.
+    """
+
+
 class PartialResultError(QueryError):
     """A query returned only partial results and ``raise_on_partial`` was set.
 

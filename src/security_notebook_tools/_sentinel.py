@@ -17,13 +17,15 @@ from azure.monitor.query import LogsQueryClient, LogsQueryStatus, LogsTable
 
 from ._auth import get_credential
 from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_resource_id
-from ._exceptions import PartialResultError, QueryError
+from ._exceptions import PartialResultError, QueryError, QueryThrottledError
 from ._format import KQL_TYPES_ATTR
 from ._log import shorten, verbose_logging
 from ._tablepolicy import check_sentinel_query, get_policy
 from ._timerange import Timespan
 
 logger = logging.getLogger("security_notebook_tools.sentinel")
+
+_TOO_MANY_REQUESTS = 429
 
 
 def _table_to_df(table: LogsTable) -> pd.DataFrame:
@@ -109,6 +111,8 @@ class SentinelClient:
                 that is not on the Analytics plan), or the workspace ID does not match the
                 resource ID.
             QueryError: The table plans could not be verified, or the service returned an error.
+            QueryThrottledError: The service throttled the request (HTTP 429). It is a
+                ``QueryError``.
             PartialResultError: The result was partial and ``raise_on_partial`` is set.
         """
         with verbose_logging(self.verbose if verbose is None else verbose):
@@ -124,7 +128,8 @@ class SentinelClient:
                 )
             except HttpResponseError as exc:
                 logger.error("Sentinel query failed: %s", exc.message or exc)
-                raise QueryError(f"Sentinel query failed: {exc.message or exc}") from exc
+                error = QueryThrottledError if exc.status_code == _TOO_MANY_REQUESTS else QueryError
+                raise error(f"Sentinel query failed: {exc.message or exc}") from exc
 
             if result.status == LogsQueryStatus.SUCCESS:
                 tables = result.tables

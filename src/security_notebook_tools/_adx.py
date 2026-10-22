@@ -16,12 +16,12 @@ from typing import Any
 import pandas as pd
 from azure.identity import AzureCliCredential
 from azure.kusto.data import ClientRequestProperties, KustoClient, KustoConnectionStringBuilder
-from azure.kusto.data.exceptions import KustoServiceError
+from azure.kusto.data.exceptions import KustoServiceError, KustoThrottlingError
 from azure.kusto.data.helpers import dataframe_from_result_table
 
 from ._auth import get_credential
 from ._config import DATABASE_VAR, require, resolve_cluster_uri, resolve_database, validate_database
-from ._exceptions import ConfigurationError, QueryError
+from ._exceptions import ConfigurationError, QueryError, QueryThrottledError
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import shorten, verbose_logging
@@ -40,6 +40,8 @@ Properties = dict[str, Any] | ClientRequestProperties | None
 
 # Only read-only management commands are allowed; everything else is refused client-side.
 _SHOW_RE = re.compile(r"\.show(\s|$)", re.IGNORECASE)
+# A server-side throttle can arrive as a KustoServiceError rather than a KustoThrottlingError.
+_THROTTLED_RE = re.compile(r"TooManyRequests|throttl", re.IGNORECASE)
 # Kusto's server-enforced read-only request option (the SDK has no constant for it).
 _READONLY_OPTION = "request_readonly"
 
@@ -118,9 +120,11 @@ class ADXClient:
         start = time.perf_counter()
         try:
             response = execute(db, text, props)
-        except KustoServiceError as exc:
+        except (KustoServiceError, KustoThrottlingError) as exc:
             logger.error("ADX %s failed: %s", kind, exc)
-            raise QueryError(f"ADX {kind} failed: {exc}") from exc
+            throttled = isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc))
+            error = QueryThrottledError if throttled else QueryError
+            raise error(f"ADX {kind} failed: {exc}") from exc
         dfs = [_table_to_df(t) for t in response.primary_results]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",
@@ -152,6 +156,8 @@ class ADXClient:
                 ``cluster()``, ``external_table()``, ``externaldata`` or a blocked ``evaluate``
                 plugin (it could reach the Sentinel data lake or a workspace).
             QueryError: The service returned an error.
+            QueryThrottledError: The service throttled the request (HTTP 429 or a throttling
+                error). It is a ``QueryError``.
         """
         with verbose_logging(self.verbose if verbose is None else verbose):
             return self._execute("query", kql, database, properties)

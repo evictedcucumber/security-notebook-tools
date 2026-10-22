@@ -3,10 +3,14 @@ from unittest import mock
 import pandas as pd
 import pytest
 from azure.kusto.data import ClientRequestProperties
-from azure.kusto.data.exceptions import KustoServiceError
+from azure.kusto.data.exceptions import KustoServiceError, KustoThrottlingError
 
 from security_notebook_tools._adx import ADXClient
-from security_notebook_tools._exceptions import ConfigurationError, QueryError
+from security_notebook_tools._exceptions import (
+    ConfigurationError,
+    QueryError,
+    QueryThrottledError,
+)
 
 
 @pytest.fixture
@@ -74,6 +78,37 @@ def test_service_error(patched):
         c.query("T")
     with pytest.raises(QueryError):
         c.show(".show tables")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KustoThrottlingError("Too many requests"),
+        KustoServiceError("Query execution has exceeded the allowed limits: TooManyRequests"),
+        KustoServiceError("Request was throttled (QueryThrottledException)"),
+        KustoServiceError("the request is THROTTLED"),
+    ],
+)
+def test_throttling_maps_to_query_throttled_error(patched, error):
+    client, _, _ = patched
+    client.execute_query.side_effect = error
+    client.execute_mgmt.side_effect = error
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    with pytest.raises(QueryThrottledError, match="ADX query failed") as ei:
+        c.query("T")
+    assert isinstance(ei.value, QueryError)
+    assert ei.value.__cause__ is error
+    with pytest.raises(QueryThrottledError, match="ADX command failed"):
+        c.show(".show tables")
+
+
+def test_other_service_errors_are_not_throttling(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoServiceError("Semantic error: Failed to resolve T")
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    with pytest.raises(QueryError) as ei:
+        c.query("T")
+    assert not isinstance(ei.value, QueryThrottledError)
 
 
 def test_env_defaults(patched, monkeypatch):

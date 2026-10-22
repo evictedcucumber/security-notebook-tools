@@ -5,7 +5,12 @@ import pytest
 from azure.core.exceptions import HttpResponseError
 from azure.monitor.query import LogsQueryPartialResult, LogsQueryResult, LogsTable
 
-from security_notebook_tools._exceptions import ConfigurationError, PartialResultError, QueryError
+from security_notebook_tools._exceptions import (
+    ConfigurationError,
+    PartialResultError,
+    QueryError,
+    QueryThrottledError,
+)
 from security_notebook_tools._sentinel import SentinelClient
 from security_notebook_tools._tablepolicy import TablePolicy
 
@@ -89,6 +94,25 @@ def test_failure(client):
     client._mock.query_workspace.side_effect = HttpResponseError(message="bad kql")
     with pytest.raises(QueryError, match="bad kql"):
         client.query("T")
+
+
+def test_throttled_maps_to_query_throttled_error(client):
+    response = mock.Mock(status_code=429, reason="Too Many Requests")
+    client._mock.query_workspace.side_effect = HttpResponseError(
+        message="Too many requests", response=response
+    )
+    with pytest.raises(QueryThrottledError, match="Sentinel query failed: Too many requests") as ei:
+        client.query("T")
+    assert isinstance(ei.value, QueryError)
+
+
+@pytest.mark.parametrize("status", [None, 400, 403, 500, 503])
+def test_other_http_errors_are_not_throttling(client, status):
+    response = mock.Mock(status_code=status, reason="x") if status else None
+    client._mock.query_workspace.side_effect = HttpResponseError(message="nope", response=response)
+    with pytest.raises(QueryError, match="nope") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryThrottledError)
 
 
 def test_workspace_from_env(monkeypatch):
