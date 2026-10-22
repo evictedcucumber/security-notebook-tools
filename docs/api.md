@@ -231,14 +231,24 @@ exec_batch_query(
     interval: timedelta = timedelta(days=1),
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
+    max_workers: int = 1,
     verbose: bool = False,
 ) -> pandas.DataFrame
 ```
 
 Run the same KQL once per consecutive time window and merge the results. The period is split
 into `[start, start + interval)`, `[start + interval, start + 2 * interval)` ... with the last
-window clipped to `end`. Windows run sequentially, oldest first, with no retries; the first
-failure stops the batch.
+window clipped to `end`. By default windows run sequentially, oldest first. With `max_workers`
+above 1 the first window still runs alone (a bad query or configuration fails once, and the
+client, credential and table-plan caches are warm), then the rest run in parallel on up to
+`max_workers` threads; results are always in window order. The first failure stops the batch:
+windows not yet started are skipped, running ones are waited for, and the error of the
+lowest-numbered failed window is raised.
+
+A window the service throttles (HTTP 429, "too many requests") is retried up to 4 times, waiting
+a random time between 0 and 2, 4, 8 and 16 seconds (exponential backoff with full jitter, capped
+at 30 s) and logging a warning each time; after that it fails like any other error. Other errors
+are not retried.
 
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
 BatchEnd = datetime("...");` added in front of your KQL. Filter with
@@ -261,6 +271,7 @@ re-aggregate the merged DataFrame in pandas.
 | `interval` | Window length (default 1 day); must be positive. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds for each window (default 300); must be positive. |
+| `max_workers` | Windows to run at once (default 1: one after another); an integer from 1 to 5. The cap is the Log Analytics limit of 5 concurrent queries per user; more only queue on the server, and the wait counts against `timeout`. ADX's concurrency limit is shared by everyone using the cluster, so a high value can throttle other users. |
 | `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
 ### Returns
@@ -271,11 +282,12 @@ adding columns that only later windows have.
 
 ### Raises
 
-* `ConfigurationError`: `interval` or `timeout` is not positive, `start` is not before `end`,
+* `ConfigurationError`: `interval` or `timeout` is not positive, `max_workers` is not an integer
+  from 1 to 5, `start` is not before `end`,
   `target` is unknown, the ADX KQL is a management command or lacks `BatchStart`/`BatchEnd`, or
   any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
-* `QueryError`: a window failed; the message names the window (number, total, bounds) and the
-  original error is chained.
+* `QueryError`: a window failed (including one still throttled after its retries); the message
+  names the window (number, total, bounds) and the original error is chained.
 
 ### Examples
 
@@ -286,6 +298,7 @@ from security_notebook_tools import exec_batch_query
 kql = "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd | take 1000"
 df = exec_batch_query(kql, timedelta(days=30))  # last 30 days, one query per day
 df = exec_batch_query(kql, datetime(2026, 1, 1), datetime(2026, 2, 1), interval=timedelta(hours=6))
+df = exec_batch_query(kql, timedelta(days=30), max_workers=3)  # up to 3 days at once
 ```
 
 ## format_dataframe

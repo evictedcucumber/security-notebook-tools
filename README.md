@@ -141,7 +141,7 @@ explicitly in that case. The exact rules are in [docs/api.md](docs/api.md).
 
 ### Long periods (batch)
 
-`exec_batch_query` runs the same KQL once per time window (default 1 day, one after another) and
+`exec_batch_query` runs the same KQL once per time window (default 1 day) and
 returns the results concatenated in one DataFrame. `start` is a datetime, or a `timedelta` meaning
 "that long before `end`"; `end` defaults to now (UTC; naive datetimes are taken as UTC).
 
@@ -162,6 +162,18 @@ Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; 
 also sent as the API time range; on ADX the KQL must use both variables. Aggregations run per
 window and are not combined. The cost guard applies to every window, and the first failing window
 stops the batch. See [docs/api.md](docs/api.md).
+
+Windows run one after another by default. `max_workers` (1 to 5) runs them in parallel: the first
+window runs alone to check the query and warm the caches, then the rest run concurrently, with
+results still in window order. 5 is the Log Analytics limit of concurrent queries per user (more
+only queue on the server and eat into `timeout`); ADX's limit is shared with everyone on the
+cluster, so raise it with care. A throttled window (HTTP 429) is retried up to 4 times with
+exponential backoff and jitter; any other failure stops the batch (running windows finish, the
+rest are skipped).
+
+```python
+df = exec_batch_query(kql, timedelta(days=30), max_workers=3)
+```
 
 ### Timeout
 
