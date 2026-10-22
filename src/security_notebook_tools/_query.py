@@ -54,6 +54,27 @@ def _clear_clients() -> None:
     _adx_client.cache_clear()
 
 
+def _query_sentinel(kql: str, timespan: Timespan | None, timeout: int) -> list[pd.DataFrame]:
+    """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables."""
+    tenant_id = resolve_tenant_id()
+    client = _sentinel_client(resolve_workspace_id(), resolve_workspace_resource_id(), tenant_id)
+    return client.query_tables(kql, timespan, server_timeout=timeout)
+
+
+def _query_adx(kql: str, timeout: int) -> list[pd.DataFrame]:
+    """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables."""
+    tenant_id = resolve_tenant_id()
+    client = _adx_client(resolve_cluster_uri(), tenant_id)
+    database = validate_database(require(None, DATABASE_VAR, "database"))
+    props = ClientRequestProperties()
+    props.set_option(
+        ClientRequestProperties.request_timeout_option_name, timedelta(seconds=timeout)
+    )
+    if kql.lstrip().startswith("."):
+        return [client.show(kql, database, properties=props)]
+    return client.query_tables(kql, database, properties=props)
+
+
 def exec_query(
     kql: str,
     timespan: Timespan | None = None,
@@ -182,29 +203,14 @@ def exec_query(
     if timeout <= 0:
         raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
     with verbose_logging(verbose):
-        tenant_id = resolve_tenant_id()
         if target == "sentinel":
-            client = _sentinel_client(
-                resolve_workspace_id(), resolve_workspace_resource_id(), tenant_id
-            )
-            tables = client.query_tables(
-                kql, resolve_timespan(kql, timespan), server_timeout=timeout
-            )
+            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout)
         elif target == "adx":
             if timespan is not None:
                 raise ConfigurationError(
                     "timespan only applies to Sentinel; filter on time in the KQL for ADX."
                 )
-            client = _adx_client(resolve_cluster_uri(), tenant_id)
-            database = validate_database(require(None, DATABASE_VAR, "database"))
-            props = ClientRequestProperties()
-            props.set_option(
-                ClientRequestProperties.request_timeout_option_name, timedelta(seconds=timeout)
-            )
-            if kql.lstrip().startswith("."):
-                tables = [client.show(kql, database, properties=props)]
-            else:
-                tables = client.query_tables(kql, database, properties=props)
+            tables = _query_adx(kql, timeout)
         else:
             raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
     return tables[0] if tables else pd.DataFrame()
