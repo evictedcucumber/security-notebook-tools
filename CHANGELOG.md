@@ -15,15 +15,19 @@
 ### Added
 
 - `exec_batch_query(kql, start, end=None, *, interval=timedelta(days=1), target, timeout,
-  max_workers=1, verbose)` runs the same KQL once per consecutive time window and merges the
-  results into one DataFrame, for queries too big for one run or needing a longer period. Each
-  window defines
-  `BatchStart` and `BatchEnd` in the query and, on Sentinel, is also sent as the API time range.
-  ADX queries must use both variables. Aggregations run per window; re-aggregate in pandas.
-  `max_workers` (1 to 5, default 1) runs windows in parallel after the first one has run alone;
-  5 is the Log Analytics per-user concurrency limit, and ADX's limit is shared with other users.
-  The first failure cancels the windows not yet started. A throttled window (HTTP 429) is
-  retried up to 4 times with exponential backoff and jitter; other errors are not retried.
+  max_workers=1, merge_on=None, agg_column=None, agg_func="sum", verbose)` runs the same KQL once
+  per consecutive time window and merges the results into one DataFrame, for queries too big for one
+  run or needing a longer period. Each window defines `BatchStart` and `BatchEnd` in the query and,
+  on Sentinel, is also sent as the API time range. The KQL must filter with `>= BatchStart` and
+  `< BatchEnd` (half-open, so a boundary row is counted once); this is checked before any query, on
+  both targets, and other comparisons of the two names are rejected. Aggregations
+  run per window; the optional `merge_on`, `agg_column` and `agg_func` (default `"sum"`) keywords
+  then group the merged rows and re-aggregate them (for example sum per-day counts by user),
+  validated up front and against the first window's columns. `max_workers` (1 to 5, default 1) runs
+  windows in parallel after the first one has run alone; 5 is the Log Analytics per-user concurrency
+  limit, and ADX's limit is shared with other users. The first failure cancels the windows not yet
+  started. A throttled window (HTTP 429) is retried up to 4 times with exponential backoff and
+  jitter; other errors are not retried.
 - `%%kql` IPython cell magic (`%load_ext security_notebook_tools`) for quick queries: write raw
   KQL in a cell and see the result rendered with `format_dataframe`. The DataFrame is not kept;
   use `exec_query` when you need it. Supports every `exec_query` option (`--timespan`,

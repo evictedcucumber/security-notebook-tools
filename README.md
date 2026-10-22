@@ -153,15 +153,24 @@ df = exec_batch_query(
     "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
     " | summarize n = count() by UserPrincipalName",
     timedelta(days=30),
+    merge_on="UserPrincipalName",  # group the per-day results by user ...
+    agg_column="n",  # ... and sum the daily counts: one row per user
 )
-df = df.groupby("UserPrincipalName", as_index=False)["n"].sum()  # re-aggregate per-window results
 ```
 
 Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; filter with
-`>= BatchStart and < BatchEnd` so boundary rows aren't counted twice. On Sentinel each window is
-also sent as the API time range; on ADX the KQL must use both variables. Aggregations run per
-window and are not combined. The cost guard applies to every window, and the first failing window
-stops the batch. See [docs/api.md](docs/api.md).
+`x >= BatchStart and x < BatchEnd` (half-open, so boundary rows aren't counted twice). This is
+checked on both targets before any query is sent; other comparisons of the two names (`>`, `<=`,
+`==`, `between` ...) are rejected. On Sentinel each window is also sent as the API time range. The
+cost guard applies to every window, and the first failing window stops the batch. See
+[docs/api.md](docs/api.md).
+
+Aggregations (`summarize`, `count`, `dcount` ...) run per window and are not combined unless you
+pass `merge_on` (columns to group by) and `agg_column` (columns to aggregate), with `agg_func`
+(default `"sum"`; any pandas aggregation name or a callable). Null keys are kept as a group. For
+per-window `summarize` output use only functions that re-combine: `sum` of counts or sums, `min` of
+mins, `max` of maxes. A mean of means, or a sum of `dcount`, is wrong; `summarize` the sum and the
+count per window, re-aggregate both with `sum` and divide.
 
 Windows run one after another by default. `max_workers` (1 to 5) runs them in parallel: the first
 window runs alone to check the query and warm the caches, then the rest run concurrently, with

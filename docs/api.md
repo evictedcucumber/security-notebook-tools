@@ -232,6 +232,9 @@ exec_batch_query(
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
     max_workers: int = 1,
+    merge_on: str | Sequence[str] | None = None,
+    agg_column: str | Sequence[str] | None = None,
+    agg_func: str | Callable = "sum",
     verbose: bool = False,
 ) -> pandas.DataFrame
 ```
@@ -251,40 +254,62 @@ at 30 s) and logging a warning each time; after that it fails like any other err
 are not retried.
 
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
-BatchEnd = datetime("...");` added in front of your KQL. Filter with
-`TimeGenerated >= BatchStart and TimeGenerated < BatchEnd` so a boundary row is counted once.
-On Sentinel each window is also sent as the API time range, so the 1-day default and the "set in
-query" rules of `exec_query` do not apply; one warning is logged per batch if the KQL has its own
-time filter that does not use `BatchStart`/`BatchEnd`. ADX has no API time range, so its KQL must
-use both variables. The Sentinel cost guard applies to every window.
+BatchEnd = datetime("...");` added in front of your KQL. The window is half-open, so the KQL must
+filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd` (any column or expression
+instead of `TimeGenerated`; `BatchStart <= x` and `BatchEnd > x` also work), which counts a
+boundary row once. This is checked on both targets before any query is sent: both comparisons
+must appear (outside comments and strings), and any other comparison of `BatchStart` or
+`BatchEnd` (`>`, `<=`, `==`, `!=`, `between`, or the wrong variable) is rejected, as is defining
+either name yourself. Other uses, such as `extend WindowStart = BatchStart`, are fine. On Sentinel
+each window is also sent as the API time range, so the 1-day default and the "set in query" rules
+of `exec_query` do not apply. The Sentinel cost guard applies to every window.
 
-Aggregations (`summarize`, `count`, `dcount`, `top` ...) run per window and are not combined;
-re-aggregate the merged DataFrame in pandas.
+Aggregations (`summarize`, `count`, `dcount`, `top` ...) run per window and by default are not
+combined. Pass `merge_on` and `agg_column` (and optionally `agg_func`) to group the merged rows and
+aggregate them, replacing the manual pandas step. This is correct for raw rows with any function.
+For per-window `summarize` output use only functions that can be re-combined: `"sum"` of counts or
+sums, `"min"` of mins, `"max"` of maxes. A mean of means, a sum of `dcount` or a `nunique` of
+per-window values is wrong; `summarize` the sum and the count per window, re-aggregate both with
+`"sum"`, then divide. Null keys are kept as their own group, as in KQL. The columns are checked
+after the first window, so a typo fails before the other windows run.
 
 ### Parameters
 
 | Name | Description |
 | --- | --- |
-| `kql` | The KQL query. Do not define `BatchStart` or `BatchEnd` yourself. With `target="adx"` it must use both (outside comments and strings) and may not start with `.` (management commands). |
+| `kql` | The KQL query. Do not define `BatchStart` or `BatchEnd` yourself. It must filter with `>= BatchStart` and `< BatchEnd` (see above), and with `target="adx"` it may not start with `.` (management commands). |
 | `start` | Start of the period, or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
 | `end` | End of the period (exclusive); defaults to now in UTC. Naive datetimes are taken to be UTC. |
 | `interval` | Window length (default 1 day); must be positive. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds for each window (default 300); must be positive. |
 | `max_workers` | Windows to run at once (default 1: one after another); an integer from 1 to 5. The cap is the Log Analytics limit of 5 concurrent queries per user; more only queue on the server, and the wait counts against `timeout`. ADX's concurrency limit is shared by everyone using the cluster, so a high value can throttle other users. |
+| `merge_on` | Column name or names to group the merged rows by. Give it together with `agg_column`; non-empty, no overlap with `agg_column`. |
+| `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
+| `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
 | `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
 ### Returns
 
-The non-empty window results concatenated in window order with a fresh index; if every window is
-empty, the first window's empty result. `df.attrs["kql_types"]` comes from the windows' results,
-adding columns that only later windows have.
+With `merge_on` and `agg_column`: one row per distinct key sorted by the keys, with the `merge_on`
+columns then the `agg_column` columns and a fresh index (if every window returned no columns, that
+empty result is returned as is). `kql_types` keeps the key types; an aggregated column keeps its
+type for `sum`, `min`, `max`, `first` and `last`, becomes `long` for `count`, `nunique` and `size`,
+`real` for `mean`, `median`, `std` and `var`, and has no entry otherwise.
+
+Otherwise, the non-empty window results concatenated in window order with a fresh index; if every
+window is empty, the first window's empty result. `df.attrs["kql_types"]` comes from the windows'
+results, adding columns that only later windows have.
 
 ### Raises
 
 * `ConfigurationError`: `interval` or `timeout` is not positive, `max_workers` is not an integer
   from 1 to 5, `start` is not before `end`,
-  `target` is unknown, the ADX KQL is a management command or lacks `BatchStart`/`BatchEnd`, or
+  `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
+  `< BatchEnd`, compares them in another form or defines them (checked before any query),
+  `merge_on`/`agg_column` are not given together, empty, not column names, repeated or
+  overlapping, `agg_func` is invalid or given without `agg_column`, a named column is missing from
+  the result, the aggregation fails, or
   any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
 * `QueryError`: a window failed (including one still throttled after its retries); the message
   names the window (number, total, bounds) and the original error is chained.
@@ -299,6 +324,13 @@ kql = "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchE
 df = exec_batch_query(kql, timedelta(days=30))  # last 30 days, one query per day
 df = exec_batch_query(kql, datetime(2026, 1, 1), datetime(2026, 2, 1), interval=timedelta(hours=6))
 df = exec_batch_query(kql, timedelta(days=30), max_workers=3)  # up to 3 days at once
+kql = (
+    "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    " | summarize n = count() by UserPrincipalName"
+)
+df = exec_batch_query(
+    kql, timedelta(days=30), merge_on="UserPrincipalName", agg_column="n"
+)  # one row per user
 ```
 
 ## format_dataframe

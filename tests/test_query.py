@@ -235,29 +235,8 @@ def test_batch_naive_datetimes_are_utc(sentinel):
     assert _sent_windows(cls) == [(D0, datetime(2026, 1, 2, tzinfo=UTC))]
 
 
-def test_batch_warns_once_for_own_time_filter(sentinel, caplog):
-    caplog.set_level(logging.INFO, logger="security_notebook_tools")
-    snt.exec_batch_query("T | where TimeGenerated > ago(7d)", D0, D0 + timedelta(days=3))
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    caplog.clear()
-    snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=3))
-    snt.exec_batch_query("T | take 1", D0, D0 + timedelta(days=3))
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("Batch 3/3" in r.getMessage() for r in caplog.records)
-
-
-def test_batch_adx_requires_both_variables(adx):
+def test_batch_adx_sends_prefixed_windows(adx):
     cls, _ = adx
-    for kql in [
-        "T",
-        "T | where Timestamp >= BatchStart",
-        "T // BatchStart BatchEnd",
-        "T 'BatchStart BatchEnd'",
-    ]:
-        with pytest.raises(ConfigurationError, match="BatchStart and BatchEnd"):
-            snt.exec_batch_query(kql, D0, D0 + timedelta(days=2), target="adx")
-    cls.return_value.query_tables.assert_not_called()
     kql = "T | where Timestamp >= BatchStart and Timestamp < BatchEnd"
     snt.exec_batch_query(kql, D0, D0 + timedelta(days=2), target="adx", timeout=60)
     calls = cls.return_value.query_tables.call_args_list
@@ -269,6 +248,87 @@ def test_batch_adx_requires_both_variables(adx):
             'let BatchStart = datetime("2026-01-02T00:00:00.000000Z"); '
             'let BatchEnd = datetime("2026-01-03T00:00:00.000000Z");\n'
         )
+    )
+
+
+@pytest.fixture(params=["sentinel", "adx"])
+def either(request, sentinel, adx):
+    """(target, query_tables mock) for each target."""
+    cls, _ = sentinel if request.param == "sentinel" else adx
+    return request.param, cls.return_value.query_tables
+
+
+_ACCEPTED = [
+    "T | where x >= BatchStart and x < BatchEnd",
+    "T | where BatchStart <= x and BatchEnd > x",
+    "T | where x >= BatchStart and BatchEnd > x",
+    "T | where BatchStart <= x and x < BatchEnd",
+    "T | where x>=BatchStart and x<BatchEnd",
+    "T | where x >= BatchStart | where x < BatchEnd",
+    "T | where bin(x, 1h) >= BatchStart and (x < BatchEnd)",
+    FILTER + " | extend WindowStart = BatchStart, WindowEnd = BatchEnd",
+    FILTER + " | summarize n = count() by bin(x, 1h), W = bin(BatchStart, 1d)",
+    FILTER + " | where d <= BatchEnd - BatchStart",
+    FILTER + " // where x > BatchStart or x == BatchEnd",
+    FILTER + " | where s == 'x <= BatchEnd'",
+    "T | where ['x'] >= BatchStart and ['x'] < BatchEnd",
+]
+
+
+@pytest.mark.parametrize("kql", _ACCEPTED)
+def test_batch_filter_accepted(either, kql):
+    target, query_tables = either
+    snt.exec_batch_query(kql, D0, _days(2), target=target)
+    assert query_tables.call_count == 2
+
+
+_REJECTED = [
+    ("T", "BatchStart"),
+    ("T | where x >= BatchStart", "BatchEnd"),
+    ("T | where x < BatchEnd", "BatchStart"),
+    ("T | where BatchStart <= x", "BatchEnd"),
+    ("T | where BatchEnd > x", "BatchStart"),
+    ("T | where x > BatchStart and x < BatchEnd", r"`\.\.\. > BatchStart` is not allowed"),
+    ("T | where x >= BatchStart and x <= BatchEnd", r"`\.\.\. <= BatchEnd` is not allowed"),
+    ("T | where x == BatchStart and x < BatchEnd", r"`\.\.\. == BatchStart` is not allowed"),
+    ("T | where x >= BatchStart and x != BatchEnd", r"`\.\.\. != BatchEnd` is not allowed"),
+    ("T | where x >= BatchStart and x <> BatchEnd", r"`\.\.\. <> BatchEnd` is not allowed"),
+    ("T | where x >= BatchEnd and x < BatchEnd", r"`\.\.\. >= BatchEnd` is not allowed"),
+    ("T | where x < BatchStart and x < BatchEnd", r"`\.\.\. < BatchStart` is not allowed"),
+    ("T | where BatchEnd >= x and x >= BatchStart", r"`BatchEnd >= \.\.\.` is not allowed"),
+    ("T | where BatchStart < x and x < BatchEnd", r"`BatchStart < \.\.\.` is not allowed"),
+    ("T | where BatchStart > x and x < BatchEnd", r"`BatchStart > \.\.\.` is not allowed"),
+    ("T | where BatchEnd < x and x >= BatchStart", r"`BatchEnd < \.\.\.` is not allowed"),
+    ("T | where BatchEnd == x and x >= BatchStart", r"`BatchEnd == \.\.\.` is not allowed"),
+    ("T | where x between (BatchStart .. BatchEnd)", "`between` includes both ends"),
+    ("T | where x !between (BatchStart .. BatchEnd)", "`between` includes both ends"),
+    (FILTER + " | where x between (BatchStart .. 1d)", "`between` includes both ends"),
+    ("let BatchStart = ago(1d); " + FILTER, "defines BatchStart itself"),
+    ("let BatchEnd = now(); " + FILTER, "defines BatchEnd itself"),
+    (FILTER + " | extend BatchEnd = now()", "defines BatchEnd itself"),
+    ("let f = (BatchStart: datetime) { 1 }; " + FILTER, "defines BatchStart itself"),
+    ("T // x >= BatchStart and x < BatchEnd", "BatchStart"),
+    ("T | where s == 'x >= BatchStart and x < BatchEnd'", "BatchStart"),
+    ('T | where s == "x >= BatchStart" and x < BatchEnd', "BatchStart"),
+    ("T | where x >= BatchStart - 1h and x < BatchEnd", "BatchStart"),
+    ("T | extend a = BatchStart, b = BatchEnd", "BatchStart"),
+]
+
+
+@pytest.mark.parametrize(("kql", "match"), _REJECTED)
+def test_batch_filter_rejected(either, kql, match):
+    target, query_tables = either
+    with pytest.raises(ConfigurationError, match=match):
+        snt.exec_batch_query(kql, D0, _days(2), target=target)
+    query_tables.assert_not_called()
+
+
+def test_batch_filter_error_shows_expected_form(either):
+    target, _ = either
+    with pytest.raises(ConfigurationError) as info:
+        snt.exec_batch_query("T", D0, _days(2), target=target)
+    assert "filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd`" in str(
+        info.value
     )
 
 
@@ -641,3 +701,149 @@ def test_batch_adx_throttling_is_retried(adx, backoff):
     kql = "T | where Timestamp >= BatchStart and Timestamp < BatchEnd"
     assert not snt.exec_batch_query(kql, D0, _days(1), target="adx").empty
     assert backoff[0] == [1.0]
+
+
+# --- exec_batch_query: merge_on / agg_column / agg_func -----------------------------------------
+
+
+def _win(users, counts, **types):
+    df = pd.DataFrame({"User": users, "n": counts, "v": [float(c) for c in counts]})
+    df.attrs["kql_types"] = {"User": "string", "n": "long", "v": "real", **types}
+    return df
+
+
+@pytest.fixture
+def two_days(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = lambda *a, **k: [
+        _win(["a", "b"], [1, 2])
+        if len(cls.return_value.query_tables.call_args_list) == 1
+        else _win(["b", "c"], [10, 20])
+    ]
+    return cls
+
+
+@pytest.mark.parametrize("merge_on", ["User", ["User"], ("User",)])
+@pytest.mark.parametrize("agg_column", ["n", ["n"]])
+def test_batch_agg_sums_across_windows(two_days, merge_on, agg_column):
+    df = snt.exec_batch_query(FILTER, D0, _days(2), merge_on=merge_on, agg_column=agg_column)
+    assert list(df.columns) == ["User", "n"]
+    assert df["User"].tolist() == ["a", "b", "c"]
+    assert df["n"].tolist() == [1, 12, 20]
+    assert list(df.index) == [0, 1, 2]
+    assert df.attrs["kql_types"] == {"User": "string", "n": "long"}
+
+
+def test_batch_agg_multiple_columns_and_func(two_days):
+    df = snt.exec_batch_query(
+        FILTER, D0, _days(2), merge_on="User", agg_column=["n", "v"], agg_func="max"
+    )
+    assert list(df.columns) == ["User", "n", "v"]
+    assert df["n"].tolist() == [1, 10, 20]
+    assert df["v"].tolist() == [1.0, 10.0, 20.0]
+    assert df.attrs["kql_types"] == {"User": "string", "n": "long", "v": "real"}
+
+
+def test_batch_agg_keeps_null_key(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = [
+        [_win(["a", None], [1, 2])],
+        [_win([None, "a"], [5, 7])],
+    ]
+    df = snt.exec_batch_query(FILTER, D0, _days(2), merge_on="User", agg_column="n")
+    assert len(df) == 2
+    assert df.loc[df["User"].isna(), "n"].item() == 7
+    assert df.loc[df["User"] == "a", "n"].item() == 8
+
+
+def test_batch_agg_callable(two_days):
+    df = snt.exec_batch_query(
+        FILTER, D0, _days(2), merge_on="User", agg_column="n", agg_func=lambda s: s.max() - s.min()
+    )
+    assert df["n"].tolist() == [0, 8, 0]
+    assert "n" not in df.attrs["kql_types"]
+    assert df.attrs["kql_types"]["User"] == "string"
+
+
+@pytest.mark.parametrize(
+    ("func", "expected"),
+    [
+        ("sum", "long"),
+        ("count", "long"),
+        ("nunique", "long"),
+        ("mean", "real"),
+        ("median", "real"),
+        ("min", "long"),
+        ("last", "long"),
+        ("prod", None),
+    ],
+)
+def test_batch_agg_kql_types(two_days, func, expected):
+    df = snt.exec_batch_query(FILTER, D0, _days(2), merge_on="User", agg_column="n", agg_func=func)
+    assert df.attrs["kql_types"].get("n") == expected
+
+
+def test_batch_agg_logs(two_days, caplog):
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools.batch"):
+        snt.exec_batch_query(FILTER, D0, _days(2), merge_on="User", agg_column="n")
+    assert "Re-aggregated 4 rows into 3 by ['User'] (sum of ['n'])" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"merge_on": "User"}, "together"),
+        ({"agg_column": "n"}, "together"),
+        ({"agg_func": "sum"}, "needs merge_on"),
+        ({"merge_on": [], "agg_column": "n"}, "merge_on must not be empty"),
+        ({"merge_on": "User", "agg_column": []}, "agg_column must not be empty"),
+        ({"merge_on": "", "agg_column": "n"}, "non-empty column names"),
+        ({"merge_on": "User", "agg_column": ["n", 3]}, "non-empty column names"),
+        ({"merge_on": ["User", "User"], "agg_column": "n"}, "repeat"),
+        ({"merge_on": ["User", "n"], "agg_column": "n"}, "both"),
+        ({"merge_on": "User", "agg_column": "n", "agg_func": ""}, "agg_func"),
+        ({"merge_on": "User", "agg_column": "n", "agg_func": 3}, "agg_func"),
+    ],
+)
+def test_batch_agg_validation_before_any_query(sentinel, kwargs, match):
+    cls, _ = sentinel
+    with pytest.raises(ConfigurationError, match=match):
+        snt.exec_batch_query(FILTER, D0, _days(3), **kwargs)
+    cls.return_value.query_tables.assert_not_called()
+
+
+def test_batch_agg_missing_column_stops_after_first_window(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = lambda *a, **k: [_win(["a"], [1])]
+    with pytest.raises(ConfigurationError, match=r"\['Nope'\].*available columns.*User"):
+        snt.exec_batch_query(FILTER, D0, _days(6), max_workers=3, merge_on="Nope", agg_column="n")
+    assert cls.return_value.query_tables.call_count == 1
+
+
+def test_batch_agg_missing_column_found_after_merge(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = [[pd.DataFrame()], [_win(["a"], [1])]]
+    with pytest.raises(ConfigurationError, match="Nope"):
+        snt.exec_batch_query(FILTER, D0, _days(2), merge_on="Nope", agg_column="n")
+
+
+def test_batch_agg_all_empty_is_returned_unaggregated(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = [[pd.DataFrame()], []]
+    df = snt.exec_batch_query(FILTER, D0, _days(2), merge_on="User", agg_column="n")
+    assert df.empty
+    assert len(df.columns) == 0
+
+
+def test_batch_agg_bad_function_is_wrapped(two_days):
+    with pytest.raises(ConfigurationError, match="nonsense") as info:
+        snt.exec_batch_query(
+            FILTER, D0, _days(2), merge_on="User", agg_column="n", agg_func="nonsense"
+        )
+    assert info.value.__cause__ is not None
+
+
+def test_batch_without_merge_on_is_unchanged(two_days):
+    df = snt.exec_batch_query(FILTER, D0, _days(2))
+    assert len(df) == 4
+    assert list(df.columns) == ["User", "n", "v"]

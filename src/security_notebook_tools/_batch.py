@@ -4,24 +4,28 @@ from __future__ import annotations
 
 import logging
 import random
-import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from typing import Any
 
 import pandas as pd
 
 from ._exceptions import ConfigurationError, QueryError, QueryThrottledError
-from ._kql import strip_noise
+from ._format import KQL_TYPES_ATTR
+from ._kql import Token, tokenize
 from ._log import verbose_logging
 from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel
-from ._timerange import has_time_filter
 
 logger = logging.getLogger("security_notebook_tools.batch")
 
-_BATCH_VAR = re.compile(r"\bBatch(?:Start|End)\b")
+_BATCH_VARS = ("BatchStart", "BatchEnd")
+_EXPECTED = "filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd`"
+_COMPARISONS = frozenset({"<", ">", "<=", ">=", "==", "!=", "<>", "=~", "!~"})
+_OP_CHARS = frozenset("<>=!~")
+_ARITHMETIC = frozenset("+-*/%")
 
 # Log Analytics runs 5 queries per user at once and queues the rest on the server, where the
 # wait counts against the timeout; more workers than that gain nothing. ADX shares its limit
@@ -32,6 +36,19 @@ MAX_WORKERS = 5
 _MAX_RETRIES = 4
 _BACKOFF_BASE = 2.0
 _BACKOFF_CAP = 30.0
+
+
+class _DefaultAgg(str):
+    """The default ``agg_func``; a ``str`` that equals "sum" but tells "not passed" by identity."""
+
+    __slots__ = ()
+
+
+_DEFAULT_AGG = _DefaultAgg("sum")
+# Result type of an aggregation: None keeps the column's own type, a string replaces it.
+_SAME_TYPE = {"sum", "min", "max", "first", "last"}
+_LONG_TYPE = {"count", "nunique", "size"}
+_REAL_TYPE = {"mean", "median", "std", "var"}
 
 
 class _Stopped(Exception):
@@ -80,6 +97,65 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
     if types:
         merged.attrs["kql_types"] = types
     return merged
+
+
+def _names(value: str | Sequence[str], label: str) -> list[str]:
+    """Return ``value`` as a list of column names, or raise ``ConfigurationError``."""
+    items = [value] if isinstance(value, str) else list(value)
+    if not items:
+        raise ConfigurationError(f"{label} must not be empty.")
+    for item in items:
+        if not isinstance(item, str) or not item:
+            raise ConfigurationError(f"{label} must be non-empty column names, got {item!r}.")
+    if len(set(items)) != len(items):
+        raise ConfigurationError(f"{label} must not repeat a column, got {items!r}.")
+    return items
+
+
+def _check_columns(df: pd.DataFrame, needed: list[str]) -> None:
+    """Raise ``ConfigurationError`` if ``df`` lacks any of the ``needed`` columns."""
+    missing = [name for name in needed if name not in df.columns]
+    if missing:
+        raise ConfigurationError(
+            f"Column(s) {missing} named in merge_on/agg_column are not in the query result; "
+            f"available columns: {list(df.columns)}."
+        )
+
+
+def _agg_type(func: str | Callable[..., Any], original: str | None) -> str | None:
+    """The KQL type of an aggregated column, or None when it cannot be known."""
+    if not isinstance(func, str):
+        return None
+    if func in _SAME_TYPE:
+        return original
+    if func in _LONG_TYPE:
+        return "long"
+    if func in _REAL_TYPE:
+        return "real"
+    return None
+
+
+def _aggregate(
+    merged: pd.DataFrame, keys: list[str], cols: list[str], func: str | Callable[..., Any]
+) -> pd.DataFrame:
+    """Group ``merged`` by ``keys`` and aggregate ``cols`` with ``func``; keep ``kql_types``."""
+    _check_columns(merged, keys + cols)
+    try:
+        out = merged.groupby(keys, as_index=False, dropna=False, sort=True)[cols].agg(func)
+    except Exception as exc:
+        name = func if isinstance(func, str) else getattr(func, "__name__", repr(func))
+        raise ConfigurationError(
+            f"Cannot aggregate {cols} with {name!r} grouped by {keys}: {exc}"
+        ) from exc
+    old = merged.attrs.get(KQL_TYPES_ATTR, {})
+    types = {k: old[k] for k in keys if k in old}
+    for col in cols:
+        kql_type = _agg_type(func, old.get(col))
+        if kql_type is not None:
+            types[col] = kql_type
+    if types:
+        out.attrs[KQL_TYPES_ATTR] = types
+    return out
 
 
 def _sleep(delay: float, stop: threading.Event) -> bool:
@@ -166,6 +242,102 @@ def _run_parallel(
     return [future.result() for future in futures]
 
 
+def _operator(tokens: list[Token], i: int, step: int) -> str:
+    """The operator (at most 2 characters) right next to token ``i``, on one side.
+
+    ``step`` is 1 for the operator after the token and -1 for the one before it. The tokenizer
+    emits every punctuation character on its own, so ``>=`` is the two tokens ``>`` and ``=``.
+    """
+    chars: list[str] = []
+    j = i + step
+    while 0 <= j < len(tokens) and len(chars) < 2:
+        tok = tokens[j]
+        if tok.kind != "p" or tok.text not in _OP_CHARS:
+            break
+        chars.append(tok.text)
+        j += step
+    return "".join(chars if step > 0 else reversed(chars))
+
+
+def _check_batch_filter(kql: str) -> None:
+    """Check that the user's KQL filters on the window as ``x >= BatchStart`` and ``x < BatchEnd``.
+
+    Only the user's own text is checked, never the ``let`` prefix. A comparison is a use of
+    ``BatchStart`` or ``BatchEnd`` right next to ``<``, ``>``, ``<=``, ``>=``, ``==``, ``!=``,
+    ``<>``, ``=~`` or ``!~``, or inside ``between (...)``. Other uses (``extend W = BatchStart``,
+    ``bin(x, 1h)`` arguments) are not judged. A variable followed by arithmetic
+    (``x >= BatchStart - 1h``) is part of an expression: it neither satisfies nor violates the rule.
+    Comments and strings are ignored because the tokenizer drops or isolates them.
+
+    Raises:
+        ConfigurationError: A variable is defined by the KQL, is compared in a form other than
+            ``x >= BatchStart`` / ``BatchStart <= x`` / ``x < BatchEnd`` / ``BatchEnd > x``, or
+            one of the two required comparisons is missing.
+    """
+    tokens = tokenize(kql)
+    found: set[str] = set()
+    for i, tok in enumerate(tokens):
+        if tok.low == "between" and tok.kind == "id" and not tok.quoted:
+            depth = 0
+            for later in tokens[i + 1 :]:
+                depth += later.is_p("(") - later.is_p(")")
+                if later.kind == "id" and later.text in _BATCH_VARS:
+                    raise ConfigurationError(
+                        "`between` includes both ends, so a row on a window boundary would be "
+                        f"counted twice; {_EXPECTED}."
+                    )
+                if depth <= 0:
+                    break
+    for i, tok in enumerate(tokens):
+        if tok.kind != "id" or tok.text not in _BATCH_VARS:
+            continue
+        if i and tokens[i - 1].is_p(".") and not (i > 1 and tokens[i - 2].is_p(".")):
+            continue  # a member access (bag.BatchStart), not the variable
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        after = tokens[i + 2] if i + 2 < len(tokens) else None
+        if (
+            (nxt is not None and nxt.is_p(":"))
+            or (i and tokens[i - 1].is_kw("let", "as"))
+            or (nxt is not None and nxt.is_p("=") and not (after and after.is_p("=", "~")))
+        ):
+            raise ConfigurationError(
+                f"The KQL defines {tok.text} itself; it is defined for every window by the batch. "
+                f"Remove the definition and {_EXPECTED}."
+            )
+        is_start = tok.text == "BatchStart"
+        before_op = _operator(tokens, i, -1)  # x OP var
+        after_op = _operator(tokens, i, 1)  # var OP x
+        shifted = nxt is not None and nxt.kind == "p" and nxt.text in _ARITHMETIC
+        if shifted:
+            continue  # part of an expression (BatchEnd - BatchStart), not the bound itself
+        if before_op in _COMPARISONS:
+            if before_op == (">=" if is_start else "<"):
+                found.add(tok.text)
+                continue
+            raise ConfigurationError(
+                f"`... {before_op} {tok.text}` is not allowed; {_EXPECTED} (the window is "
+                "half-open: its start is included, its end is not)."
+            )
+        if after_op in _COMPARISONS:
+            if after_op == ("<=" if is_start else ">"):
+                found.add(tok.text)
+                continue
+            raise ConfigurationError(
+                f"`{tok.text} {after_op} ...` is not allowed; {_EXPECTED} (the window is "
+                "half-open: its start is included, its end is not)."
+            )
+    missing = [
+        f"`<column> {op} {name}` (or `{name} {mirror} <column>`)"
+        for name, op, mirror in (("BatchStart", ">=", "<="), ("BatchEnd", "<", ">"))
+        if name not in found
+    ]
+    if missing:
+        raise ConfigurationError(
+            f"The KQL must compare with {' and '.join(missing)}, so that a row on a window "
+            f"boundary is counted once: {_EXPECTED}. The query was not sent."
+        )
+
+
 def exec_batch_query(
     kql: str,
     start: datetime | timedelta,
@@ -175,6 +347,9 @@ def exec_batch_query(
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
     max_workers: int = 1,
+    merge_on: str | Sequence[str] | None = None,
+    agg_column: str | Sequence[str] | None = None,
+    agg_func: str | Callable[..., Any] = _DEFAULT_AGG,
     verbose: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
@@ -200,25 +375,33 @@ def exec_batch_query(
     Window bounds reach the query in two ways:
 
     * ``BatchStart`` and ``BatchEnd`` are defined as ``datetime`` values by ``let`` statements
-      added in front of your KQL, so the query can use them. Filter with
-      ``TimeGenerated >= BatchStart and TimeGenerated < BatchEnd`` so that a row on a boundary
-      is counted in one window only.
-    * Sentinel only: each window is also sent as the API time range, so the windowing holds
-      even if the KQL ignores ``BatchStart`` and ``BatchEnd``. The 1-day default and the "set in
-      query" rules of ``exec_query`` do not apply; the window is the time range. A warning is
-      logged once if the KQL has its own time filter that does not use ``BatchStart`` or
-      ``BatchEnd`` (both limits then apply).
-    * ADX has no API time range, so the KQL must use both ``BatchStart`` and ``BatchEnd``
-      (outside comments and strings); otherwise every window would return the same rows and a
-      ``ConfigurationError`` is raised.
+      added in front of your KQL, so the query can use them. The window is half-open, so the
+      KQL must filter with ``TimeGenerated >= BatchStart and TimeGenerated < BatchEnd`` (any
+      column or expression in place of ``TimeGenerated``; ``BatchStart <= x`` and
+      ``BatchEnd > x`` also work). This is checked before any query is sent, on both targets:
+      each of the two comparisons must appear (outside comments and strings), and any other
+      comparison of ``BatchStart`` or ``BatchEnd`` (``>``, ``<=``, ``==``, ``!=``, ``between``,
+      or the wrong variable) is rejected, so that a row on a boundary is counted in one window
+      only. Other uses, such as ``extend WindowStart = BatchStart``, are fine.
+    * Sentinel also sends each window as the API time range. The 1-day default and the "set in
+      query" rules of ``exec_query`` do not apply; the window is the time range.
+    * ADX has no API time range; the filter above is what windows the query.
 
-    Aggregations (``summarize``, ``count``, ``dcount``, ``top`` ...) run per window and are NOT
-    combined: a ``count()`` gives one row per window, and ``dcount`` or ``top`` results can
-    overlap between windows. Re-aggregate the merged DataFrame in pandas.
+    Aggregations (``summarize``, ``count``, ``dcount``, ``top`` ...) run per window, so by
+    default they are NOT combined: a ``count()`` gives one row per window, and ``dcount`` or
+    ``top`` results can overlap between windows. To combine them, pass ``merge_on`` (the columns
+    to group by), ``agg_column`` (the columns to aggregate) and optionally ``agg_func``; the
+    merged rows are then grouped and aggregated, which replaces the manual pandas step. This is
+    correct for raw rows with any function. For per-window ``summarize`` output use only
+    functions that can be re-combined: ``"sum"`` of counts or sums, ``"min"`` of mins, ``"max"``
+    of maxes. A mean of means, a sum of ``dcount`` or a ``nunique`` of per-window values is
+    wrong. For an average, ``summarize`` the sum and the count per window, re-aggregate both with
+    ``"sum"``, then divide in pandas. Null keys are kept as their own group, as in KQL.
 
     Args:
         kql: The KQL query. It must not begin with ``.`` on ADX (management commands cannot be
             windowed). Do not define ``BatchStart`` or ``BatchEnd`` yourself.
+            It must filter on the window as described above.
         start: The start of the period, or a ``timedelta`` meaning that long before ``end``.
             A naive datetime is taken to be UTC.
         end: The end of the period (exclusive); defaults to now in UTC. A naive datetime is
@@ -232,6 +415,13 @@ def exec_batch_query(
             further queries only queue on the server, and the wait counts against ``timeout``.
             ADX's concurrency limit is shared by everyone using the cluster, so a high value can
             throttle (and slow down) other users; raise it with care.
+        merge_on: Column name or names to group the merged rows by. Give it together with
+            ``agg_column``. Must be non-empty and share no column with ``agg_column``.
+        agg_column: Column name or names to aggregate. Give it together with ``merge_on``.
+        agg_func: How to aggregate every ``agg_column`` (default ``"sum"``): any pandas
+            ``GroupBy.agg`` function name (``"sum"``, ``"min"``, ``"max"``, ``"mean"``,
+            ``"count"``, ``"first"``, ``"last"`` ...) or a callable. Passing it without
+            ``agg_column`` is an error.
         verbose: If true, print this call's logs (INFO and above) to the cell output.
 
     Returns:
@@ -240,12 +430,24 @@ def exec_batch_query(
         returned. ``df.attrs["kql_types"]`` is taken from the windows' results, adding columns
         that only later windows have.
 
+        With ``merge_on`` and ``agg_column``: one row per distinct key sorted by the keys, with
+        the ``merge_on`` columns then the ``agg_column`` columns and a fresh index (unless every
+        window returned no columns, which is returned as is). ``kql_types`` keeps the key types;
+        an aggregated column keeps its type for ``sum``, ``min``, ``max``, ``first`` and
+        ``last``, becomes ``long`` for ``count``, ``nunique`` and ``size``, ``real`` for
+        ``mean``, ``median``, ``std`` and ``var``, and has no entry otherwise.
+
     Raises:
         ConfigurationError: ``interval`` or ``timeout`` is not positive, ``max_workers`` is not an
             integer from 1 to 5, ``start`` is not before ``end``, ``target`` is unknown, the ADX
-            KQL is a management command or does not use both ``BatchStart`` and ``BatchEnd``,
-            or any error ``exec_query`` raises for configuration or the cost guard. It is also
-            a ``ValueError``.
+            KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
+            ``< BatchEnd`` (checked before any query, on both targets), defines ``BatchStart`` or
+            ``BatchEnd``, compares them in any other form,
+            ``merge_on`` and ``agg_column`` are not given together, are empty, not column names,
+            repeated or overlapping, ``agg_func`` is not a name or callable or is given without
+            ``agg_column``, a named column is not in the result (checked after the first
+            window, before the rest run), or any error ``exec_query`` raises for configuration
+            or the cost guard. It is also a ``ValueError``.
         QueryError: A window failed. The message names the window (number, total and bounds)
             and the original error is chained. A window still throttled after its retries fails
             this way too.
@@ -258,10 +460,14 @@ def exec_batch_query(
         ...     " | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
         ...     " | summarize n = count() by UserPrincipalName",
         ...     timedelta(days=30),  # the last 30 days, one query per day
+        ...     merge_on="UserPrincipalName",
+        ...     agg_column="n",  # sum of the per-day counts: one row per user
         ... )
-        >>> df = df.groupby("UserPrincipalName", as_index=False)["n"].sum()  # re-aggregate
-        >>> df = exec_batch_query("T", datetime(2026, 1, 1), datetime(2026, 2, 1),
-        ...                       interval=timedelta(hours=6), max_workers=3)
+        >>> df = exec_batch_query(
+        ...     "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd",
+        ...     datetime(2026, 1, 1), datetime(2026, 2, 1),
+        ...     interval=timedelta(hours=6), max_workers=3,
+        ... )
     """
     now = datetime.now(UTC)
     if interval <= timedelta(0):
@@ -278,28 +484,36 @@ def exec_batch_query(
         )
     if target not in ("sentinel", "adx"):
         raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
+    keys: list[str] = []
+    cols: list[str] = []
+    if merge_on is None or agg_column is None:
+        if merge_on is not None or agg_column is not None:
+            raise ConfigurationError("merge_on and agg_column must be given together.")
+        if agg_func is not _DEFAULT_AGG:
+            raise ConfigurationError("agg_func needs merge_on and agg_column.")
+    else:
+        keys = _names(merge_on, "merge_on")
+        cols = _names(agg_column, "agg_column")
+        both = [name for name in keys if name in cols]
+        if both:
+            raise ConfigurationError(f"{both} cannot be in both merge_on and agg_column.")
+        if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
+            raise ConfigurationError(
+                f"agg_func must be a function name or a callable, got {agg_func!r}."
+            )
     end_utc = _utc(end) if end is not None else now
     start_utc = end_utc - start if isinstance(start, timedelta) else _utc(start)
     if start_utc >= end_utc:
         raise ConfigurationError(f"start ({start_utc}) must be before end ({end_utc}).")
 
-    if target == "adx":
-        if kql.lstrip().startswith("."):
-            raise ConfigurationError(
-                "Management commands cannot be run in windows; use exec_query for them."
-            )
-        used = set(_BATCH_VAR.findall(strip_noise(kql)))
-        if used != {"BatchStart", "BatchEnd"}:
-            raise ConfigurationError(
-                "With target='adx' the KQL must use both BatchStart and BatchEnd (for example "
-                "`where Timestamp >= BatchStart and Timestamp < BatchEnd`); ADX has no API time "
-                "range, so otherwise every window would return the same rows."
-            )
+    if target == "adx" and kql.lstrip().startswith("."):
+        raise ConfigurationError(
+            "Management commands cannot be run in windows; use exec_query for them."
+        )
+    _check_batch_filter(kql)
 
     windows = _windows(start_utc, end_utc, interval)
     total = len(windows)
-    warn_filter = target == "sentinel" and not _BATCH_VAR.search(strip_noise(kql))
-    warn_filter = warn_filter and has_time_filter(kql)
 
     stop = threading.Event()
     jobs = [
@@ -315,16 +529,24 @@ def exec_batch_query(
             end_utc,
             max_workers,
         )
-        if warn_filter:
-            logger.warning(
-                "Query has its own time filter that does not use BatchStart/BatchEnd; it and "
-                "each window's time range both apply, so the narrower range wins."
-            )
         results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
+        if keys and len(results[0].columns):
+            _check_columns(results[0], keys + cols)  # before the remaining windows run
         if max_workers > 1 and total > 2:
             results += _run_parallel(jobs[1:], max_workers, stop)
         else:
             results += [job() for job in jobs[1:]]
         merged = _merge(results)
         logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
+        if keys and len(merged.columns):
+            rows = len(merged)
+            merged = _aggregate(merged, keys, cols, agg_func)
+            logger.info(
+                "Re-aggregated %d rows into %d by %s (%s of %s)",
+                rows,
+                len(merged),
+                keys,
+                agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
+                cols,
+            )
     return merged
