@@ -20,6 +20,7 @@ Connection settings are validated and invalid ones raise an error.
 Public API:
 
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
+* ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
 * ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
@@ -30,6 +31,7 @@ runs the cell body as KQL through ``exec_query`` and displays it with ``format_d
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
+from ._batch import exec_batch_query
 from ._format import format_dataframe
 from ._log import disable_logging, enable_logging
 from ._query import exec_query
@@ -39,6 +41,7 @@ __version__ = "2.0.0"
 __all__ = [
     "disable_logging",
     "enable_logging",
+    "exec_batch_query",
     "exec_query",
     "format_dataframe",
 ]

@@ -14,6 +14,11 @@
 
 ### Added
 
+- `exec_batch_query(kql, start, end=None, *, interval=timedelta(days=1), target, timeout,
+  verbose)` runs the same KQL once per consecutive time window and merges the results into one
+  DataFrame, for queries too big for one run or needing a longer period. Each window defines
+  `BatchStart` and `BatchEnd` in the query and, on Sentinel, is also sent as the API time range.
+  ADX queries must use both variables. Aggregations run per window; re-aggregate in pandas.
 - `%%kql` IPython cell magic (`%load_ext security_notebook_tools`) for quick queries: write raw
   KQL in a cell and see the result rendered with `format_dataframe`. The DataFrame is not kept;
   use `exec_query` when you need it. Supports every `exec_query` option (`--timespan`,

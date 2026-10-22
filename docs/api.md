@@ -220,6 +220,74 @@ df = exec_query("Events | take 100", target="adx", timeout=600)
 df = exec_query(".show tables", target="adx")  # management command
 ```
 
+## exec_batch_query
+
+```python
+exec_batch_query(
+    kql: str,
+    start: datetime | timedelta,
+    end: datetime | None = None,
+    *,
+    interval: timedelta = timedelta(days=1),
+    target: Literal["sentinel", "adx"] = "sentinel",
+    timeout: int = 300,
+    verbose: bool = False,
+) -> pandas.DataFrame
+```
+
+Run the same KQL once per consecutive time window and merge the results. The period is split
+into `[start, start + interval)`, `[start + interval, start + 2 * interval)` ... with the last
+window clipped to `end`. Windows run sequentially, oldest first, with no retries; the first
+failure stops the batch.
+
+Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
+BatchEnd = datetime("...");` added in front of your KQL. Filter with
+`TimeGenerated >= BatchStart and TimeGenerated < BatchEnd` so a boundary row is counted once.
+On Sentinel each window is also sent as the API time range, so the 1-day default and the "set in
+query" rules of `exec_query` do not apply; one warning is logged per batch if the KQL has its own
+time filter that does not use `BatchStart`/`BatchEnd`. ADX has no API time range, so its KQL must
+use both variables. The Sentinel cost guard applies to every window.
+
+Aggregations (`summarize`, `count`, `dcount`, `top` ...) run per window and are not combined;
+re-aggregate the merged DataFrame in pandas.
+
+### Parameters
+
+| Name | Description |
+| --- | --- |
+| `kql` | The KQL query. Do not define `BatchStart` or `BatchEnd` yourself. With `target="adx"` it must use both (outside comments and strings) and may not start with `.` (management commands). |
+| `start` | Start of the period, or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
+| `end` | End of the period (exclusive); defaults to now in UTC. Naive datetimes are taken to be UTC. |
+| `interval` | Window length (default 1 day); must be positive. |
+| `target` | `"sentinel"` (default) or `"adx"`. |
+| `timeout` | Server-side timeout in seconds for each window (default 300); must be positive. |
+| `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
+
+### Returns
+
+The non-empty window results concatenated in window order with a fresh index; if every window is
+empty, the first window's empty result. `df.attrs["kql_types"]` comes from the windows' results,
+adding columns that only later windows have.
+
+### Raises
+
+* `ConfigurationError`: `interval` or `timeout` is not positive, `start` is not before `end`,
+  `target` is unknown, the ADX KQL is a management command or lacks `BatchStart`/`BatchEnd`, or
+  any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
+* `QueryError`: a window failed; the message names the window (number, total, bounds) and the
+  original error is chained.
+
+### Examples
+
+```python
+from datetime import datetime, timedelta
+from security_notebook_tools import exec_batch_query
+
+kql = "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd | take 1000"
+df = exec_batch_query(kql, timedelta(days=30))  # last 30 days, one query per day
+df = exec_batch_query(kql, datetime(2026, 1, 1), datetime(2026, 2, 1), interval=timedelta(hours=6))
+```
+
 ## format_dataframe
 
 ```python

@@ -139,6 +139,30 @@ Detection is a text heuristic: a time filter it can't see (for example inside a 
 or saved query) isn't detected, so the 1-day default is applied on top. Pass `timespan`
 explicitly in that case. The exact rules are in [docs/api.md](docs/api.md).
 
+### Long periods (batch)
+
+`exec_batch_query` runs the same KQL once per time window (default 1 day, one after another) and
+returns the results concatenated in one DataFrame. `start` is a datetime, or a `timedelta` meaning
+"that long before `end`"; `end` defaults to now (UTC; naive datetimes are taken as UTC).
+
+```python
+from datetime import timedelta
+from security_notebook_tools import exec_batch_query
+
+df = exec_batch_query(
+    "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    " | summarize n = count() by UserPrincipalName",
+    timedelta(days=30),
+)
+df = df.groupby("UserPrincipalName", as_index=False)["n"].sum()  # re-aggregate per-window results
+```
+
+Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; filter with
+`>= BatchStart and < BatchEnd` so boundary rows aren't counted twice. On Sentinel each window is
+also sent as the API time range; on ADX the KQL must use both variables. Aggregations run per
+window and are not combined. The cost guard applies to every window, and the first failing window
+stops the batch. See [docs/api.md](docs/api.md).
+
 ### Timeout
 
 `timeout` is the server-side timeout in seconds for both targets. Default 300; must be positive.
