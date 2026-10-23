@@ -9,6 +9,11 @@
   a 504 on a POST up to 3 times on its own, so one window could run for 15 to 20 minutes with
   `timeout=300`. A request that is not answered in time is abandoned (its helper thread ends
   when the SDK call does) and raises a timeout error instead of hanging.
+- `exec_batch_query` no longer retries a connection reset (or connection timeout) that arrives
+  after the window's attempt ran for at least half of `timeout`. That is a query cut off for being
+  too slow, not a network blip, and each retry wasted another 4 to 15 minutes (30 minutes for one
+  window). It now fails at once with a timeout error that says how long the window ran and
+  suggests a smaller `interval` or a larger `timeout`. Early resets are still retried.
 - HTTP 504, 408 and `GatewayTimeout` responses raise an internal `QueryTimeoutError` (a
   `QueryError`, not exported, not retried), so `except QueryError` still catches them.
 

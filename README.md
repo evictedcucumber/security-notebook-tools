@@ -180,7 +180,9 @@ only queue on the server and eat into `timeout`); ADX's limit is shared with eve
 cluster, so raise it with care. A window that fails transiently (HTTP 429, 502/503, or a dropped connection such as "connection
 reset by peer") is retried up to 4 times with
 exponential backoff and jitter; any other failure stops the batch (running windows finish, the
-rest are skipped).
+rest are skipped). A connection reset that comes after the window ran for half of `timeout` or
+more is a query cut off for being too slow, not a network blip: it is not retried, and the error
+suggests a smaller `interval` or a larger `timeout`.
 
 ```python
 df = exec_batch_query(kql, timedelta(days=30), max_workers=3)

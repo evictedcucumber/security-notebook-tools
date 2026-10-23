@@ -289,7 +289,11 @@ A window that fails with a transient error is retried up to 4 times: the service
 timed out, DNS), or the service answers 502/503. The wait is a random time between 0 and 2, 4, 8
 and 16 seconds (exponential backoff with full jitter, capped at 30 s), and a warning names the
 reason each time; after that the window fails with an error that says it was retried. Other
-errors (bad KQL, 401/403, a server-side timeout) are not retried.
+errors (bad KQL, 401/403, a server-side timeout) are not retried. A connection that was reset or
+timed out after the attempt had already run for at least half of `timeout` was cut off for being
+too slow, not dropped by the network, so it counts as a timeout and is not retried either: the
+error says how long the window ran and suggests a smaller `interval` or a larger `timeout`. A
+timed-out window fails with a `QueryTimeoutError` (a `QueryError`).
 
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
 BatchEnd = datetime("...");` added in front of your KQL. The window is half-open, so the KQL must
@@ -352,7 +356,9 @@ results, adding columns that only later windows have.
   any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
 * `QueryError`: a window failed (including one that still failed transiently after its retries,
   which the message says); the message names the window (number, total, bounds) and the original
-  error is chained.
+  error is chained. A window that timed out (HTTP 504/408, no answer within `timeout` plus 30
+  seconds, or a connection reset after the window ran for half of `timeout`) fails with the
+  subclass `QueryTimeoutError`, without retries.
 
 ### Examples
 

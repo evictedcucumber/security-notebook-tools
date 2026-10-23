@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
@@ -16,8 +17,10 @@ import pandas as pd
 from ._errors import describe_network_error, log_unexpected, public_call
 from ._exceptions import (
     ConfigurationError,
+    QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
     SecurityNotebookToolsError,
 )
@@ -51,6 +54,11 @@ MAX_WORKERS = 5
 _MAX_RETRIES = 4
 _BACKOFF_BASE = 2.0
 _BACKOFF_CAP = 30.0
+# A connection that was reset or timed out after the attempt ran for at least this fraction of
+# ``timeout`` was cut off for being too slow (a proxy or the gateway giving up on a long query),
+# not dropped by a network blip: it is treated as a timeout and not retried.
+_LATE_RESET_FRACTION = 0.5
+_clock = time.monotonic  # tests replace it
 
 
 class _DefaultAgg(str):
@@ -68,6 +76,18 @@ _REAL_TYPE = {"mean", "median", "std", "var"}
 
 class _Stopped(Exception):
     """A worker gave up waiting to retry because the batch is already failing."""
+
+
+class _WindowTimeout(QueryTimeoutError):
+    """A window's query timed out (the service said so, or the connection was cut off late).
+
+    ``elapsed`` is how long the last attempt ran, in seconds.
+    """
+
+    def __init__(self, message: str, elapsed: float) -> None:
+        """Store how long the attempt ran alongside the message."""
+        super().__init__(message)
+        self.elapsed = elapsed
 
 
 def _utc(value: datetime) -> datetime:
@@ -204,14 +224,20 @@ def _run_window(
     """Run one window, retrying transient failures; wrap a failure with the window's name.
 
     Raises:
+        QueryTimeoutError: The query timed out (HTTP 504/408, the client deadline), or the
+            connection was reset or timed out after the attempt ran for at least
+            ``_LATE_RESET_FRACTION`` of ``timeout``. Not retried.
         QueryError: The window failed, or still failed transiently after ``_MAX_RETRIES``
             retries (the message then says it was retried).
         _Stopped: ``stop`` was set while waiting to retry.
     """
     w_start, w_end = bounds
+    label = f"{index}/{total}"
+    name = f"Batch window {label} ({w_start} to {w_end})"
     prefix = f"let BatchStart = {_literal(w_start)}; let BatchEnd = {_literal(w_end)};\n"
     retries = 0
     while True:
+        attempt_start = _clock()
         try:
             if target == "sentinel":
                 tables = _query_sentinel(prefix + kql, bounds, timeout, cache=cache)
@@ -219,30 +245,46 @@ def _run_window(
                 tables = _query_adx(prefix + kql, timeout, cache=cache)
             break
         except SecurityNotebookToolsError as exc:
+            elapsed = _clock() - attempt_start
             if not isinstance(exc, QueryError):
                 raise  # e.g. ConfigurationError from the cost guard: unchanged
-            if not isinstance(exc, QueryTransientError):
+            if isinstance(exc, QueryConnectionError) and elapsed >= timeout * _LATE_RESET_FRACTION:
                 logger.warning(
-                    "Batch %d/%d failed and is not retried: %s",
-                    index,
-                    total,
+                    "Batch %s was cut off after %.0f s (timeout %d s), a timeout rather than a "
+                    "network blip, so it is not retried: %s",
+                    label,
+                    elapsed,
+                    timeout,
                     describe_exception(exc),
                 )
-                raise QueryError(
-                    f"Batch window {index}/{total} ({w_start} to {w_end}) failed: {exc}"
+                raise _WindowTimeout(
+                    f"{name} ran {elapsed:.0f} s before the connection was reset or timed out "
+                    f"(timeout={timeout} s): the query was cut off for being too slow, not "
+                    "dropped by the network, so it is not retried. Use a smaller `interval`, set "
+                    f"`min_interval` to split such windows, or raise `timeout`: {exc}",
+                    elapsed,
                 ) from exc
+            if isinstance(exc, QueryTimeoutError):
+                logger.warning(
+                    "Batch %s timed out after %.0f s and is not retried: %s",
+                    label,
+                    elapsed,
+                    describe_exception(exc),
+                )
+                raise _WindowTimeout(f"{name} failed: {exc}", elapsed) from exc
+            if not isinstance(exc, QueryTransientError):
+                logger.warning(
+                    "Batch %s failed and is not retried: %s", label, describe_exception(exc)
+                )
+                raise QueryError(f"{name} failed: {exc}") from exc
             if retries >= _MAX_RETRIES:
                 logger.warning(
-                    "Batch %d/%d still failing after %d retries, giving up: %s",
-                    index,
-                    total,
+                    "Batch %s still failing after %d retries, giving up: %s",
+                    label,
                     retries,
                     describe_exception(exc),
                 )
-                raise QueryError(
-                    f"Batch window {index}/{total} ({w_start} to {w_end}) failed after "
-                    f"{retries} retries: {exc}"
-                ) from exc
+                raise QueryError(f"{name} failed after {retries} retries: {exc}") from exc
             delay = random.uniform(0, min(_BACKOFF_CAP, _BACKOFF_BASE * 2**retries))
             retries += 1
             if isinstance(exc, QueryThrottledError):
@@ -250,9 +292,8 @@ def _run_window(
             else:
                 why = f"failed with a transient error ({_reason(exc)})"
             logger.warning(
-                "Batch %d/%d %s; retrying in %.1f s (attempt %d/%d)",
-                index,
-                total,
+                "Batch %s %s; retrying in %.1f s (attempt %d/%d)",
+                label,
                 why,
                 delay,
                 retries,
@@ -260,13 +301,11 @@ def _run_window(
             )
             if _sleep(delay, stop):
                 logger.warning(
-                    "Batch %d/%d is not retried: another window failed and the batch is stopping",
-                    index,
-                    total,
+                    "Batch %s is not retried: another window failed and the batch is stopping",
+                    label,
                 )
                 raise _Stopped from exc
         except Exception as exc:
-            name = f"Batch window {index}/{total} ({w_start} to {w_end})"
             log_unexpected(logger, name, exc)
             failure = QueryError(
                 f"{name} failed with an unexpected {type(exc).__name__}: {exc}. This case is "
@@ -276,7 +315,7 @@ def _run_window(
             mark_failure_logged(failure)
             raise failure from exc
     df = tables[0] if tables else pd.DataFrame()
-    logger.info("Batch %d/%d: %s → %s, rows=%d", index, total, w_start, w_end, len(df))
+    logger.info("Batch %s: %s → %s, rows=%d", label, w_start, w_end, len(df))
     return df
 
 
@@ -452,8 +491,13 @@ def exec_batch_query(
     timed out, DNS), or HTTP 502/503. The wait is a random time between 0 and 2, 4, 8 and 16
     seconds (full jitter, capped at 30 s), and a warning names the reason each time. After that
     the window fails with an error that says it was retried. Other errors (bad KQL, HTTP
-    401/403, a server-side timeout) are not retried. An error nobody anticipated is logged at
-    ERROR with its traceback, wrapped in a ``QueryError`` that names the window, and not retried.
+    401/403, a server-side timeout) are not retried. A connection that was reset or timed out
+    after the attempt had already run for at least half of ``timeout`` was cut off for being too
+    slow, not dropped by the network: it counts as a timeout and is not retried either; its
+    message says how long the window ran and suggests a smaller ``interval`` or a larger
+    ``timeout``. A timeout fails with a ``QueryTimeoutError`` (a ``QueryError``) that names the
+    window. An error nobody anticipated is logged at ERROR with its traceback, wrapped in a
+    ``QueryError`` that names the window, and not retried.
 
     Window bounds reach the query in two ways:
 
@@ -540,7 +584,10 @@ def exec_batch_query(
             or the cost guard. It is also a ``ValueError``.
         QueryError: A window failed. The message names the window (number, total and bounds)
             and the original error is chained. A window that still failed transiently after
-            its retries fails this way too, and the message says it was retried.
+            its retries fails this way too, and the message says it was retried. A window that
+            timed out (HTTP 504/408, no answer within ``timeout`` plus 30 seconds, or a
+            connection reset after it ran for half of ``timeout``) fails with its subclass
+            ``QueryTimeoutError`` and is not retried.
 
     Example:
         >>> from datetime import datetime, timedelta

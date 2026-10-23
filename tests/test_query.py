@@ -415,6 +415,7 @@ from security_notebook_tools import _batch  # noqa: E402
 from security_notebook_tools._exceptions import (  # noqa: E402
     QueryConnectionError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
 )
 
@@ -1037,3 +1038,158 @@ def test_batch_configuration_error_passes_through_unchanged(sentinel, backoff):
     with pytest.raises(ConfigurationError) as ei:
         snt.exec_batch_query(FILTER, D0, _days(2))
     assert ei.value is config
+
+
+# --- exec_batch_query: timeouts and late connection resets --------------------------------------
+
+
+class FakeClock:
+    """A clock the test moves forward by hand: queries "run" for as long as the test says."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def clock():
+    fake = FakeClock()
+    with mock.patch.object(_batch, "_clock", fake):
+        yield fake
+
+
+def _reset(message="Sentinel query failed: could not reach the service: [Errno 104]"):
+    error = QueryConnectionError(message)
+    error.__cause__ = ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+    return error
+
+
+def test_batch_late_connection_reset_is_a_timeout_and_not_retried(sentinel, backoff, clock, caplog):
+    cls, _ = sentinel
+    reset = _reset()
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        clock.now += 270
+        raise reset
+
+    cls.return_value.query_tables.side_effect = query
+    caplog.set_level(logging.WARNING, logger="security_notebook_tools")
+    with pytest.raises(
+        QueryTimeoutError, match=r"window 1/2 .*ran 270 s before the connection"
+    ) as ei:
+        snt.exec_batch_query(FILTER, D0, _days(2))
+    message = str(ei.value)
+    assert "smaller `interval`" in message
+    assert "`min_interval`" in message
+    assert "raise `timeout`" in message
+    assert ei.value.__cause__ is reset
+    assert isinstance(ei.value, QueryError)
+    assert not isinstance(ei.value, QueryTransientError)
+    assert cls.return_value.query_tables.call_count == 1
+    assert backoff[0] == []  # nothing was waited for
+    warnings_ = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("Batch 1/2 was cut off after 270 s" in m and "not retried" in m for m in warnings_)
+    assert not any("retrying" in m for m in warnings_)
+
+
+def test_batch_early_connection_reset_is_still_retried(sentinel, backoff, clock):
+    cls, _ = sentinel
+    ok = [pd.DataFrame({"a": [1]})]
+    calls = []
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        calls.append(1)
+        clock.now += 5
+        if len(calls) == 1:
+            raise _reset()
+        return ok
+
+    cls.return_value.query_tables.side_effect = query
+    assert snt.exec_batch_query(FILTER, D0, _days(1)).shape == (1, 1)
+    assert len(calls) == 2
+    assert backoff[0] == [1.0]
+
+
+def test_batch_late_reset_threshold_is_half_of_timeout(sentinel, backoff, clock):
+    assert _batch._LATE_RESET_FRACTION == 0.5
+    cls, _ = sentinel
+    ok = [pd.DataFrame({"a": [1]})]
+    ran = {"for": 149.9}
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        clock.now += ran["for"]
+        if cls.return_value.query_tables.call_count == 1:
+            raise _reset()
+        return ok
+
+    cls.return_value.query_tables.side_effect = query
+    snt.exec_batch_query(FILTER, D0, _days(1), timeout=300)  # 149.9 s < 150 s: retried
+    assert cls.return_value.query_tables.call_count == 2
+    cls.return_value.query_tables.reset_mock()
+    ran["for"] = 150
+    with pytest.raises(QueryTimeoutError):
+        snt.exec_batch_query(FILTER, D0, _days(1), timeout=300, cache=False)
+    assert cls.return_value.query_tables.call_count == 1  # exactly half: not retried
+
+
+def test_batch_late_reset_threshold_follows_the_timeout_argument(sentinel, backoff, clock):
+    cls, _ = sentinel
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        clock.now += 40
+        raise _reset()
+
+    cls.return_value.query_tables.side_effect = query
+    with pytest.raises(QueryTimeoutError):
+        snt.exec_batch_query(FILTER, D0, _days(1), timeout=60)  # 40 s >= 30 s
+    assert cls.return_value.query_tables.call_count == 1
+    cls.return_value.query_tables.reset_mock()
+    with pytest.raises(QueryError, match="after 4 retries") as ei:
+        snt.exec_batch_query(FILTER, D0, _days(1), timeout=100)  # 40 s < 50 s: retried
+    assert not isinstance(ei.value, QueryTimeoutError)
+    assert cls.return_value.query_tables.call_count == 5
+
+
+def test_batch_reset_after_an_early_retry_can_still_be_late(sentinel, backoff, clock):
+    cls, _ = sentinel
+    durations = iter([2, 280])
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        clock.now += next(durations)
+        raise _reset()
+
+    cls.return_value.query_tables.side_effect = query
+    with pytest.raises(QueryTimeoutError, match="ran 280 s"):
+        snt.exec_batch_query(FILTER, D0, _days(1))
+    assert cls.return_value.query_tables.call_count == 2
+    assert backoff[0] == [1.0]
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_batch_late_reset_in_a_later_window_stops_the_batch(sentinel, backoff, clock, workers):
+    cls, _ = sentinel
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        if _window_no(timespan) == 3:
+            clock.now += 270
+            raise _reset()
+        return [pd.DataFrame({"a": [1]})]
+
+    cls.return_value.query_tables.side_effect = query
+    with pytest.raises(QueryTimeoutError, match="window 3/4"):
+        snt.exec_batch_query(FILTER, D0, _days(4), max_workers=workers)
+    assert backoff[0] == []
+
+
+def test_batch_timeout_error_is_not_retried_and_names_the_window(sentinel, backoff):
+    cls, _ = sentinel
+    boom = QueryTimeoutError("Sentinel query failed: GatewayTimeout (set `min_interval`)")
+    cls.return_value.query_tables.side_effect = [[pd.DataFrame({"a": [1]})], boom]
+    with pytest.raises(QueryTimeoutError, match=r"window 2/3 .*2026-01-02.*GatewayTimeout") as ei:
+        snt.exec_batch_query(FILTER, D0, _days(3))
+    assert ei.value.__cause__ is boom
+    assert isinstance(ei.value, QueryError)
+    assert cls.return_value.query_tables.call_count == 2
+    assert backoff[0] == []
