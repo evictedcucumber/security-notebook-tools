@@ -1,14 +1,8 @@
 # Changelog
 
-## 4.0.0 - 2026-10-23
+## 5.0.0 - 2026-10-23
 
 ### Breaking
-
-- `format_dataframe` no longer takes `column_styles`; passing it raises `TypeError`. Its one
-  style, `"readable_numbers"`, is now always on: every numeric (`int`, `long`, `real`,
-  `decimal`) column, recorded or inferred type alike, has its integer digits grouped with spaces
-  (`1 000 000 000.00000`). The fraction is not grouped, and a `real` in exponent form (`1e+20`)
-  is left as it is.
 
 - Argument validation is stricter and happens before anything is sent (all `ConfigurationError`,
   except `format_dataframe`, which raises `ValueError`): `timeout` must be a positive `int` (a
@@ -18,6 +12,16 @@
   must be a datetime or timedelta, `end` a datetime or `None` and `interval` a `timedelta`;
   `format_dataframe`'s `df` must be a DataFrame. These used to fail deep in pandas or the SDK
   (reported as an unexpected `QueryError`) or were silently accepted.
+
+## 4.0.0 - 2026-10-23
+
+### Breaking
+
+- `format_dataframe` no longer takes `column_styles`; passing it raises `TypeError`. Its one
+  style, `"readable_numbers"`, is now always on: every numeric (`int`, `long`, `real`,
+  `decimal`) column, recorded or inferred type alike, has its integer digits grouped with spaces
+  (`1 000 000 000.00000`). The fraction is not grouped, and a `real` in exponent form (`1e+20`)
+  is left as it is.
 
 ### Added
 
