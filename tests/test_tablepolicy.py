@@ -733,3 +733,94 @@ def test_unknown_fetch_errors_are_logged_with_traceback_and_still_fail_closed(
     assert ("please report it" in str(ei.value)) is traceback_logged
     assert any(r.exc_info for r in caplog.records) is traceback_logged
     assert not tp._cache
+
+
+# --- logging ------------------------------------------------------------------------------------
+
+
+def test_arm_requests_log_method_host_and_path_but_never_the_query(caplog):
+    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    client = mock.Mock()
+    client.send_request.return_value = mock.Mock(status_code=200, content=b'{"a": 1}')
+    tp._get_json(client, f"{TABLES_URL}&$skiptoken=SECRETPAGE")
+    text = caplog.text
+    assert "ARM request: done in" in text
+    assert "method=GET host=management.azure.com" in text
+    assert "/resourceGroups/<name>/" in text
+    assert "status=200" in text
+    for leak in ("SECRETPAGE", "api-version", "skiptoken", "rg/providers", "22222222"):
+        assert leak not in text
+    assert {r.levelno for r in caplog.records if "ARM request" in r.getMessage()} == {logging.DEBUG}
+
+
+def test_arm_http_failure_is_one_warning_without_the_query(caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client = mock.Mock()
+    client.send_request.return_value = mock.Mock(status_code=403, content=b"{}")
+    with pytest.raises(QueryError):
+        tp._get_json(client, f"{TABLES_URL}&$skiptoken=SECRETPAGE")
+    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "ARM request: failed after" in record.getMessage()
+    assert "QueryError: HTTP 403 from Azure Resource Manager" in record.getMessage()
+    assert "SECRETPAGE" not in caplog.text
+
+
+def test_policy_fetch_is_logged_with_pages_and_without_the_resource_id(arm, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    tp.get_policy(RID, WS, mock.Mock())
+    done = next(
+        r.getMessage() for r in caplog.records if "table policy fetch: done" in r.getMessage()
+    )
+    assert "workspace=se…(len 11) pages=2 tables=9 not_analytics=5 functions=1" in done
+    assert "Reading table plans and functions for workspace se…(len 11)" in caplog.text
+    for leak in ("2222", "resourceGroups", RID, WS, "sentinel-ws"):
+        assert leak not in caplog.text
+    caplog.clear()
+    tp.get_policy(RID, WS, mock.Mock())  # reused: nothing at INFO
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+
+
+def test_known_fetch_failure_is_a_warning_not_an_error(caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with (
+        mock.patch.object(tp, "_get_json", side_effect=QueryError("HTTP 403")),
+        mock.patch.object(tp, "_arm_client"),
+        pytest.raises(QueryError),
+    ):
+        tp.get_policy(RID, WS, mock.Mock())
+    levels = [r.levelno for r in caplog.records if r.levelno >= logging.WARNING]
+    assert levels == [logging.WARNING]
+
+
+def test_unexpected_fetch_failure_is_one_error_with_traceback(caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with (
+        mock.patch.object(tp, "_get_json", side_effect=RuntimeError("boom")),
+        mock.patch.object(tp, "_arm_client"),
+        pytest.raises(QueryError) as info,
+    ):
+        tp.get_policy(RID, WS, mock.Mock())
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    from security_notebook_tools._log import failure_logged
+
+    assert failure_logged(info.value)
+
+
+def test_cost_guard_pass_names_tables_from_the_policy_not_the_query(policy, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    check_sentinel_query(
+        "SigninLogs | join (AuditLogs | take 1) on X | where Mail == 'bob@x.io'", policy
+    )
+    (record,) = [r for r in caplog.records if "Cost guard passed" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert record.getMessage().endswith("[AuditLogs, SigninLogs]")
+    assert "bob" not in caplog.text
+
+
+def test_cost_guard_rejection_is_not_logged_here(policy, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with pytest.raises(ConfigurationError):
+        check_sentinel_query("Basic_CL | take 1", policy)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

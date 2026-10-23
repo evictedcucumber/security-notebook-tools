@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from ._errors import describe_network_error
+from ._errors import describe_network_error, log_unexpected, public_call
 from ._exceptions import (
     ConfigurationError,
     QueryError,
@@ -23,6 +23,13 @@ from ._exceptions import (
 )
 from ._format import KQL_TYPES_ATTR
 from ._kql import Token, tokenize
+from ._log import (
+    dependency_call,
+    describe_exception,
+    fingerprint,
+    mark_failure_logged,
+    redact_exception_text,
+)
 from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel
 
 logger = logging.getLogger("security_notebook_tools.batch")
@@ -95,12 +102,14 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
         for name, kql_type in df.attrs.get("kql_types", {}).items():
             types.setdefault(name, kql_type)
     non_empty = [df for df in results if not df.empty]
-    if non_empty:
-        merged = pd.concat(non_empty, ignore_index=True)
-    elif results:
-        merged = results[0]
-    else:
-        merged = pd.DataFrame()
+    with dependency_call(logger, "pandas merge", windows=len(results)) as call:
+        if non_empty:
+            merged = pd.concat(non_empty, ignore_index=True)
+        elif results:
+            merged = results[0]
+        else:
+            merged = pd.DataFrame()
+        call["rows"] = len(merged)
     if types:
         merged.attrs["kql_types"] = types
     return merged
@@ -148,7 +157,8 @@ def _aggregate(
     """Group ``merged`` by ``keys`` and aggregate ``cols`` with ``func``; keep ``kql_types``."""
     _check_columns(merged, keys + cols)
     try:
-        out = merged.groupby(keys, as_index=False, dropna=False, sort=True)[cols].agg(func)
+        with dependency_call(logger, "pandas groupby aggregation", keys=keys, columns=cols):
+            out = merged.groupby(keys, as_index=False, dropna=False, sort=True)[cols].agg(func)
     except Exception as exc:
         name = func if isinstance(func, str) else getattr(func, "__name__", repr(func))
         raise ConfigurationError(
@@ -171,13 +181,13 @@ def _sleep(delay: float, stop: threading.Event) -> bool:
 
 
 def _reason(exc: QueryError) -> str:
-    """A short cause for a retry warning: the network cause if known, else the message."""
+    """A short cause for a retry warning: the network cause if known, else the redacted message."""
     cause = exc.__cause__
     if cause is not None:
         text = describe_network_error(cause)
         if text.startswith("[Errno"):
             return text.split(":", 1)[0].split(" ", 2)[-1]
-    return str(exc).split("\n")[0][:120]
+    return redact_exception_text(str(exc).split("\n")[0], 120)
 
 
 def _run_window(
@@ -211,10 +221,23 @@ def _run_window(
             if not isinstance(exc, QueryError):
                 raise  # e.g. ConfigurationError from the cost guard: unchanged
             if not isinstance(exc, QueryTransientError):
+                logger.warning(
+                    "Batch %d/%d failed and is not retried: %s",
+                    index,
+                    total,
+                    describe_exception(exc),
+                )
                 raise QueryError(
                     f"Batch window {index}/{total} ({w_start} to {w_end}) failed: {exc}"
                 ) from exc
             if retries >= _MAX_RETRIES:
+                logger.warning(
+                    "Batch %d/%d still failing after %d retries, giving up: %s",
+                    index,
+                    total,
+                    retries,
+                    describe_exception(exc),
+                )
                 raise QueryError(
                     f"Batch window {index}/{total} ({w_start} to {w_end}) failed after "
                     f"{retries} retries: {exc}"
@@ -235,21 +258,22 @@ def _run_window(
                 _MAX_RETRIES,
             )
             if _sleep(delay, stop):
+                logger.warning(
+                    "Batch %d/%d is not retried: another window failed and the batch is stopping",
+                    index,
+                    total,
+                )
                 raise _Stopped from exc
         except Exception as exc:
             name = f"Batch window {index}/{total} ({w_start} to {w_end})"
-            logger.error(
-                "Unexpected %s in %s; this case is not handled yet, please report it with the "
-                "traceback",
-                type(exc).__name__,
-                name,
-                exc_info=exc,
-            )
-            raise QueryError(
+            log_unexpected(logger, name, exc)
+            failure = QueryError(
                 f"{name} failed with an unexpected {type(exc).__name__}: {exc}. This case is "
                 "not handled yet and is not retried; the original exception and its traceback "
                 "are chained below. Please report it."
-            ) from exc
+            )
+            mark_failure_logged(failure)
+            raise failure from exc
     df = tables[0] if tables else pd.DataFrame()
     logger.info("Batch %d/%d: %s → %s, rows=%d", index, total, w_start, w_end, len(df))
     return df
@@ -275,9 +299,14 @@ def _run_parallel(
         if failed:
             stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
+            logger.warning(
+                "A window failed; %d window(s) not yet started were cancelled",
+                sum(f.cancelled() for f in futures),
+            )
     except BaseException:
         stop.set()
         pool.shutdown(wait=False, cancel_futures=True)
+        logger.warning("Batch interrupted; pending windows are cancelled")
         raise
     pool.shutdown()
     for future in futures:  # lowest index first; all are finished or cancelled by now
@@ -522,83 +551,98 @@ def exec_batch_query(
         ...     interval=timedelta(hours=6), max_workers=3,
         ... )
     """
-    now = datetime.now(UTC)
-    if interval <= timedelta(0):
-        raise ConfigurationError(f"interval must be positive, got {interval}.")
-    if timeout <= 0:
-        raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
-    if (
-        isinstance(max_workers, bool)
-        or not isinstance(max_workers, int)
-        or not 1 <= max_workers <= MAX_WORKERS
-    ):
-        raise ConfigurationError(
-            f"max_workers must be an integer from 1 to {MAX_WORKERS}, got {max_workers!r}."
-        )
-    if target not in ("sentinel", "adx"):
-        raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
-    keys: list[str] = []
-    cols: list[str] = []
-    if merge_on is None or agg_column is None:
-        if merge_on is not None or agg_column is not None:
-            raise ConfigurationError("merge_on and agg_column must be given together.")
-        if agg_func is not _DEFAULT_AGG:
-            raise ConfigurationError("agg_func needs merge_on and agg_column.")
-    else:
-        keys = _names(merge_on, "merge_on")
-        cols = _names(agg_column, "agg_column")
-        both = [name for name in keys if name in cols]
-        if both:
-            raise ConfigurationError(f"{both} cannot be in both merge_on and agg_column.")
-        if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
+    with public_call(
+        logger,
+        "exec_batch_query",
+        target=target,
+        interval=interval,
+        timeout=timeout,
+        max_workers=max_workers,
+        cache=cache,
+        merge_on=merge_on,
+        agg_column=agg_column,
+        kql=fingerprint(kql),
+    ) as call:
+        now = datetime.now(UTC)
+        if interval <= timedelta(0):
+            raise ConfigurationError(f"interval must be positive, got {interval}.")
+        if timeout <= 0:
             raise ConfigurationError(
-                f"agg_func must be a function name or a callable, got {agg_func!r}."
+                f"timeout must be a positive number of seconds, got {timeout}."
             )
-    end_utc = _utc(end) if end is not None else now
-    start_utc = end_utc - start if isinstance(start, timedelta) else _utc(start)
-    if start_utc >= end_utc:
-        raise ConfigurationError(f"start ({start_utc}) must be before end ({end_utc}).")
+        if (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or not 1 <= max_workers <= MAX_WORKERS
+        ):
+            raise ConfigurationError(
+                f"max_workers must be an integer from 1 to {MAX_WORKERS}, got {max_workers!r}."
+            )
+        if target not in ("sentinel", "adx"):
+            raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
+        keys: list[str] = []
+        cols: list[str] = []
+        if merge_on is None or agg_column is None:
+            if merge_on is not None or agg_column is not None:
+                raise ConfigurationError("merge_on and agg_column must be given together.")
+            if agg_func is not _DEFAULT_AGG:
+                raise ConfigurationError("agg_func needs merge_on and agg_column.")
+        else:
+            keys = _names(merge_on, "merge_on")
+            cols = _names(agg_column, "agg_column")
+            both = [name for name in keys if name in cols]
+            if both:
+                raise ConfigurationError(f"{both} cannot be in both merge_on and agg_column.")
+            if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
+                raise ConfigurationError(
+                    f"agg_func must be a function name or a callable, got {agg_func!r}."
+                )
+        end_utc = _utc(end) if end is not None else now
+        start_utc = end_utc - start if isinstance(start, timedelta) else _utc(start)
+        if start_utc >= end_utc:
+            raise ConfigurationError(f"start ({start_utc}) must be before end ({end_utc}).")
 
-    if target == "adx" and kql.lstrip().startswith("."):
-        raise ConfigurationError(
-            "Management commands cannot be run in windows; use exec_query for them."
-        )
-    _check_batch_filter(kql)
+        if target == "adx" and kql.lstrip().startswith("."):
+            raise ConfigurationError(
+                "Management commands cannot be run in windows; use exec_query for them."
+            )
+        _check_batch_filter(kql)
 
-    windows = _windows(start_utc, end_utc, interval)
-    total = len(windows)
+        windows = _windows(start_utc, end_utc, interval)
+        total = len(windows)
 
-    stop = threading.Event()
-    jobs = [
-        partial(_run_window, index, total, bounds, kql, target, timeout, cache, stop)
-        for index, bounds in enumerate(windows, start=1)
-    ]
-    logger.info(
-        "%d windows of %s from %s to %s (max_workers=%d)",
-        total,
-        interval,
-        start_utc,
-        end_utc,
-        max_workers,
-    )
-    results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
-    if keys and len(results[0].columns):
-        _check_columns(results[0], keys + cols)  # before the remaining windows run
-    if max_workers > 1 and total > 2:
-        results += _run_parallel(jobs[1:], max_workers, stop)
-    else:
-        results += [job() for job in jobs[1:]]
-    merged = _merge(results)
-    logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
-    if keys and len(merged.columns):
-        rows = len(merged)
-        merged = _aggregate(merged, keys, cols, agg_func)
+        stop = threading.Event()
+        jobs = [
+            partial(_run_window, index, total, bounds, kql, target, timeout, cache, stop)
+            for index, bounds in enumerate(windows, start=1)
+        ]
         logger.info(
-            "Re-aggregated %d rows into %d by %s (%s of %s)",
-            rows,
-            len(merged),
-            keys,
-            agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
-            cols,
+            "%d windows of %s from %s to %s (max_workers=%d)",
+            total,
+            interval,
+            start_utc,
+            end_utc,
+            max_workers,
         )
-    return merged
+        results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
+        if keys and len(results[0].columns):
+            _check_columns(results[0], keys + cols)  # before the remaining windows run
+        if max_workers > 1 and total > 2:
+            results += _run_parallel(jobs[1:], max_workers, stop)
+        else:
+            results += [job() for job in jobs[1:]]
+        merged = _merge(results)
+        logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
+        if keys and len(merged.columns):
+            rows = len(merged)
+            merged = _aggregate(merged, keys, cols, agg_func)
+            logger.info(
+                "Re-aggregated %d rows into %d by %s (%s of %s)",
+                rows,
+                len(merged),
+                keys,
+                agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
+                cols,
+            )
+        call.update(windows=total, rows=len(merged), columns=len(merged.columns))
+        return merged

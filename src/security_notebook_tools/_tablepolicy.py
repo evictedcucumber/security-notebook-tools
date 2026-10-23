@@ -37,7 +37,7 @@ from azure.core.pipeline.policies import (
 from azure.core.rest import HttpRequest
 from azure.identity import AzureCliCredential
 
-from ._errors import describe_network_error, is_network_error
+from ._errors import describe_network_error, is_network_error, log_unexpected
 from ._exceptions import ConfigurationError, QueryConnectionError, QueryError
 from ._kql import (
     ALLOWED_PLUGINS,
@@ -49,6 +49,7 @@ from ._kql import (
     skip_params,
     tokenize,
 )
+from ._log import SafeText, dependency_call, mark_failure_logged, mask_name, redact
 
 logger = logging.getLogger("security_notebook_tools.tablepolicy")
 
@@ -62,6 +63,7 @@ CACHE_TTL_SECONDS = 300.0
 _CONNECT_TIMEOUT = 10
 _READ_TIMEOUT = 30
 _MAX_PAGES = 100
+_LOGGED_TABLES = 20
 _ANALYTICS = "analytics"
 
 _REASON = "Basic, Auxiliary and Sentinel data lake data bill per GB scanned"
@@ -133,30 +135,44 @@ def _is_analytics(plan: str) -> bool:
 
 def _arm_client(credential: AzureCliCredential) -> PipelineClient:
     """Build a pipeline client for Azure Resource Manager (bearer token, retries, no logging)."""
-    return PipelineClient(
-        ARM_BASE_URL,
-        policies=[
-            RequestIdPolicy(),
-            HeadersPolicy(),
-            UserAgentPolicy(),
-            RetryPolicy(retry_total=3),
-            BearerTokenCredentialPolicy(credential, ARM_SCOPE),
-        ],
-    )
+    with dependency_call(logger, "ARM pipeline client creation", host=ARM_HOST):
+        return PipelineClient(
+            ARM_BASE_URL,
+            policies=[
+                RequestIdPolicy(),
+                HeadersPolicy(),
+                UserAgentPolicy(),
+                RetryPolicy(retry_total=3),
+                BearerTokenCredentialPolicy(credential, ARM_SCOPE),
+            ],
+        )
 
 
 def _get_json(client: PipelineClient, url: str) -> dict[str, Any]:
-    """GET ``url`` and return the JSON object, with timeouts. Raises on any non-200 answer."""
-    response = client.send_request(
-        HttpRequest("GET", url),
-        connection_timeout=_CONNECT_TIMEOUT,
-        read_timeout=_READ_TIMEOUT,
-    )
-    if response.status_code != 200:
-        raise QueryError(f"HTTP {response.status_code} from Azure Resource Manager")
-    data = json.loads(response.content)
-    if not isinstance(data, dict):
-        raise QueryError("unexpected response from Azure Resource Manager (not a JSON object)")
+    """GET ``url`` and return the JSON object, with timeouts. Raises on any non-200 answer.
+
+    Only the method, host and path are logged, never the query string.
+    """
+    parts = urlsplit(url)
+    with dependency_call(
+        logger,
+        "ARM request",
+        level=logging.DEBUG,
+        method="GET",
+        host=parts.hostname,
+        path=SafeText(redact(parts.path)),
+    ) as call:
+        response = client.send_request(
+            HttpRequest("GET", url),
+            connection_timeout=_CONNECT_TIMEOUT,
+            read_timeout=_READ_TIMEOUT,
+        )
+        call["status"] = response.status_code
+        if response.status_code != 200:
+            raise QueryError(f"HTTP {response.status_code} from Azure Resource Manager")
+        data = json.loads(response.content)
+        if not isinstance(data, dict):
+            raise QueryError("unexpected response from Azure Resource Manager (not a JSON object)")
     return data
 
 
@@ -176,11 +192,16 @@ def _check_next_link(link: str) -> str:
     return link
 
 
-def _get_all(client: PipelineClient, url: str) -> list[Any]:
-    """Return the ``value`` items of every page of a list call, following ``nextLink``."""
+def _get_all(client: PipelineClient, url: str, stats: dict[str, int] | None = None) -> list[Any]:
+    """Return the ``value`` items of every page of a list call, following ``nextLink``.
+
+    If ``stats`` is given, its ``"pages"`` count is increased by one for every page read.
+    """
     items: list[Any] = []
     for _ in range(_MAX_PAGES):
         page = _get_json(client, url)
+        if stats is not None:
+            stats["pages"] = stats.get("pages", 0) + 1
         value = page.get("value")
         if not isinstance(value, list):
             raise QueryError("unexpected response from Azure Resource Manager (no 'value' list)")
@@ -204,14 +225,19 @@ def _props(item: Any, what: str) -> dict[str, Any]:
     return props
 
 
-def _fetch_policy(resource_id: str, credential: AzureCliCredential) -> TablePolicy:
-    """Read the workspace, its tables and its saved functions from ARM into a policy."""
+def _fetch_policy(
+    resource_id: str, credential: AzureCliCredential, stats: dict[str, int] | None = None
+) -> TablePolicy:
+    """Read the workspace, its tables and its saved functions from ARM into a policy.
+
+    ``stats`` receives the number of list pages read (see :func:`_get_all`).
+    """
     base = f"{ARM_BASE_URL}{resource_id}"
     with _arm_client(credential) as client:
         workspace = _get_json(client, f"{base}?api-version={WORKSPACE_API_VERSION}")
-        tables = _get_all(client, f"{base}/tables?api-version={TABLES_API_VERSION}")
+        tables = _get_all(client, f"{base}/tables?api-version={TABLES_API_VERSION}", stats)
         searches = _get_all(
-            client, f"{base}/savedSearches?api-version={SAVED_SEARCHES_API_VERSION}"
+            client, f"{base}/savedSearches?api-version={SAVED_SEARCHES_API_VERSION}", stats
         )
 
     customer_id = _props(workspace, "workspace").get("customerId")
@@ -282,29 +308,31 @@ def get_policy(
             The query must not be sent. A network failure raises ``QueryConnectionError``.
     """
     key = (resource_id.lower(), tenant_id)
+    workspace = mask_name(resource_id.rsplit("/", 1)[-1])  # not the subscription or group
     with _lock:
         cached = _cache.get(key)
         if cached is not None and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
-            logger.debug("Reusing cached table policy for %s", resource_id)
+            logger.debug("Reusing cached table policy for workspace %s", workspace)
             policy = cached[1]
         else:
-            logger.info("Reading table plans and functions for %s", resource_id)
+            logger.info("Reading table plans and functions for workspace %s", workspace)
+            stats = {"pages": 0}
             try:
-                policy = _fetch_policy(resource_id, credential)
+                with dependency_call(logger, "ARM table policy fetch", workspace=workspace) as call:
+                    policy = _fetch_policy(resource_id, credential, stats)
+                    call["pages"] = stats["pages"]
+                    call["tables"] = len(policy.tables)
+                    call["not_analytics"] = sum(
+                        1 for _, plan in policy.tables.values() if not _is_analytics(plan)
+                    )
+                    call["functions"] = len(policy.functions)
             except Exception as exc:
                 is_network = isinstance(
                     exc, ServiceRequestError | ServiceResponseError
                 ) or is_network_error(exc)
                 known = is_network or isinstance(exc, QueryError | AzureError | ValueError)
-                if known:
-                    logger.error("Could not read table plans: %s: %s", type(exc).__name__, exc)
-                else:
-                    logger.error(
-                        "Unexpected %s while reading table plans; this case is not handled yet, "
-                        "please report it with the traceback",
-                        type(exc).__name__,
-                        exc_info=exc,
-                    )
+                if not known:
+                    log_unexpected(logger, "reading table plans", exc)
                 error = QueryConnectionError if is_network else QueryError
                 detail = (
                     describe_network_error(exc)
@@ -316,19 +344,16 @@ def get_policy(
                     if known
                     else " This error is unexpected; its traceback is chained: please report it."
                 )
-                raise error(
+                failure = error(
                     "Could not verify Sentinel table tiers "
                     f"({detail}), so the query was not sent. "
                     "Check `az login` and read access to the workspace's tables and saved "
                     f"searches.{report}"
-                ) from exc
+                )
+                if not known:
+                    mark_failure_logged(failure)
+                raise failure from exc
             _cache[key] = (time.monotonic(), policy)
-            logger.info(
-                "Table policy ready: %d table(s), %d not on the Analytics plan, %d function(s)",
-                len(policy.tables),
-                sum(1 for _, plan in policy.tables.values() if not _is_analytics(plan)),
-                len(policy.functions),
-            )
     if policy.customer_id.lower() != workspace_id.lower():
         raise ConfigurationError(
             f"$SENTINEL_WORKSPACE_ID ({workspace_id}) does not match the workspace behind "
@@ -369,18 +394,22 @@ def check_sentinel_query(kql: str, policy: TablePolicy) -> None:
     Raises:
         ConfigurationError: The query is rejected. It is not sent.
     """
-    try:
-        tokens = tokenize(kql)
-        found = forbidden_construct(tokens, adx=False)
-        if found:
-            raise _reject(
-                f"{found} is not allowed: it can read Basic, Auxiliary or Sentinel data lake "
-                f"tables or other services, and {_REASON}."
-            )
-        _Analyzer(tokens, policy).run()
-    except ConfigurationError as exc:
-        logger.warning("Query rejected: %s", exc)
-        raise
+    tokens = tokenize(kql)
+    found = forbidden_construct(tokens, adx=False)
+    if found:
+        raise _reject(
+            f"{found} is not allowed: it can read Basic, Auxiliary or Sentinel data lake "
+            f"tables or other services, and {_REASON}."
+        )
+    _Analyzer(tokens, policy).run()
+    # Names come from the policy (the workspace's schema), never from the query text.
+    names = sorted(
+        {policy.tables[t.low][0] for t in tokens if t.kind == "id" and t.low in policy.tables}
+    )
+    shown = ", ".join(names[:_LOGGED_TABLES]) + (
+        f" and {len(names) - _LOGGED_TABLES} more" if len(names) > _LOGGED_TABLES else ""
+    )
+    logger.info("Cost guard passed: the query reads Analytics tables [%s]", shown)
 
 
 def _reject(message: str) -> ConfigurationError:

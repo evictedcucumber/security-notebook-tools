@@ -569,9 +569,11 @@ df = exec_query("SigninLogs | take 100", cache=False)  # runs again
 Every log record at INFO and above is appended to `notebooks.log` in your project root. Nothing
 is printed to the notebook cell; errors that cannot be recovered from still reach the cell as
 exceptions. The project root is the first directory, walking up from the current working
-directory, that contains `.git` or `pyproject.toml` (the working directory itself if there is
-none). The path is resolved on every record, so `os.chdir` is respected, and the file is created
-when the first record is written. Add `notebooks.log` to your `.gitignore`.
+directory, that contains `.git` or `pyproject.toml`. The walk stops at your home directory (it
+never looks above it), and the working directory itself is used if no marker is found by then.
+The path follows `os.chdir`, and the file is created, with permissions 0600, when the first record
+is written. It is opened without following symbolic links, and records are dropped silently
+unless it is a regular file you own with a single link. Add `notebooks.log` to your `.gitignore`.
 
 Each line is an RFC 3339 UTC timestamp with milliseconds, the level, the logger name and the
 message; tracebacks follow on the next lines:
@@ -586,11 +588,47 @@ query. The records come from these loggers:
 | Logger | Emits |
 | --- | --- |
 | `security_notebook_tools` | Parent of all the below |
-| `security_notebook_tools.sentinel` | Sentinel queries, row counts, timing, partial results |
-| `security_notebook_tools.adx` | ADX queries and commands |
-| `security_notebook_tools.auth` | Credential creation |
+| `security_notebook_tools.query` | `exec_query` entry and result summary, result cache hit, miss and bypass, `clear_cache` |
+| `security_notebook_tools.batch` | `exec_batch_query` entry and summary, each window, retries, fail-fast, pandas merge and aggregation |
+| `security_notebook_tools.sentinel` | Client creation, the Log Analytics call and the pandas conversion (with durations), partial results |
+| `security_notebook_tools.adx` | Kusto client creation, the Kusto call and the pandas conversion (with durations) |
+| `security_notebook_tools.auth` | Credential creation (tenant masked) |
+| `security_notebook_tools.config` | Where each setting came from (DEBUG only; never the value) |
 | `security_notebook_tools.timerange` | Time range decisions ("set in query", default, both applied) |
-| `security_notebook_tools.tablepolicy` | Cost guard: table plan lookups, cache use, rejected queries |
+| `security_notebook_tools.tablepolicy` | Cost guard: Azure Resource Manager requests (method, host, path), table plan fetch with page count, tables read by an accepted query |
+| `security_notebook_tools.format` | `format_dataframe` entry and summary, the pandas Styler |
+| `security_notebook_tools.pivot` | `pivot_dataframe` entry and summary, the pandas steps |
+| `security_notebook_tools.magic` | `%%kql` runs, argument parsing, extension loading |
+| `azure` (and `azure.core`, `azure.identity` ...) | WARNING and above from the Azure SDKs, written by the same handler; their levels are not changed |
+
+Levels:
+
+| Level | Meaning |
+| --- | --- |
+| DEBUG | Internal detail: cached client, credential or table policy reused, the start of each dependency call. Never written to the file. |
+| INFO | An operation starting or completing: a public function's entry and result summary (rows, columns, duration), result cache hit, miss or bypass, client or credential created, each dependency call completing with its duration, cost guard passed, table policy fetched, `clear_cache`, a `%%kql` run, the extension loaded. |
+| WARNING | Recoverable or refused: a dependency call that failed (exception type and redacted message, no traceback), each batch retry, partial results, a call rejected by validation or the cost guard (`ConfigurationError`, `%%kql` `UsageError`). |
+| ERROR | The operation failed and an exception reaches you. Logged once per failed public call, at the public function. An unanticipated error is logged once, with a traceback. |
+
+Warnings and errors from the Azure SDK loggers (`azure.*`) now go only to `notebooks.log`; the
+notebook cell's stderr no longer shows them.
+
+What is never logged: KQL text (only `kql=hmac:<12 hex> len=<n>`, an HMAC under a random key that
+exists only for the running process, so fingerprints compare within a session but cannot be
+guessed from), result values and DataFrame contents, environment variable values, HTTP headers,
+bodies and query strings, tokens, credentials, request properties, the notebook namespace, and a
+`timespan` or `%%kql` `--timespan` value (only a duration or dates are logged, otherwise
+`<TypeName>`). Workspace, cluster host and database names are masked (`co…(len 12)`), and fields
+are written only as plain numbers, dates and short identifier-like strings. SDK error messages
+are best effort: shortened to 200 characters, with quoted text (`'…'`, `"…"`, backticks, `b'…'`),
+known secret shapes and identifiers removed; unquoted fragments of a message may remain.
+The file formatter redacts every line as a backstop: JWTs and bearer tokens, `Authorization`
+values, URL query strings, `sig=`, `code=`, `token=`, `access_token=`, `client_secret=`,
+`password=`, `key=` and `AccountKey=` values, email addresses, IPv4 and IPv6 addresses, GUIDs
+(only the first four hex digits are kept), the subscription, resource group and workspace
+segments of Azure resource paths, cookies and API key headers, and user names in home
+directories. Line breaks in a message are escaped, so one record is one line. Tracebacks list files and lines but no source text, and their messages get the same
+treatment as above.
 
 ## `__version__`
 

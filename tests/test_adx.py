@@ -443,3 +443,82 @@ def test_configuration_errors_and_interrupts_are_not_wrapped(patched):
     client.execute_query.side_effect = KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
         _adx().query("T")
+
+
+# --- logging ------------------------------------------------------------------------------------
+
+SECRET_KQL = (
+    "T | where Email == 'bob.smith@contoso.com' and Ip == '203.0.113.77' "
+    '| where Note == "topsecretvalue" | take 5'
+)
+LEAKS = ("bob.smith", "203.0.113.77", "topsecretvalue", "Email ==", "contoso")
+
+
+def test_client_creation_and_query_are_logged(patched, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client, _, conv = patched
+    client.execute_query.return_value.primary_results = ["t1"]
+    conv.return_value = pd.DataFrame({"a": [1, 2]})
+    c = ADXClient("https://c.westeurope.kusto.windows.net", "db", credential=mock.Mock())
+    c.query(SECRET_KQL)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("Kusto client creation: done in ") for m in messages)
+    assert "ADX client ready for c?…(len 30) (default database: db…(len 2))" in messages
+    done = next(m for m in messages if m.startswith("Kusto query: done in "))
+    assert "database=db…(len 2) kql=hmac:" in done
+    assert any(
+        m.startswith("pandas DataFrame conversion: done in ") and "rows=[2]" in m for m in messages
+    )
+    assert "https://" not in caplog.text
+
+
+def test_known_failure_is_one_dependency_warning_and_no_error(patched, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoServiceError("Bad near 'topsecretvalue' by bob@x.io")
+    with pytest.raises(QueryError):
+        _adx().query(SECRET_KQL)
+    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None
+    assert "Kusto query: failed after" in record.getMessage()
+    assert "KustoServiceError: Bad near '…' by <email>" in record.getMessage()
+
+
+def test_unexpected_error_is_one_error_and_a_dependency_warning(patched, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client, _, _ = patched
+    client.execute_query.side_effect = RuntimeError("boom")
+    with pytest.raises(QueryError):
+        _adx().query("T")
+    levels = [r.levelno for r in caplog.records if r.levelno >= logging.WARNING]
+    assert levels == [logging.WARNING, logging.ERROR]
+
+
+def test_command_is_logged_as_a_command(patched, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client, _, conv = patched
+    client.execute_mgmt.return_value.primary_results = ["m"]
+    conv.return_value = pd.DataFrame()
+    _adx().show(".show tables")
+    assert "Kusto command: done in" in caplog.text
+
+
+def test_kql_and_service_text_are_never_logged(patched, caplog, _log_file):
+    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    client, _, conv = patched
+    echo = "near 'topsecretvalue' for bob.smith@contoso.com from 203.0.113.77"
+    client.execute_query.return_value.primary_results = ["t"]
+    conv.return_value = pd.DataFrame({"a": [1]})
+    _adx().query(SECRET_KQL)
+    for error in (KustoServiceError(echo), KustoError(echo), KustoNetworkError("u"), OSError(echo)):
+        client.execute_query.side_effect = error
+        with pytest.raises(QueryError):
+            _adx().query(SECRET_KQL)
+    # the file (redacted), and every message (caplog.text would add its own raw tracebacks)
+    logged = _log_file.read_text(encoding="utf-8") + "\n".join(
+        r.getMessage() for r in caplog.records
+    )
+    for leak in LEAKS:
+        assert leak not in logged
+    assert "kql=hmac:" in logged

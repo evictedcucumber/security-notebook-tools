@@ -1,5 +1,11 @@
-"""IPython ``%%kql`` cell magic for quick queries, shown with ``format_dataframe``."""
+"""IPython ``%%kql`` cell magic for quick queries, shown with ``format_dataframe``.
 
+Logging (``security_notebook_tools.magic``): a run is logged like a public function (entry,
+result summary, one WARNING if the cell is rejected). The cell body is logged only as a
+fingerprint, and the ``--timespan`` text never: only whether it was a duration or an expression.
+"""
+
+import logging
 import re
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -8,15 +14,27 @@ from IPython.core.error import UsageError
 from IPython.core.magic import Magics, cell_magic, magics_class
 from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
 
+from ._errors import public_call
 from ._format import format_dataframe
+from ._log import dependency_call, fingerprint
 from ._query import DEFAULT_TIMEOUT, exec_query
 
 if TYPE_CHECKING:
     from pandas.io.formats.style import Styler
 
+logger = logging.getLogger("security_notebook_tools.magic")
+
 _SHORTHAND = re.compile(r"(?:\d+[dhms])+", re.IGNORECASE)
 _PART = re.compile(r"(\d+)([dhms])", re.IGNORECASE)
 _UNITS = {"d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
+
+
+def _timespan_kind(text: str) -> str:
+    """``"duration"`` for a shorthand such as ``1d12h``, else ``"expression"`` (for logging)."""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return "duration" if _SHORTHAND.fullmatch(text) else "expression"
 
 
 def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
@@ -43,7 +61,8 @@ def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
             parts[name] = parts.get(name, 0) + int(number)
         return timedelta(**parts)
     try:
-        return eval(text, user_ns)
+        with dependency_call(logger, "timespan expression evaluation"):
+            return eval(text, user_ns)
     except Exception as exc:
         raise UsageError(f"Could not evaluate --timespan {text!r}: {exc!r}") from exc
 
@@ -80,16 +99,24 @@ class KqlMagics(Magics):
         The body is passed verbatim (no ``{}`` or ``$`` expansion). The result is shown with
         format_dataframe and not kept; call exec_query directly to work with the DataFrame.
         """
-        args = parse_argstring(self.kql, line)
-        if not cell.strip():
-            raise UsageError("The cell body is empty: write a KQL query below %%kql.")
-        user_ns = self.shell.user_ns
-        timespan = None if args.timespan is None else _parse_timespan(args.timespan, user_ns)
-        df = exec_query(
-            cell,
-            timespan,
-            target=args.target,
-            timeout=args.timeout,
-            cache=not args.no_cache,
-        )
-        return format_dataframe(df)
+        with public_call(logger, "%%kql", rejected=(UsageError,), kql=fingerprint(cell)) as call:
+            with dependency_call(logger, "IPython argument parsing"):
+                args = parse_argstring(self.kql, line)
+            if not cell.strip():
+                raise UsageError("The cell body is empty: write a KQL query below %%kql.")
+            user_ns = self.shell.user_ns
+            timespan = None if args.timespan is None else _parse_timespan(args.timespan, user_ns)
+            call.update(
+                target=args.target,
+                timeout=args.timeout,
+                cache=not args.no_cache,
+                timespan="none" if args.timespan is None else _timespan_kind(args.timespan),
+            )
+            df = exec_query(
+                cell,
+                timespan,
+                target=args.target,
+                timeout=args.timeout,
+                cache=not args.no_cache,
+            )
+            return format_dataframe(df)

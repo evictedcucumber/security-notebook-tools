@@ -11,6 +11,7 @@ from typing import Any
 from azure.identity import AzureCliCredential
 
 from ._config import resolve_tenant_id
+from ._log import SafeText, dependency_call, mask_id
 
 logger = logging.getLogger("security_notebook_tools.auth")
 
@@ -36,11 +37,11 @@ def get_credential(tenant_id: str | None = None, **kwargs: Any) -> AzureCliCrede
         ConfigurationError: The tenant is not a GUID or domain name.
     """
     tenant_id = resolve_tenant_id(tenant_id)
-    tenant_desc = tenant_id or "CLI default tenant"
+    tenant_desc = mask_id(tenant_id) if tenant_id else SafeText("CLI default tenant")
     if tenant_id not in _cache:
-        logger.info("Creating AzureCliCredential (%s)", tenant_desc)
         tenant_kw = {"tenant_id": tenant_id} if tenant_id else {}
-        _cache[tenant_id] = AzureCliCredential(**tenant_kw, **kwargs)
+        with dependency_call(logger, "AzureCliCredential creation", tenant=tenant_desc):
+            _cache[tenant_id] = AzureCliCredential(**tenant_kw, **kwargs)
     else:
         logger.debug("Reusing cached AzureCliCredential (%s)", tenant_desc)
     return _cache[tenant_id]

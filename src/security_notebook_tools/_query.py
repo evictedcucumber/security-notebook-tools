@@ -28,8 +28,9 @@ from ._config import (
     resolve_workspace_resource_id,
     validate_database,
 )
-from ._errors import unexpected_errors
+from ._errors import public_call, unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
+from ._log import dependency_call, fingerprint
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
 from ._timerange import Timespan, resolve_timespan
@@ -71,6 +72,15 @@ def _adx_client(cluster_uri: str, tenant_id: str | None) -> ADXClient:
     return ADXClient(cluster_uri, credential=credential)
 
 
+def _client_for(factory, *args):
+    """Return ``factory(*args)`` (a ``functools.cache`` function), noting at DEBUG when reused."""
+    before = factory.cache_info().currsize
+    client = factory(*args)
+    if factory.cache_info().currsize == before:
+        logger.debug("Reusing the cached %s", type(client).__name__)
+    return client
+
+
 def _clear_clients() -> None:
     """Drop the cached Sentinel and ADX clients so the next call creates new ones."""
     _sentinel_client.cache_clear()
@@ -88,14 +98,17 @@ def _sentinel_tables(
 ) -> tuple[pd.DataFrame, ...]:
     """Fetch (and cache) all tables of a Sentinel query; partial results are not cached."""
     _fetch.ran = True
-    client = _sentinel_client(workspace_id, resource_id, tenant_id)
+    logger.info("Result cache miss; running the query on Sentinel")
+    client = _client_for(_sentinel_client, workspace_id, resource_id, tenant_id)
     try:
         return tuple(
             client.query_tables(kql, timespan, raise_on_partial=True, server_timeout=timeout)
         )
     except PartialResultError as exc:
         # query_tables already logged it; hand the data back without caching it.
-        tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
+        with dependency_call(logger, "pandas DataFrame conversion", target="sentinel_partial"):
+            tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
+        logger.info("Partial result is returned but not stored in the result cache")
         raise _PartialResult(tables, str(exc)) from exc
 
 
@@ -105,7 +118,8 @@ def _adx_tables(
 ) -> tuple[pd.DataFrame, ...]:
     """Fetch (and cache) all result tables of an ADX query or ``.show`` command."""
     _fetch.ran = True
-    client = _adx_client(cluster_uri, tenant_id)
+    logger.info("Result cache miss; running the query on ADX")
+    client = _client_for(_adx_client, cluster_uri, tenant_id)
     props = ClientRequestProperties()
     props.set_option(
         ClientRequestProperties.request_timeout_option_name, timedelta(seconds=timeout)
@@ -131,6 +145,7 @@ def _copies(tables: tuple[pd.DataFrame, ...] | list[pd.DataFrame]) -> list[pd.Da
 def _cached_call(fetch, args: tuple, *, cache: bool) -> list[pd.DataFrame]:
     """Call the cached ``fetch`` (or its uncached function), logging a cache hit."""
     if not cache:
+        logger.info("Result cache bypassed (cache=False); running the query")
         return _copies(fetch.__wrapped__(*args))
     _fetch.ran = False
     tables = fetch(*args)
@@ -176,12 +191,16 @@ def clear_cache() -> None:
         >>> from security_notebook_tools import clear_cache
         >>> clear_cache()
     """
+    results = _sentinel_tables.cache_info().currsize + _adx_tables.cache_info().currsize
     _sentinel_tables.cache_clear()
     _adx_tables.cache_clear()
     _clear_clients()
     clear_credential_cache()
     clear_policy_cache()
-    logger.debug("Cleared cached results, clients, credentials and table plans")
+    logger.info(
+        "clear_cache: dropped %d stored result(s), the clients, credentials and table plans",
+        results,
+    )
 
 
 def exec_query(
@@ -326,16 +345,28 @@ def exec_query(
         >>> df = exec_query("Events | take 100", target="adx", timeout=600)
         >>> tables = exec_query(".show tables", target="adx")  # management command
     """
-    if timeout <= 0:
-        raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
-    if target == "sentinel":
-        tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
-    elif target == "adx":
-        if timespan is not None:
+    with public_call(
+        logger,
+        "exec_query",
+        target=target,
+        timeout=timeout,
+        cache=cache,
+        kql=fingerprint(kql),
+    ) as call:
+        if timeout <= 0:
             raise ConfigurationError(
-                "timespan only applies to Sentinel; filter on time in the KQL for ADX."
+                f"timeout must be a positive number of seconds, got {timeout}."
             )
-        tables = _query_adx(kql, timeout, cache=cache)
-    else:
-        raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
-    return tables[0] if tables else pd.DataFrame()
+        if target == "sentinel":
+            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
+        elif target == "adx":
+            if timespan is not None:
+                raise ConfigurationError(
+                    "timespan only applies to Sentinel; filter on time in the KQL for ADX."
+                )
+            tables = _query_adx(kql, timeout, cache=cache)
+        else:
+            raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
+        df = tables[0] if tables else pd.DataFrame()
+        call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
+        return df

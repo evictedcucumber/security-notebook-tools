@@ -47,7 +47,13 @@ from ._exceptions import (
     QueryTransientError,
 )
 from ._format import KQL_TYPES_ATTR
-from ._log import shorten
+from ._log import (
+    dependency_call,
+    describe_timespan,
+    fingerprint,
+    mask_id,
+    redact_exception_text,
+)
 from ._tablepolicy import check_sentinel_query, get_policy
 from ._timerange import Timespan
 
@@ -103,8 +109,9 @@ class SentinelClient:
         self.tenant_id = resolve_tenant_id(tenant_id)
         with unexpected_errors(logger, "Sentinel client setup"):
             self.credential = credential or get_credential(self.tenant_id)
-            self._client = LogsQueryClient(self.credential)
-        logger.info("Sentinel client ready for workspace %s", self.workspace_id)
+            with dependency_call(logger, "LogsQueryClient creation"):
+                self._client = LogsQueryClient(self.credential)
+        logger.info("Sentinel client ready for workspace %s", mask_id(self.workspace_id))
 
     def _run(
         self, kql: str, timespan: Timespan | None, server_timeout: int | None
@@ -114,28 +121,35 @@ class SentinelClient:
         Anything not mapped here propagates; the caller turns it into an "unexpected" error.
         """
         try:
-            return self._client.query_workspace(
-                self.workspace_id, kql, timespan=timespan, server_timeout=server_timeout
-            )
+            with dependency_call(
+                logger,
+                "Log Analytics query",
+                workspace=mask_id(self.workspace_id),
+                kql=fingerprint(kql),
+                timespan=describe_timespan(timespan),
+                server_timeout=server_timeout,
+            ) as call:
+                result = self._client.query_workspace(
+                    self.workspace_id, kql, timespan=timespan, server_timeout=server_timeout
+                )
+                call["status"] = getattr(result.status, "value", result.status)
+                return result
         except CredentialUnavailableError as exc:
             message = (
                 f"Sentinel query failed: no Azure credential available ({exc}). Install the "
                 "Azure CLI and run `az login`"
             )
-            logger.error(message)
             raise QueryError(message) from exc
         except ClientAuthenticationError as exc:
             message = (
                 f"Sentinel query failed: {exc.message or exc} (not authenticated: run "
                 "`az login`; the token may have expired)"
             )
-            logger.error(message)
             raise QueryError(message) from exc
         except (ServiceRequestError, ServiceResponseError) as exc:
             message = (
                 f"Sentinel query failed: could not reach the service: {describe_network_error(exc)}"
             )
-            logger.error(message)
             raise QueryConnectionError(message) from exc
         except HttpResponseError as exc:
             status = exc.status_code
@@ -146,7 +160,6 @@ class SentinelClient:
                 message += " (too many redirects: check the endpoint and any proxy)"
             else:
                 message += hints_for(status, azure_error_codes(exc))
-            logger.error(message)
             if status == _TOO_MANY_REQUESTS:
                 error = QueryThrottledError
             elif status in TRANSIENT_STATUS:
@@ -156,7 +169,6 @@ class SentinelClient:
             raise error(message) from exc
         except AzureError as exc:
             message = f"Sentinel query failed: {type(exc).__name__}: {exc}"
-            logger.error(message)
             raise QueryError(message) from exc
 
     def query_tables(
@@ -203,7 +215,11 @@ class SentinelClient:
         """
         policy = get_policy(self.resource_id, self.workspace_id, self.credential, self.tenant_id)
         check_sentinel_query(kql, policy)
-        logger.info("Running Sentinel query (timespan=%s): %s", timespan, shorten(kql))
+        logger.info(
+            "Running Sentinel query (timespan=%s, kql=%s)",
+            describe_timespan(timespan),
+            fingerprint(kql),
+        )
         start = time.perf_counter()
         with unexpected_errors(logger, "Sentinel query"):
             result = self._run(kql, timespan, server_timeout)
@@ -216,7 +232,11 @@ class SentinelClient:
             msg = f"Sentinel query returned partial results: {err}"
             if hint:
                 msg += f" ({hint})"
-            logger.warning(msg)
+            logger.warning(
+                "Sentinel query returned partial results: %s%s",
+                redact_exception_text(str(err)),
+                f" ({hint})" if hint else "",
+            )
             if raise_on_partial:
                 raise PartialResultError(msg, partial_error=err, partial_data=result.partial_data)
             warnings.warn(msg, stacklevel=2)
@@ -224,8 +244,12 @@ class SentinelClient:
         else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
             raise QueryError(f"Sentinel query failed: {getattr(result, 'error', result)}")
 
-        with unexpected_errors(logger, "converting the Sentinel result to a DataFrame"):
+        with (
+            unexpected_errors(logger, "converting the Sentinel result to a DataFrame"),
+            dependency_call(logger, "pandas DataFrame conversion", target="sentinel") as call,
+        ):
             dfs = [_table_to_df(t) for t in tables]
+            call["rows"] = [len(df) for df in dfs]
         logger.info(
             "Sentinel query returned %d table(s), rows=%s in %.2fs",
             len(dfs),

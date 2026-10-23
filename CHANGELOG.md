@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Logging now covers every module with the same levels: DEBUG internal detail (never written),
+  INFO an operation starting or completing, WARNING recoverable or refused, ERROR a failed
+  operation. New child loggers: `config`, `format`, `pivot`, `magic`.
+- Public functions (`exec_query`, `exec_batch_query`, `format_dataframe`, `pivot_dataframe`,
+  `%%kql`) log their entry, a result summary (rows, columns, duration), and a failure exactly
+  once: WARNING when the call was rejected (`ConfigurationError`, `UsageError`), ERROR when it
+  failed. The ERROR lines that `_sentinel`, `_adx` and `_tablepolicy` wrote before every raise
+  are gone, replaced by a WARNING for the failed dependency call. An unexpected error is still
+  logged once, with its traceback.
+- Every dependency call (Azure credential and clients, Log Analytics, Kusto, Azure Resource
+  Manager, pandas, IPython) is logged with its duration; result cache hit, miss, bypass and
+  uncached partial results, batch retries, exhausted retries and fail-fast cancellation, the cost
+  guard passing (with the tables read) and `clear_cache` are logged at INFO or WARNING.
+- WARNING and above from the `azure` SDK loggers are written to `notebooks.log` too. They now
+  appear only there, not in the cell's stderr.
+- `notebooks.log` is created with mode 0600, opened without following symbolic links, and
+  written only if it is a regular file you own with a single link. The project root search no
+  longer goes above your home directory and is cached per working directory.
+
+### Security
+
+- `notebooks.log` never contains KQL text: queries are logged as `kql=hmac:<12 hex> len=<n>`
+  (HMAC-SHA256 under a random per-process key). Result values, environment variable values,
+  headers, tokens, URL query strings, `timespan` values (only durations and dates), the full ARM
+  resource ID and the workspace, cluster host and database names (masked) are not logged either.
+  Log fields are written only as plain numbers, dates and short identifier-like strings.
+- Every line is redacted by the file formatter (tokens, `Authorization` values, URL query
+  strings, key-like parameters, emails, IP addresses, GUIDs, home directory user names).
+  Cookie and API key headers, camelCase and prefixed secret keys, and Azure resource path
+  segments are masked too. Redaction input is capped at 4 KB per text, and line breaks in a
+  message are escaped so a record stays on one line. SDK error messages are best effort:
+  shortened, with quoted text (including `b'..'`, backticks and unbalanced quotes), known secret
+  shapes and identifiers removed. Tracebacks no longer include source lines and their messages
+  get the same treatment.
+
 ## 3.0.0 - 2026-10-23
 
 ### Breaking

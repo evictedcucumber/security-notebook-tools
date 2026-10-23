@@ -279,16 +279,36 @@ The full rules are in [docs/api.md](docs/api.md).
 
 ## Logging
 
-Every log record at INFO and above from the `security_notebook_tools` logger (children:
-`sentinel`, `adx`, `auth`, `timerange`, `tablepolicy`) is appended to `notebooks.log` in your
-project root (the nearest directory above the working directory with `.git` or `pyproject.toml`,
-else the working directory). Nothing is printed to the notebook cell. Add `notebooks.log` to your
-`.gitignore`.
+Every log record at INFO and above from the `security_notebook_tools` logger and its children
+(`auth`, `config`, `sentinel`, `adx`, `timerange`, `tablepolicy`, `query`, `batch`, `format`,
+`pivot`, `magic`) is appended to `notebooks.log` in your project root (the nearest directory above
+the working directory with `.git` or `pyproject.toml`, never looking above your home directory,
+else the working directory). The file is created with permissions 0600 and is not written if it
+is a symbolic link, a hard link or owned by someone else. WARNING and above from the `azure` SDK
+loggers go there too, so Azure SDK warnings now appear only in `notebooks.log`, not in the cell's
+stderr. Nothing is printed to the notebook cell. Add `notebooks.log` to your `.gitignore`.
 
 ```text
-2026-10-23T14:02:11.402Z INFO security_notebook_tools.sentinel: Running Sentinel query (timespan=1 day, 0:00:00): SigninLogs | take 10
-2026-10-23T14:02:12.247Z INFO security_notebook_tools.sentinel: Sentinel query returned 1 table(s), rows=[10] in 0.84s
+2026-10-23T14:02:11.402Z INFO security_notebook_tools.query: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
+2026-10-23T14:02:12.101Z INFO security_notebook_tools.sentinel: Log Analytics query: done in 0.84s workspace=1111… kql=hmac:1a2b3c4d5e6f len=24 timespan=1 day, 0:00:00 server_timeout=300 status=Success
+2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 1.01s tables=1 rows=10 columns=4
 ```
+
+Levels are the same everywhere: DEBUG is internal detail and never reaches the file; INFO is an
+operation starting or completing (including each dependency call with its duration, cache hits,
+misses and bypasses); WARNING is something recoverable or refused (a failed dependency call, a
+retry, partial results, a call rejected by validation or the cost guard); ERROR is an operation
+that failed with an exception reaching you, logged once per failed call.
+
+The file never contains sensitive data. KQL text is logged only as a fingerprint
+(`kql=hmac:<12 hex> len=<n>`, keyed with a random per-process key); result values, environment
+variable values, HTTP headers and bodies, tokens, credentials and `timespan` values (only a
+duration or dates) are never logged, and workspace, host and database names are masked. SDK
+error messages are best effort: shortened, with quoted text, known secret shapes and
+identifiers removed. Whatever is logged is also redacted by
+the file formatter: tokens, `Authorization` values, URL query strings, `sig=`/`code=`/`token=`/
+`key=`/`password=` style parameters, email addresses, IP addresses, GUIDs (first four digits
+kept) and user names in home directories. Tracebacks list files and lines but no source text.
 
 ## Security
 

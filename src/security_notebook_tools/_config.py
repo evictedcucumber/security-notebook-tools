@@ -5,16 +5,23 @@ effect on the next call. An explicit value always takes precedence over the vari
 
 Every resolved value is validated before use (see the ``resolve_*`` functions), so a malformed
 setting fails early with a :class:`ConfigurationError` instead of reaching the Azure SDKs.
+
+Logging (``security_notebook_tools.config``) is DEBUG only and names the variable and where the
+value came from, never the value. A rejected value is reported once, at the public function
+that was called, with the value masked.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import unicodedata
 from urllib.parse import urlsplit
 
 from ._exceptions import ConfigurationError
+
+logger = logging.getLogger("security_notebook_tools.config")
 
 TENANT_ID_VAR = "AZURE_TENANT_ID"
 WORKSPACE_ID_VAR = "SENTINEL_WORKSPACE_ID"
@@ -74,7 +81,12 @@ _LAKE_DOMAIN = "securityplatform.microsoft.com"
 
 def from_env(value: str | None, var: str) -> str | None:
     """Return ``value`` if given, else the (non-empty) environment variable ``var``, else None."""
-    return value or os.environ.get(var) or None
+    if value:
+        logger.debug("%s: using the value passed in", var)
+        return value
+    resolved = os.environ.get(var) or None
+    logger.debug("%s: %s", var, "read from the environment" if resolved else "not set")
+    return resolved
 
 
 def require(value: str | None, var: str, what: str) -> str:

@@ -56,3 +56,37 @@ def test_valid_tenants():
     with mock.patch.object(auth, "AzureCliCredential"):
         auth.get_credential(tenant_id="11111111-1111-1111-1111-111111111111")
         auth.get_credential(tenant_id="contoso.onmicrosoft.com")
+
+
+def test_credential_creation_is_logged_with_a_masked_tenant(caplog):
+    caplog.set_level("INFO", logger="security_notebook_tools")
+    guid = "1a2b3c4d-5e6f-7a8b-9c0d-112233445566"
+    with mock.patch.object(auth, "AzureCliCredential"):
+        auth.get_credential(tenant_id=guid)
+        auth.get_credential(tenant_id="contoso.onmicrosoft.com")
+        auth.get_credential()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        m.startswith("AzureCliCredential creation: done in") and "tenant=1a2b…" in m
+        for m in messages
+    )
+    assert any("tenant=<id>" in m for m in messages)
+    assert any("tenant=CLI default tenant" in m for m in messages)
+    assert guid not in caplog.text
+    assert "contoso" not in caplog.text
+
+
+def test_credential_reuse_and_failure(caplog):
+    caplog.set_level("DEBUG", logger="security_notebook_tools")
+    with mock.patch.object(auth, "AzureCliCredential"):
+        auth.get_credential()
+        auth.get_credential()
+    assert "Reusing cached AzureCliCredential" in caplog.text
+    with (
+        mock.patch.object(auth, "AzureCliCredential", side_effect=OSError("no az")),
+        pytest.raises(OSError),
+    ):
+        auth.get_credential(tenant_id="other.example")
+    assert any(
+        r.levelname == "WARNING" and "creation: failed" in r.getMessage() for r in caplog.records
+    )

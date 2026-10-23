@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -18,8 +19,13 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from ._errors import public_call
+from ._log import dependency_call
+
 if TYPE_CHECKING:
     from pandas.io.formats.style import Styler
+
+logger = logging.getLogger("security_notebook_tools.format")
 
 KQL_TYPES_ATTR = "kql_types"
 PIVOT_TOTALS_ATTR = "pivot_totals"
@@ -313,57 +319,73 @@ def format_dataframe(
         >>> format_dataframe(df, max_rows=None)  # every row
         >>> format_dataframe(df, column_styles={"Bytes": "readable_numbers"})
     """
-    if max_rows is not None and (
-        isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
-    ):
-        raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
-    styles = _check_column_styles(df, column_styles)
-    view = df if max_rows is None or len(df) <= max_rows else df.head(max_rows)
-    recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
+    shape = getattr(df, "shape", None)
+    with public_call(
+        logger,
+        "format_dataframe",
+        rejected=(ValueError, TypeError),
+        rows=shape[0] if shape else None,
+        columns=shape[1] if shape else None,
+        max_rows=max_rows,
+        column_styles=len(column_styles) if isinstance(column_styles, Mapping) else None,
+    ) as call:
+        if max_rows is not None and (
+            isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
+        ):
+            raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
+        styles = _check_column_styles(df, column_styles)
+        view = df if max_rows is None or len(df) <= max_rows else df.head(max_rows)
+        recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
 
-    kql_types: list[str] = []
-    for position, name in enumerate(view.columns):
-        kql_type = recorded.get(name)
-        if not isinstance(kql_type, str):
-            kql_type = _infer_type(view.iloc[:, position])
-        kql_type = kql_type.lower()
-        style = styles.get(name)
-        if style is not None and kql_type not in _COLUMN_STYLES[style][0]:
-            raise TypeError(
-                f"Style {style!r} does not apply to column {name!r} of type {kql_type!r}; "
-                f"it needs one of: {', '.join(sorted(_COLUMN_STYLES[style][0]))}."
+        kql_types: list[str] = []
+        for position, name in enumerate(view.columns):
+            kql_type = recorded.get(name)
+            if not isinstance(kql_type, str):
+                kql_type = _infer_type(view.iloc[:, position])
+            kql_type = kql_type.lower()
+            style = styles.get(name)
+            if style is not None and kql_type not in _COLUMN_STYLES[style][0]:
+                raise TypeError(
+                    f"Style {style!r} does not apply to column {name!r} of type {kql_type!r}; "
+                    f"it needs one of: {', '.join(sorted(_COLUMN_STYLES[style][0]))}."
+                )
+            kql_types.append(kql_type)
+
+        with dependency_call(logger, "pandas Styler", rows=len(view), columns=len(view.columns)):
+            styler = view.style
+            numeric: list[Any] = []
+            for name, kql_type in zip(view.columns, kql_types, strict=True):
+                styler = styler.format(_cell_formatter(kql_type, styles.get(name)), subset=[name])
+                if kql_type in _NUMERIC_TYPES:
+                    numeric.append(name)
+
+            styler = styler.set_table_styles(_TABLE_STYLES).set_table_styles(
+                {
+                    name: [{"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")]
+                    for name in numeric
+                },
+                overwrite=False,
             )
-        kql_types.append(kql_type)
-
-    styler = view.style
-    numeric: list[Any] = []
-    for name, kql_type in zip(view.columns, kql_types, strict=True):
-        styler = styler.format(_cell_formatter(kql_type, styles.get(name)), subset=[name])
-        if kql_type in _NUMERIC_TYPES:
-            numeric.append(name)
-
-    styler = styler.set_table_styles(_TABLE_STYLES).set_table_styles(
-        {
-            name: [{"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")]
-            for name in numeric
-        },
-        overwrite=False,
-    )
-    total_columns, total_row = _pivot_totals(df, view)
-    if total_columns:
-        styler = styler.set_table_styles(
-            {
-                name: [{"selector": sel, "props": _TOTAL_COLUMN_CSS} for sel in ("th", "td")]
-                for name in total_columns
-            },
-            overwrite=False,
-        )
-    if total_row is not None:
-        styler = styler.set_table_styles(
-            {total_row: [{"selector": "td", "props": _TOTAL_ROW_CSS}]}, axis=1, overwrite=False
-        )
-    if all(name is None for name in df.index.names):
-        styler = styler.hide(axis="index")
-    if len(view) < len(df):
-        styler = styler.set_caption(f"Showing the first {len(view):,} of {len(df):,} rows.")
-    return styler
+            total_columns, total_row = _pivot_totals(df, view)
+            if total_columns:
+                styler = styler.set_table_styles(
+                    {
+                        name: [
+                            {"selector": sel, "props": _TOTAL_COLUMN_CSS} for sel in ("th", "td")
+                        ]
+                        for name in total_columns
+                    },
+                    overwrite=False,
+                )
+            if total_row is not None:
+                styler = styler.set_table_styles(
+                    {total_row: [{"selector": "td", "props": _TOTAL_ROW_CSS}]},
+                    axis=1,
+                    overwrite=False,
+                )
+            if all(name is None for name in df.index.names):
+                styler = styler.hide(axis="index")
+            if len(view) < len(df):
+                styler = styler.set_caption(f"Showing the first {len(view):,} of {len(df):,} rows.")
+        call.update(shown_rows=len(view))
+        return styler

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
 import pandas as pd
 
 from ._batch import _DEFAULT_AGG, _agg_type, _names
+from ._errors import public_call
 from ._exceptions import ConfigurationError
 from ._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR
+from ._log import dependency_call
+
+logger = logging.getLogger("security_notebook_tools.pivot")
 
 _NULL_LABEL = "(null)"
 _TOTAL = "Total"
@@ -82,137 +87,168 @@ def pivot_dataframe(
         ... )
         >>> format_dataframe(by_user)
     """
-    if not isinstance(df, pd.DataFrame):
-        raise ConfigurationError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
-    idx = _names(_listable(index, "index"), "index")
-    cols = _names(_listable(columns, "columns"), "columns")
-    vals = None if values is None else _names(_listable(values, "values"), "values")
-    if vals is None and (agg_func is not _DEFAULT_AGG or fill_value is not None):
-        raise ConfigurationError(
-            "agg_func and fill_value need values; without values the rows are counted."
-        )
-    if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
-        raise ConfigurationError(
-            f"agg_func must be a non-empty string or a callable, got {agg_func!r}."
-        )
-    if max_columns is not None and (
-        isinstance(max_columns, bool) or not isinstance(max_columns, int) or max_columns < 1
-    ):
-        raise ConfigurationError(
-            f"max_columns must be a positive integer or None, got {max_columns!r}."
-        )
-    if not isinstance(totals, bool):
-        raise ConfigurationError(f"totals must be a bool, got {totals!r}.")
-    named = idx + cols + (vals or [])
-    if len(set(named)) != len(named):
-        shared = sorted({n for n in named if named.count(n) > 1})
-        raise ConfigurationError(
-            f"Column(s) {shared} are used more than once across index, columns and values."
-        )
-    missing = [n for n in named if n not in df.columns]
-    if missing:
-        raise ConfigurationError(
-            f"Column(s) {missing} are not in the DataFrame; available columns: {list(df.columns)}."
-        )
-
-    old = df.attrs.get(KQL_TYPES_ATTR, {})
-    cell_names = vals or [None]
-    prefixed = vals is not None and len(vals) > 1
-
-    def header(value: str | None, key: tuple[Any, ...]) -> str:
-        text = "_".join(_NULL_LABEL if pd.isna(k) else str(k) for k in key)
-        return f"{value}_{text}" if prefixed else text
-
-    def total_name(value: str | None) -> str:
-        return f"{value}_{_TOTAL}" if prefixed else _TOTAL
-
-    total_columns = [total_name(v) for v in cell_names] if totals else []
-
-    if df.empty:
-        out = df[idx].reset_index(drop=True)
-        if totals:
-            for value in cell_names:
-                out[total_name(value)] = pd.Series(dtype="int64" if vals is None else "float64")
-        pairs = list(zip(total_columns, cell_names, strict=False))
-        return _finish(out, idx, pairs, old, agg_func, total_columns)
-
-    work = df[named].copy()
-    work[_ALL] = 0
-    try:
-        distinct = work[cols].drop_duplicates().sort_values(cols, na_position="last", kind="stable")
-    except Exception as exc:
-        raise ConfigurationError(f"Cannot pivot on {cols}: {exc}") from exc
-    keys = list(distinct.itertuples(index=False, name=None))
-    if max_columns is not None and len(keys) * len(cell_names) > max_columns:
-        raise ConfigurationError(
-            f"{cols} has {len(keys)} distinct keys, which would create "
-            f"{len(keys) * len(cell_names)} columns, more than max_columns={max_columns}. "
-            "Filter the data or raise or disable (None) max_columns."
-        )
-    headers = {(v, k): header(v, k) for v in cell_names for k in keys}
-    pairs = [(h, v) for (v, _), h in headers.items()]
-    pairs += list(zip(total_columns, cell_names, strict=False))
-    generated = [name for name, _ in pairs]
-    clash = sorted({h for h in generated if generated.count(h) > 1 or h in idx})
-    if clash:
-        raise ConfigurationError(
-            f"Generated column header(s) {clash} collide with an index column or each other; "
-            "rename the index columns or filter the data."
-        )
-
-    def aggregate(by: list[str]) -> pd.DataFrame:
-        try:
-            grouped = work.groupby(by, dropna=False, sort=True)
-            if vals is None:
-                out = grouped.size().rename(_COUNT).reset_index()
-            else:
-                out = grouped[vals].agg(agg_func).reset_index()
-        except Exception as exc:
-            name = (
-                agg_func
-                if isinstance(agg_func, str)
-                else getattr(agg_func, "__name__", repr(agg_func))
-            )
+    shape = getattr(df, "shape", None)
+    with public_call(
+        logger,
+        "pivot_dataframe",
+        rows=shape[0] if shape else None,
+        columns=shape[1] if shape else None,
+        index=index,
+        pivot_columns=columns,
+        values=values,
+        agg_func=agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", None),
+        totals=totals,
+        max_columns=max_columns,
+    ) as call:
+        if not isinstance(df, pd.DataFrame):
+            raise ConfigurationError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
+        idx = _names(_listable(index, "index"), "index")
+        cols = _names(_listable(columns, "columns"), "columns")
+        vals = None if values is None else _names(_listable(values, "values"), "values")
+        if vals is None and (agg_func is not _DEFAULT_AGG or fill_value is not None):
             raise ConfigurationError(
-                f"Cannot aggregate {vals or 'row counts'} with {name!r} grouped by {by}: {exc}"
-            ) from exc
-        return out
+                "agg_func and fill_value need values; without values the rows are counted."
+            )
+        if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
+            raise ConfigurationError(
+                f"agg_func must be a non-empty string or a callable, got {agg_func!r}."
+            )
+        if max_columns is not None and (
+            isinstance(max_columns, bool) or not isinstance(max_columns, int) or max_columns < 1
+        ):
+            raise ConfigurationError(
+                f"max_columns must be a positive integer or None, got {max_columns!r}."
+            )
+        if not isinstance(totals, bool):
+            raise ConfigurationError(f"totals must be a bool, got {totals!r}.")
+        named = idx + cols + (vals or [])
+        if len(set(named)) != len(named):
+            shared = sorted({n for n in named if named.count(n) > 1})
+            raise ConfigurationError(
+                f"Column(s) {shared} are used more than once across index, columns and values."
+            )
+        missing = [n for n in named if n not in df.columns]
+        if missing:
+            raise ConfigurationError(
+                f"Column(s) {missing} are not in the DataFrame; "
+                f"available columns: {list(df.columns)}."
+            )
 
-    cells = aggregate(idx + cols)
-    cell_cols = [_COUNT] if vals is None else vals
-    row_ids = cells.groupby(idx, dropna=False, sort=False).ngroup()
-    rows = cells[idx].drop_duplicates().reset_index(drop=True)
-    labels = [tuple(k) for k in cells[cols].itertuples(index=False, name=None)]
-    parts = []
-    for value, col in zip(cell_names, cell_cols, strict=True):
-        long = pd.DataFrame(
-            {"r": row_ids.to_numpy(), "h": [header(value, k) for k in labels], "v": cells[col]}
-        )
-        wide = long.pivot(index="r", columns="h", values="v")
-        parts.append(wide.reindex(columns=[headers[value, k] for k in keys]))
-    body = pd.concat(parts, axis=1).reset_index(drop=True)
-    if vals is None:
-        body = body.fillna(0).astype("int64")
-    elif fill_value is not None:
-        body = body.fillna(fill_value)
-    out = pd.concat([rows, body], axis=1)
+        old = df.attrs.get(KQL_TYPES_ATTR, {})
+        cell_names = vals or [None]
+        prefixed = vals is not None and len(vals) > 1
 
-    if totals:
-        row_totals = aggregate(idx)  # same keys, same sort order as ``rows``
-        col_totals = aggregate(cols)
-        grand = aggregate([_ALL])
-        extra = {}
-        for value, col in zip(cell_names, cell_cols, strict=True):
-            out[total_name(value)] = row_totals[col].to_numpy()
-            for k, cell in zip(
-                col_totals[cols].itertuples(index=False, name=None), col_totals[col], strict=True
-            ):
-                extra[header(value, k)] = cell
-            extra[total_name(value)] = grand[col].iloc[0]
-        first = {n: (_TOTAL if n == idx[0] else None) for n in idx}
-        total_row = pd.DataFrame([{**first, **extra}], columns=list(out.columns))
-        out = pd.concat([out, total_row], ignore_index=True)
-    return _finish(out, idx, pairs, old, agg_func, total_columns)
+        def header(value: str | None, key: tuple[Any, ...]) -> str:
+            text = "_".join(_NULL_LABEL if pd.isna(k) else str(k) for k in key)
+            return f"{value}_{text}" if prefixed else text
+
+        def total_name(value: str | None) -> str:
+            return f"{value}_{_TOTAL}" if prefixed else _TOTAL
+
+        total_columns = [total_name(v) for v in cell_names] if totals else []
+
+        if df.empty:
+            out = df[idx].reset_index(drop=True)
+            if totals:
+                for value in cell_names:
+                    out[total_name(value)] = pd.Series(dtype="int64" if vals is None else "float64")
+            pairs = list(zip(total_columns, cell_names, strict=False))
+            result = _finish(out, idx, pairs, old, agg_func, total_columns)
+            call.update(rows=len(result), columns=len(result.columns))
+            return result
+
+        work = df[named].copy()
+        work[_ALL] = 0
+        try:
+            with dependency_call(logger, "pandas distinct column keys", columns=cols):
+                distinct = (
+                    work[cols]
+                    .drop_duplicates()
+                    .sort_values(cols, na_position="last", kind="stable")
+                )
+        except Exception as exc:
+            raise ConfigurationError(f"Cannot pivot on {cols}: {exc}") from exc
+        keys = list(distinct.itertuples(index=False, name=None))
+        if max_columns is not None and len(keys) * len(cell_names) > max_columns:
+            raise ConfigurationError(
+                f"{cols} has {len(keys)} distinct keys, which would create "
+                f"{len(keys) * len(cell_names)} columns, more than max_columns={max_columns}. "
+                "Filter the data or raise or disable (None) max_columns."
+            )
+        headers = {(v, k): header(v, k) for v in cell_names for k in keys}
+        pairs = [(h, v) for (v, _), h in headers.items()]
+        pairs += list(zip(total_columns, cell_names, strict=False))
+        generated = [name for name, _ in pairs]
+        clash = sorted({h for h in generated if generated.count(h) > 1 or h in idx})
+        if clash:
+            raise ConfigurationError(
+                f"Generated column header(s) {clash} collide with an index column or each other; "
+                "rename the index columns or filter the data."
+            )
+
+        def aggregate(by: list[str], level: int = logging.DEBUG) -> pd.DataFrame:
+            try:
+                with dependency_call(logger, "pandas groupby aggregation", level=level, by=by):
+                    grouped = work.groupby(by, dropna=False, sort=True)
+                    if vals is None:
+                        out = grouped.size().rename(_COUNT).reset_index()
+                    else:
+                        out = grouped[vals].agg(agg_func).reset_index()
+            except Exception as exc:
+                name = (
+                    agg_func
+                    if isinstance(agg_func, str)
+                    else getattr(agg_func, "__name__", repr(agg_func))
+                )
+                raise ConfigurationError(
+                    f"Cannot aggregate {vals or 'row counts'} with {name!r} grouped by {by}: {exc}"
+                ) from exc
+            return out
+
+        cells = aggregate(idx + cols, logging.INFO)
+        cell_cols = [_COUNT] if vals is None else vals
+        with dependency_call(logger, "pandas pivot reshape", keys=len(keys)):
+            row_ids = cells.groupby(idx, dropna=False, sort=False).ngroup()
+            rows = cells[idx].drop_duplicates().reset_index(drop=True)
+            labels = [tuple(k) for k in cells[cols].itertuples(index=False, name=None)]
+            parts = []
+            for value, col in zip(cell_names, cell_cols, strict=True):
+                long = pd.DataFrame(
+                    {
+                        "r": row_ids.to_numpy(),
+                        "h": [header(value, k) for k in labels],
+                        "v": cells[col],
+                    }
+                )
+                wide = long.pivot(index="r", columns="h", values="v")
+                parts.append(wide.reindex(columns=[headers[value, k] for k in keys]))
+            body = pd.concat(parts, axis=1).reset_index(drop=True)
+            if vals is None:
+                body = body.fillna(0).astype("int64")
+            elif fill_value is not None:
+                body = body.fillna(fill_value)
+            out = pd.concat([rows, body], axis=1)
+
+        if totals:
+            row_totals = aggregate(idx)  # same keys, same sort order as ``rows``
+            col_totals = aggregate(cols)
+            grand = aggregate([_ALL])
+            extra = {}
+            for value, col in zip(cell_names, cell_cols, strict=True):
+                out[total_name(value)] = row_totals[col].to_numpy()
+                for k, cell in zip(
+                    col_totals[cols].itertuples(index=False, name=None),
+                    col_totals[col],
+                    strict=True,
+                ):
+                    extra[header(value, k)] = cell
+                extra[total_name(value)] = grand[col].iloc[0]
+            first = {n: (_TOTAL if n == idx[0] else None) for n in idx}
+            total_row = pd.DataFrame([{**first, **extra}], columns=list(out.columns))
+            out = pd.concat([out, total_row], ignore_index=True)
+        result = _finish(out, idx, pairs, old, agg_func, total_columns)
+        call.update(rows=len(result), columns=len(result.columns))
+        return result
 
 
 def _listable(value: Any, label: str) -> Any:

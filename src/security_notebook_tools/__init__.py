@@ -29,14 +29,20 @@ In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cel
 runs the cell body as KQL through ``exec_query`` and displays it with ``format_dataframe``
 (see ``help(load_ipython_extension)``).
 
-Logging: every record at INFO and above is appended to ``notebooks.log`` in the project root
-(see ``security_notebook_tools._log``); nothing is printed to the cell. Gitignore the file.
+Logging: every record at INFO and above from every module is appended to ``notebooks.log`` in
+the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
+above from the ``azure`` SDK loggers; nothing is printed to the cell. Every line is redacted:
+KQL text, result values, environment variable values, tokens and URL query strings are never
+written. Gitignore the file.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
+import logging
+
 from ._batch import exec_batch_query
 from ._format import format_dataframe
+from ._log import describe_exception
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
@@ -56,7 +62,7 @@ def load_ipython_extension(ipython) -> None:
 
     Run ``%load_ext security_notebook_tools`` in a notebook, then write raw KQL in a cell::
 
-        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
+        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache]
 
     The body is passed verbatim to ``exec_query``, which does all validation, and the result is
     displayed with ``format_dataframe``. The DataFrame is not kept; call ``exec_query`` directly
@@ -68,9 +74,15 @@ def load_ipython_extension(ipython) -> None:
     Args:
         ipython: The active ``InteractiveShell``.
     """
-    from ._magic import KqlMagics
+    log = logging.getLogger("security_notebook_tools.magic")
+    try:
+        from ._magic import KqlMagics
 
-    ipython.register_magics(KqlMagics)
+        ipython.register_magics(KqlMagics)
+    except Exception as exc:
+        log.error("Could not load the IPython extension: %s", describe_exception(exc))
+        raise
+    log.info("IPython extension loaded: the %%kql cell magic is registered")
 
 
 def __dir__() -> list[str]:

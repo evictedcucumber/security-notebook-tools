@@ -15,7 +15,7 @@ def _log_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch, _log_file):
     """Keep the developer's real env vars and cached clients out of tests."""
     for var in (
         config.TENANT_ID_VAR,
@@ -28,5 +28,7 @@ def _clean_env(monkeypatch):
     ):
         monkeypatch.delenv(var, raising=False)
     _query.clear_cache()
+    _log.close_log_file()
+    _log_file.unlink(missing_ok=True)  # clear_cache logs; tests start with no log file
     yield
     _query.clear_cache()

@@ -4,6 +4,10 @@ Known failures are explained (:func:`describe_network_error`, :func:`describe_st
 :func:`describe_codes`). Anything else that escapes an SDK is turned into a ``QueryError`` by
 :func:`unexpected`, which also logs it at ERROR with its traceback so it can be reported.
 
+:func:`public_call` is the one place where a failed public call is logged (WARNING when the
+call was rejected, ERROR when it failed); it stays silent for an error :func:`unexpected` already
+logged or a nested public call already reported.
+
 The Azure and Kusto SDKs wrap low-level errors (``ConnectionResetError`` inside urllib3 inside
 requests inside the SDK's own exception), so the cause is only visible by walking the exception
 chain. These helpers do that and turn the result into a sentence with a practical hint.
@@ -14,13 +18,23 @@ from __future__ import annotations
 import errno
 import logging
 import socket
+import threading
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from ._exceptions import QueryError, SecurityNotebookToolsError
+from ._exceptions import ConfigurationError, QueryError, SecurityNotebookToolsError
+from ._log import (
+    clear_failure_mark,
+    describe_exception,
+    failure_logged,
+    format_fields,
+    mark_failure_logged,
+)
 
 _MAX_DEPTH = 20
+_public = threading.local()  # per thread: how deep public calls are nested
 
 # HTTP statuses worth retrying. 504 and 408 are deliberately absent: a query that timed out
 # would only time out again.
@@ -249,13 +263,31 @@ def hints_for(status: int | None, codes: Iterable[str]) -> str:
     return f" ({text})" if text else ""
 
 
+def log_unexpected(logger: logging.Logger, operation: str, exc: BaseException) -> None:
+    """Log an error nobody anticipated at ERROR, with its traceback.
+
+    The traceback is rendered with redaction (see :mod:`._log`). The record is the only ERROR
+    for the failure: the public boundary stays silent for an exception raised after this, once
+    the error that is raised has been passed to :func:`mark_failure_logged` (:func:`unexpected`
+    does that).
+    """
+    logger.error(
+        "Unexpected %s during %s; this case is not handled yet, please report it with the "
+        "traceback",
+        type(exc).__name__,
+        operation,
+        exc_info=exc,
+    )
+
+
 def unexpected(logger: logging.Logger, operation: str, exc: BaseException) -> QueryError:
     """Log an error nobody anticipated with its traceback and return a ``QueryError`` for it.
 
     Call it from an ``except Exception`` block and ``raise unexpected(...) from exc``. The log
     record carries ``exc_info`` and the message tells the reader to report it; the returned
     error names the operation and the original type and message, and the original is chained,
-    so the traceback is also in the cell and in ``notebooks.log``.
+    so the traceback is also in the cell and in ``notebooks.log``. The returned error is marked
+    as logged, so the public boundary does not log it again.
 
     Args:
         logger: The module's logger.
@@ -265,18 +297,14 @@ def unexpected(logger: logging.Logger, operation: str, exc: BaseException) -> Qu
     Returns:
         A ``QueryError`` to raise from ``exc``.
     """
+    log_unexpected(logger, operation, exc)
     name = type(exc).__name__
-    logger.error(
-        "Unexpected %s during %s; this case is not handled yet, please report it with the "
-        "traceback",
-        name,
-        operation,
-        exc_info=exc,
-    )
-    return QueryError(
+    error = QueryError(
         f"Unexpected {name} during {operation}: {exc}. This case is not handled yet; the "
         "original exception and its full traceback are chained below. Please report it."
     )
+    mark_failure_logged(error)
+    return error
 
 
 @contextmanager
@@ -293,3 +321,70 @@ def unexpected_errors(logger: logging.Logger, operation: str) -> Iterator[None]:
         raise
     except Exception as exc:
         raise unexpected(logger, operation, exc) from exc
+
+
+@contextmanager
+def public_call(
+    logger: logging.Logger,
+    name: str,
+    *,
+    rejected: tuple[type[BaseException], ...] = (ConfigurationError,),
+    **fields: Any,
+) -> Iterator[dict[str, Any]]:
+    """Log a public function: entry, result summary, and its failure exactly once.
+
+    INFO on entry (with ``fields``) and on success (with the duration and the result fields the
+    block adds to the yielded dict, such as ``rows`` and ``columns``). An exception is logged
+    once and re-raised unchanged: WARNING if it is one of ``rejected`` (invalid arguments or
+    configuration, a query refused by the cost guard), ERROR for a ``QueryError`` or any other
+    package error, ERROR with a traceback for an exception nobody anticipated. It is not logged
+    if it, or an exception it was raised from, was already logged (by :func:`unexpected` or by a
+    nested public call). ``KeyboardInterrupt`` is logged at WARNING. Only redacted
+    text is logged (see :func:`._log.describe_exception`).
+
+    Args:
+        logger: The public function's module logger.
+        name: The public name, e.g. ``"exec_query"``.
+        rejected: Exception types that mean "refused", logged at WARNING.
+        **fields: Facts about the call (never KQL, values or environment variable values).
+
+    Yields:
+        A dict to put result facts in (``call["rows"] = 10``).
+    """
+    result: dict[str, Any] = {}
+    depth = getattr(_public, "depth", 0)
+    start = time.perf_counter()
+    try:
+        _public.depth = depth + 1
+        logger.info("%s: started%s", name, format_fields(fields))
+        yield result
+    except KeyboardInterrupt as exc:
+        if not failure_logged(exc):
+            mark_failure_logged(exc)
+            logger.warning("%s: interrupted after %.2fs", name, time.perf_counter() - start)
+        if depth == 0:
+            clear_failure_mark(exc)
+        raise
+    except Exception as exc:
+        if not failure_logged(exc):
+            mark_failure_logged(exc)
+            elapsed = time.perf_counter() - start
+            if isinstance(exc, rejected):
+                logger.warning(
+                    "%s: rejected after %.2fs: %s", name, elapsed, describe_exception(exc, 300)
+                )
+            elif isinstance(exc, SecurityNotebookToolsError):
+                logger.error(
+                    "%s: failed after %.2fs: %s", name, elapsed, describe_exception(exc, 300)
+                )
+            else:
+                log_unexpected(logger, name, exc)
+        if depth == 0:
+            clear_failure_mark(exc)
+        raise
+    else:
+        logger.info(
+            "%s: finished in %.2fs%s", name, time.perf_counter() - start, format_fields(result)
+        )
+    finally:
+        _public.depth = depth

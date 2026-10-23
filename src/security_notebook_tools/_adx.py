@@ -12,6 +12,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
 import pandas as pd
 from azure.identity import AzureCliCredential, CredentialUnavailableError
@@ -45,7 +46,7 @@ from ._exceptions import (
 )
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
-from ._log import shorten
+from ._log import dependency_call, fingerprint, mask_name
 
 logger = logging.getLogger("security_notebook_tools.adx")
 
@@ -96,16 +97,16 @@ class ADXClient:
         """
         self.cluster_uri = resolve_cluster_uri(cluster_uri)
         self.database = resolve_database(database)
+        host = mask_name(urlsplit(self.cluster_uri).hostname)
         with unexpected_errors(logger, "ADX client setup"):
             self.credential = credential or get_credential()
-            kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
-                self.cluster_uri, self.credential
-            )
-            self._client = KustoClient(kcsb)
+            with dependency_call(logger, "Kusto client creation", host=host):
+                kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
+                    self.cluster_uri, self.credential
+                )
+                self._client = KustoClient(kcsb)
         logger.info(
-            "ADX client ready for %s (default database: %s)",
-            self.cluster_uri,
-            self.database or "none",
+            "ADX client ready for %s (default database: %s)", host, mask_name(self.database)
         )
 
     def _db(self, database: str | None) -> str:
@@ -129,25 +130,25 @@ class ADXClient:
         Anything not mapped here propagates; the caller turns it into an "unexpected" error.
         """
         try:
-            return execute(db, text, props)
+            with dependency_call(
+                logger, f"Kusto {kind}", database=mask_name(db), kql=fingerprint(text)
+            ):
+                return execute(db, text, props)
         except CredentialUnavailableError as exc:
             message = (
                 f"ADX {kind} failed: no Azure credential available ({exc}). Install the Azure "
                 "CLI and run `az login`"
             )
-            logger.error(message)
             raise QueryError(message) from exc
         except KustoNetworkError as exc:
             message = (
                 f"ADX {kind} failed: could not reach the service: {describe_network_error(exc)}"
             )
-            logger.error(message)
             raise QueryConnectionError(message) from exc
         except (KustoServiceError, KustoThrottlingError) as exc:
             # KustoApiError / KustoMultiApiError are KustoServiceErrors with error codes.
             status = _status(exc) if isinstance(exc, KustoServiceError) else None
             message = f"ADX {kind} failed: {exc}{hints_for(status, kusto_error_codes(exc))}"
-            logger.error(message)
             if isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc)):
                 error = QueryThrottledError
             elif status in TRANSIENT_STATUS:
@@ -160,19 +161,15 @@ class ADXClient:
                 f"ADX {kind} failed: authentication failed: {exc} (run `az login`, and check "
                 "that your account may access the cluster)"
             )
-            logger.error(message)
             raise QueryError(message) from exc
         except KustoClosedError as exc:
             message = f"ADX {kind} failed: the client was closed; create a new one"
-            logger.error(message)
             raise QueryError(message) from exc
         except KustoClientError as exc:
             message = f"ADX {kind} failed on the client side: {type(exc).__name__}: {exc}"
-            logger.error(message)
             raise QueryError(message) from exc
         except KustoError as exc:
             message = f"ADX {kind} failed: {type(exc).__name__}: {exc}"
-            logger.error(message)
             raise QueryError(message) from exc
 
     def _execute(
@@ -192,11 +189,13 @@ class ADXClient:
         props = self._props(properties) or ClientRequestProperties()
         props.set_option(_READONLY_OPTION, True)
         execute = self._client.execute_mgmt if kind == "command" else self._client.execute_query
-        logger.info("Running ADX %s on %s: %s", kind, db, shorten(text))
+        logger.info("Running ADX %s on %s (kql=%s)", kind, mask_name(db), fingerprint(text))
         start = time.perf_counter()
         with unexpected_errors(logger, f"ADX {kind}"):
             response = self._call(kind, execute, db, text, props)
-            dfs = [_table_to_df(t) for t in response.primary_results]
+            with dependency_call(logger, "pandas DataFrame conversion", target="adx") as call:
+                dfs = [_table_to_df(t) for t in response.primary_results]
+                call["rows"] = [len(df) for df in dfs]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",
             kind,

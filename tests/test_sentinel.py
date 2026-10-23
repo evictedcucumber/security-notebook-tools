@@ -347,3 +347,92 @@ def test_cost_guard_errors_are_not_wrapped(client):
     with pytest.raises(ConfigurationError, match="Cost guard"):
         client.query("Aux_CL | take 1")
     client._mock.query_workspace.assert_not_called()
+
+
+# --- logging ------------------------------------------------------------------------------------
+
+SECRET_KQL = (
+    "T | where Email == 'bob.smith@contoso.com' and Ip == '203.0.113.77' "
+    '| where Note == "topsecretvalue" | take 5'
+)
+LEAKS = ("bob.smith", "203.0.113.77", "topsecretvalue", "Email ==", "contoso")
+
+
+def test_dependency_calls_are_logged_with_durations(client, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client.query(SECRET_KQL)
+    messages = [r.getMessage() for r in caplog.records if r.name.endswith("sentinel")]
+    query = next(m for m in messages if m.startswith("Log Analytics query: done in "))
+    assert "workspace=1111… kql=hmac:" in query
+    assert "status=Success" in query
+    assert any(m.startswith("pandas DataFrame conversion: done in ") for m in messages)
+    assert WS not in caplog.text
+
+
+def test_known_failure_is_one_dependency_warning_and_no_error(client, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client._mock.query_workspace.side_effect = HttpResponseError(
+        message="Syntax error near 'topsecretvalue' for bob.smith@contoso.com", response=None
+    )
+    with pytest.raises(QueryError):
+        client.query(SECRET_KQL)
+    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is None
+    assert record.getMessage().startswith("Log Analytics query: failed after ")
+    assert "HttpResponseError: Syntax error near '…' for <email>" in record.getMessage()
+
+
+def test_unexpected_error_is_one_error_and_a_dependency_warning(client, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client._mock.query_workspace.side_effect = RuntimeError("boom")
+    with pytest.raises(QueryError):
+        client.query("T")
+    levels = [r.levelno for r in caplog.records if r.levelno >= logging.WARNING]
+    assert levels == [logging.WARNING, logging.ERROR]
+
+
+def test_conversion_failure_is_logged_as_a_dependency_warning(client, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    with (
+        mock.patch("security_notebook_tools._sentinel._table_to_df", side_effect=ValueError("x")),
+        pytest.raises(QueryError),
+    ):
+        client.query("T")
+    warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert warning.getMessage().startswith("pandas DataFrame conversion: failed after ")
+
+
+def test_client_creation_is_logged(caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with mock.patch("security_notebook_tools._sentinel.LogsQueryClient"):
+        SentinelClient(WS, credential=mock.Mock(), resource_id=RID)
+    text = caplog.text
+    assert "LogsQueryClient creation: done in" in text
+    assert "Sentinel client ready for workspace 1111…" in text
+    assert WS not in text
+
+
+def test_kql_and_service_text_are_never_logged(client, caplog, _log_file):
+    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    echo = "near 'topsecretvalue' for bob.smith@contoso.com from 203.0.113.77"
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client.query(SECRET_KQL)
+    client._mock.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[_table()], partial_error=LogsQueryError(code="Timeout", message=echo)
+    )
+    with pytest.warns(UserWarning):
+        client.query(SECRET_KQL)
+    for error in (HttpResponseError(message=echo), AzureError(echo), RuntimeError(echo)):
+        client._mock.query_workspace.side_effect = error
+        with pytest.raises(QueryError):
+            client.query(SECRET_KQL)
+    # the file (redacted), and every message (caplog.text would add its own raw tracebacks)
+    logged = _log_file.read_text(encoding="utf-8") + "\n".join(
+        r.getMessage() for r in caplog.records
+    )
+    for leak in LEAKS:
+        assert leak not in logged
+    assert "partial results" in logged

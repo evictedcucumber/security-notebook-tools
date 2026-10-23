@@ -11,6 +11,7 @@ import re
 from datetime import datetime, timedelta
 
 from ._kql import strip_noise
+from ._log import describe_timespan
 
 logger = logging.getLogger("security_notebook_tools.timerange")
 
@@ -65,7 +66,7 @@ def resolve_timespan(kql: str, timespan: Timespan | None) -> Timespan | None:
             logger.warning(
                 "Query has its own time filter and timespan=%s was also given; "
                 "both apply, so the narrower range wins.",
-                timespan,
+                describe_timespan(timespan),
             )
         return timespan
     if in_query:

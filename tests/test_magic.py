@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from IPython.core.error import UsageError  # noqa: E402
 from IPython.core.interactiveshell import InteractiveShell  # noqa: E402
 
 from security_notebook_tools import _magic  # noqa: E402
+from security_notebook_tools._exceptions import ConfigurationError  # noqa: E402
 from security_notebook_tools._query import DEFAULT_TIMEOUT  # noqa: E402
 
 DF = pd.DataFrame({"a": [1]})
@@ -144,3 +146,69 @@ def test_empty_body(shell, body):
 def test_import_does_not_import_ipython():
     code = "import sys, security_notebook_tools; assert 'IPython' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+# --- logging ------------------------------------------------------------------------------------
+
+
+def _warnings(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_extension_load_and_run_are_logged(shell, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    import security_notebook_tools as snt
+
+    snt.load_ipython_extension(shell)
+    run(shell, "-t 1d --timeout 60", "T | where Email == 'bob@contoso.com'")
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "IPython extension loaded: the %%kql cell magic is registered" in text
+    assert "%%kql: started kql=hmac:" in text
+    assert "IPython argument parsing: done in" in text
+    assert "%%kql: finished in" in text
+    assert "target=sentinel timeout=60 cache=True timespan=duration" in text
+    assert "bob" not in text
+    assert not _warnings(caplog)
+
+
+def test_empty_body_is_one_warning(shell, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with pytest.raises(UsageError):
+        run(shell, "", "  ")
+    record = _warnings(caplog)[0]
+    assert len(_warnings(caplog)) == 1
+    assert record.name == "security_notebook_tools.magic"
+    assert "%%kql: rejected after" in record.getMessage()
+
+
+def test_bad_argument_is_a_dependency_warning_and_a_rejection(shell, caplog):
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with pytest.raises(UsageError):
+        run(shell, "--nope", "T")
+    messages = [r.getMessage() for r in _warnings(caplog)]
+    assert len(messages) == 2
+    assert messages[0].startswith("IPython argument parsing: failed")
+    assert messages[1].startswith("%%kql: rejected")
+
+
+def test_timespan_expression_text_is_never_logged(shell, caplog, _log_file):
+    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    with pytest.raises(UsageError):
+        run(shell, '--timespan "timedelta(hours=secret_marker_9)"', "T")
+    logged = _log_file.read_text(encoding="utf-8") + "\n".join(
+        r.getMessage() for r in caplog.records
+    )
+    assert "secret_marker_9" not in logged
+    assert "timespan expression evaluation: failed" in logged
+
+
+def test_nested_exec_query_failure_is_logged_once(shell, caplog, monkeypatch):
+    from security_notebook_tools import _query
+
+    monkeypatch.setattr(_magic, "exec_query", _query.exec_query)
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    with pytest.raises(ConfigurationError):
+        run(shell, "--timeout 0", "T")
+    record = _warnings(caplog)
+    assert len(record) == 1
+    assert record[0].getMessage().startswith("exec_query: rejected")

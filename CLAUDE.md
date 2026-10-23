@@ -11,14 +11,14 @@ Version 3.0.0. MIT licence.
 ## Layout
 
 - `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_batch.py`,
-  `_log.py`, `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`,
+  `_pivot.py`, `_log.py`, `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`, `_auth.py`,
   `_exceptions.py`, `_errors.py`, `_kql.py`, `_tablepolicy.py`, `_format.py`, `_magic.py`). `_magic.py` is the
   `%%kql` cell magic, registered by `load_ipython_extension` in `__init__.py`.
 - `_kql.py` (tokenizer) and `_tablepolicy.py` (ARM table-plan check) are the cost guard: Sentinel
   queries may only read Analytics-plan tables. They fail closed; treat any loosening as a
   security change and add a regression test for every bypass.
 - Public API is only what `__init__.py` lists in `__all__`: `exec_query`, `exec_batch_query`,
-  `format_dataframe`, `clear_cache`, `enable_logging`, `disable_logging` (plus `__version__`).
+  `format_dataframe`, `pivot_dataframe`, `clear_cache` (plus `__version__`).
   `tests/test_query.py::test_public_surface` pins it; changing the API means
   updating that test deliberately.
 - `tests/`: pytest. `docs/`: `api.md`, `notebook-setup.md`. `.vscode/`, `.env.example`: workspace
@@ -42,8 +42,11 @@ Flakes only see git-tracked files; `git add` new files before relying on `nix de
 - Google-style docstrings, enforced by ruff `D` rules (tests exempt). Line length 100.
   Ruff rules: E, F, I, UP, B, SIM, C4, D.
 - No `print`. Log through child loggers of `security_notebook_tools` (for example
-  `logging.getLogger("security_notebook_tools.sentinel")`). Notebook output is via
-  `verbose_logging` / `enable_logging`.
+  `logging.getLogger("security_notebook_tools.sentinel")`). Everything at INFO and above goes to
+  `notebooks.log` in the project root, redacted (`_log.py` documents the levels). Never log KQL
+  text (use `fingerprint`), result values, env var values or headers; wrap dependency calls in
+  `dependency_call`, public functions in `_errors.public_call`, and pass SDK messages through
+  `redact_exception_text`.
 - Environment variables are read on every call (`_config.py`), never at import time. Clients and
   credentials are cached, table plans for 5 minutes (`_tablepolicy.py`), and query results in
   `functools.lru_cache` functions in `_query.py` (on by default, `cache=False` per call).
