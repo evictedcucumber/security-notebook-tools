@@ -34,6 +34,7 @@ from ._errors import (
     TRANSIENT_STATUS,
     describe_network_error,
     hints_for,
+    is_timeout,
     kusto_error_codes,
     unexpected_errors,
 )
@@ -42,6 +43,7 @@ from ._exceptions import (
     QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
 )
 from ._format import KQL_TYPES_ATTR
@@ -149,11 +151,14 @@ class ADXClient:
         except (KustoServiceError, KustoThrottlingError) as exc:
             # KustoApiError / KustoMultiApiError are KustoServiceErrors with error codes.
             status = _status(exc) if isinstance(exc, KustoServiceError) else None
-            message = f"ADX {kind} failed: {exc}{hints_for(status, kusto_error_codes(exc))}"
+            codes = kusto_error_codes(exc)
+            message = f"ADX {kind} failed: {exc}{hints_for(status, codes)}"
             if isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc)):
                 error = QueryThrottledError
             elif status in TRANSIENT_STATUS:
                 error = QueryTransientError
+            elif is_timeout(status, codes):
+                error = QueryTimeoutError
             else:
                 error = QueryError
             raise error(message) from exc
@@ -235,6 +240,8 @@ class ADXClient:
                 ``QueryTransientError``.
             QueryThrottledError: The service throttled the request (HTTP 429 or a throttling
                 error). It is a ``QueryError``.
+            QueryTimeoutError: The service timed the query out (HTTP 408/504 or a timeout error
+                code). It is a ``QueryError``, not transient.
         """
         return self._execute("query", kql, database, properties)
 

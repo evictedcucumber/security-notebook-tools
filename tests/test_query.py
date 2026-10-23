@@ -1699,3 +1699,25 @@ def test_retention_warning_points_at_the_caller(retention):
         snt.exec_batch_query(kql, timedelta(days=120), interval=timedelta(days=60))
     files = [w.filename for w in caught if "Analytics" in str(w.message)]
     assert files == [__file__, __file__]
+
+
+def test_batch_min_interval_splits_adx_server_timeouts(adx):
+    cls, _ = adx
+    calls = []
+
+    def query(kql, database, properties=None):
+        calls.append(kql)
+        if len(calls) == 1:
+            raise QueryTimeoutError("ADX query failed: Request_Timeout")
+        return [pd.DataFrame({"a": [len(calls)]})]
+
+    cls.return_value.query_tables.side_effect = query
+    df = snt.exec_batch_query(
+        FILTER,
+        D0,
+        _days(2),
+        interval=timedelta(days=2),
+        min_interval=timedelta(days=1),
+        target="adx",
+    )
+    assert df["a"].tolist() == [2, 3]

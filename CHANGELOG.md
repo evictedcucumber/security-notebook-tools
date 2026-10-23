@@ -6,8 +6,8 @@
 
 - `min_interval` keyword-only argument on `exec_batch_query` (default `None`: unchanged, a
   window that times out fails the batch). With a `timedelta`, a window that times out (HTTP
-  504/408, no answer within `timeout` plus 30 seconds, or a connection reset after the window ran
-  for half of `timeout`) is split into two halves that run in time order as windows of their own,
+  504/408 or a timeout error code on either target, no answer within `timeout` plus 30 seconds
+  on Sentinel, or a connection reset after the window ran for half of `timeout`) is split into two halves that run in time order as windows of their own,
   recursively, until a half would be shorter than `min_interval`; then the batch fails and the
   error names the smallest window tried. Each split is logged at WARNING. The result has the
   same shape as an unsplit run. `min_interval` must be positive and not longer than `interval`
@@ -35,6 +35,10 @@
   too slow, not a network blip, and each retry wasted another 4 to 15 minutes (30 minutes for one
   window). It now fails at once with a timeout error that says how long the window ran and
   suggests a smaller `interval` or a larger `timeout`. Early resets are still retried.
+- ADX: HTTP 408/504 and timeout error codes raise `QueryTimeoutError` too (a `QueryError`, not
+  retried), so `min_interval` also splits windows the cluster timed out. ADX still has no total
+  request deadline: the Kusto client only sets a per-read socket timeout, so the deadline above
+  is Sentinel only.
 - Sentinel: HTTP 504, 408 and `GatewayTimeout` responses, a spent azure-core retry budget and a
   read timeout raise an internal `QueryTimeoutError` (a `QueryError`, not exported, not
   retried), so `except QueryError` still catches them. A timeout error code never overrides a

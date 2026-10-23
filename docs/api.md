@@ -221,9 +221,10 @@ Known failures are raised as `QueryError` (or a subclass) with a message that ex
   `ResponsePayloadTooLarge`, timeouts; Kusto `BadRequest_SyntaxError`, `BadRequest_EntityNotFound`,
   limits exceeded, ...) add a hint. Partial Sentinel results get the same hint.
 - A missing Azure CLI or an expired login says to install it or run `az login`.
-- A query that ran out of time raises `QueryTimeoutError`: HTTP 504 or 408 (`GatewayTimeout`), or a
-  Sentinel request that has not been answered within `timeout` plus 30 seconds in total (the
-  request is then abandoned). It is not retried, as the same query would time out again.
+- A query that ran out of time raises `QueryTimeoutError`: HTTP 504 or 408 (`GatewayTimeout`, or
+  a timeout error code), on both targets, or a Sentinel request that has not been answered within
+  `timeout` plus 30 seconds in total (the request is then abandoned; ADX has no such total
+  deadline). It is not retried, as the same query would time out again.
 - `exec_batch_query` retries `QueryTransientError` (throttling, connection errors, HTTP 502/503).
 
 An error nobody anticipated is logged at ERROR with its traceback to the `security_notebook_tools`
@@ -246,8 +247,8 @@ and `SystemExit` are never wrapped.
   may succeed if retried: `QueryThrottledError` (HTTP 429) and `QueryConnectionError` (the
   connection failed before a response arrived: reset by peer, refused, timed out, DNS; the
   message explains the likely cause). HTTP 502/503 raise `QueryTransientError`, their base
-  class. `QueryTimeoutError` (HTTP 504/408, or no answer within `timeout` plus 30 seconds on
-  Sentinel) is a `QueryError` that is not transient.
+  class. `QueryTimeoutError` (HTTP 504/408 or a timeout error code, or on Sentinel no answer
+  within `timeout` plus 30 seconds) is a `QueryError` that is not transient.
 
 None of these classes is exported; catch `ValueError` for configuration problems, or `Exception`.
 
@@ -306,8 +307,9 @@ too slow, not dropped by the network, so it counts as a timeout and is not retri
 error says how long the window ran and suggests a smaller `interval` or a larger `timeout`. A
 timed-out window fails with a `QueryTimeoutError` (a `QueryError`).
 
-With `min_interval` a window that times out (HTTP 504/408, no answer within `timeout` plus 30
-seconds on Sentinel, or a connection reset after it ran for half of `timeout`) is not failed but
+With `min_interval` a window that times out (HTTP 504/408 or a timeout error code on either
+target, no answer within `timeout` plus 30 seconds on Sentinel, or a connection reset after it
+ran for half of `timeout`) is not failed but
 split into two halves that run one after another, oldest first, each as a window of its own with
 its own `BatchStart`, `BatchEnd` and API time range. A half that times out is split again, until
 a half would be shorter than `min_interval`; then the batch fails with a `QueryTimeoutError` that
@@ -379,8 +381,9 @@ results, adding columns that only later windows have.
   any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
 * `QueryError`: a window failed (including one that still failed transiently after its retries,
   which the message says); the message names the window (number, total, bounds) and the original
-  error is chained. A window that timed out (HTTP 504/408, no answer within `timeout` plus 30
-  seconds, or a connection reset after the window ran for half of `timeout`) fails with the
+  error is chained. A window that timed out (HTTP 504/408 or a timeout error code, no answer
+  within `timeout` plus 30 seconds on Sentinel, or a connection reset after the window ran for
+  half of `timeout`) fails with the
   subclass `QueryTimeoutError`, without retries (unless `min_interval` splits it; the final error
   then names the smallest window tried).
 

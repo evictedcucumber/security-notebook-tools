@@ -24,6 +24,7 @@ from security_notebook_tools._exceptions import (
     QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
 )
 
@@ -156,6 +157,38 @@ def test_service_error_status_hint(patched, status, transient, fragment):
     with pytest.raises(QueryError, match=fragment) as ei:
         c.query("T")
     assert isinstance(ei.value, QueryTransientError) is transient
+
+
+@pytest.mark.parametrize("status", [504, 408])
+def test_timeout_statuses_are_timeout_errors(patched, status):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoServiceError("late", mock.Mock(status_code=status))
+    with pytest.raises(QueryTimeoutError, match="timeout") as ei:
+        ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock()).query("T")
+    assert not isinstance(ei.value, QueryTransientError)
+
+
+@pytest.mark.parametrize("code", ["Request_Timeout", "Kusto.Data.Exceptions.QueryTimedOut"])
+def test_timeout_codes_are_timeout_errors(patched, code):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {"error": {"code": code, "message": "m", "@message": "details"}}
+    )
+    with pytest.raises(QueryTimeoutError):
+        _adx().query("T")
+
+
+@pytest.mark.parametrize("status", [429, 502, 503])
+def test_retried_statuses_keep_their_class_even_with_a_timeout_code(patched, status):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {"error": {"code": "Request_Timeout", "message": "m", "@message": "details"}}
+    )
+    client.execute_query.side_effect.http_response = mock.Mock(status_code=status)
+    with pytest.raises(QueryError) as ei:
+        _adx().query("T")
+    assert not isinstance(ei.value, QueryTimeoutError)
+    assert isinstance(ei.value, QueryTransientError)
 
 
 def test_authentication_error_is_a_query_error(patched):

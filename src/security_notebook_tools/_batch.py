@@ -647,8 +647,9 @@ def exec_batch_query(
         interval: The length of each window (default 1 day); must be positive.
         min_interval: Split a window that times out instead of failing. ``None`` (default)
             keeps the behaviour: a window that times out fails the batch. With a value, a window
-            that fails with a timeout (HTTP 504/408, no answer within ``timeout`` plus 30
-            seconds on Sentinel, or a connection reset after it ran for half of ``timeout``) is
+            that fails with a timeout (HTTP 504/408 or a timeout error code on either
+            target, no answer within ``timeout`` plus 30 seconds on Sentinel only, or a
+            connection reset after it ran for half of ``timeout``) is
             cut into two halves that run one after another, oldest first, each with its own
             ``BatchStart``/``BatchEnd`` and API time range; a half that times out is cut again,
             and so on, until a half would be shorter than ``min_interval``, where the batch
@@ -707,8 +708,9 @@ def exec_batch_query(
         QueryError: A window failed. The message names the window (number, total and bounds)
             and the original error is chained. A window that still failed transiently after
             its retries fails this way too, and the message says it was retried. A window that
-            timed out (HTTP 504/408, no answer within ``timeout`` plus 30 seconds, or a
-            connection reset after it ran for half of ``timeout``) fails with its subclass
+            timed out (HTTP 504/408 or a timeout error code, no answer within ``timeout``
+            plus 30 seconds on Sentinel, or a connection reset after it ran for half of
+            ``timeout``) fails with its subclass
             ``QueryTimeoutError`` and is not retried (see ``min_interval``).
 
     Example:
