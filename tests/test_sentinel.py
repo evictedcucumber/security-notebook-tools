@@ -1,15 +1,32 @@
+import errno
+import logging
 from datetime import UTC, datetime
 from unittest import mock
 
 import pytest
-from azure.core.exceptions import HttpResponseError
-from azure.monitor.query import LogsQueryPartialResult, LogsQueryResult, LogsTable
+from azure.core.exceptions import (
+    AzureError,
+    ClientAuthenticationError,
+    HttpResponseError,
+    ODataV4Format,
+    ServiceRequestError,
+    ServiceResponseError,
+)
+from azure.identity import CredentialUnavailableError
+from azure.monitor.query import (
+    LogsQueryError,
+    LogsQueryPartialResult,
+    LogsQueryResult,
+    LogsTable,
+)
 
 from security_notebook_tools._exceptions import (
     ConfigurationError,
     PartialResultError,
+    QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTransientError,
 )
 from security_notebook_tools._sentinel import SentinelClient
 from security_notebook_tools._tablepolicy import TablePolicy
@@ -115,6 +132,54 @@ def test_other_http_errors_are_not_throttling(client, status):
     assert not isinstance(ei.value, QueryThrottledError)
 
 
+def _reset_error(cls):
+    exc = cls("Connection aborted.")
+    exc.__cause__ = ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+    return exc
+
+
+@pytest.mark.parametrize("cls", [ServiceResponseError, ServiceRequestError])
+def test_connection_reset_maps_to_connection_error(client, cls):
+    error = _reset_error(cls)
+    client._mock.query_workspace.side_effect = error
+    with pytest.raises(QueryConnectionError, match="reset by peer") as ei:
+        client.query("T")
+    assert isinstance(ei.value, QueryTransientError)
+    assert "[Errno 104]" in str(ei.value)
+    assert ei.value.__cause__ is error
+
+
+def test_503_is_transient_but_not_throttled(client):
+    response = mock.Mock(status_code=503, reason="x")
+    client._mock.query_workspace.side_effect = HttpResponseError(message="down", response=response)
+    with pytest.raises(QueryTransientError, match="temporarily unavailable") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryThrottledError | QueryConnectionError)
+
+
+def test_403_has_a_hint(client):
+    response = mock.Mock(status_code=403, reason="x")
+    client._mock.query_workspace.side_effect = HttpResponseError(message="no", response=response)
+    with pytest.raises(QueryError, match="no read access") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTransientError)
+
+
+def test_504_is_not_transient(client):
+    response = mock.Mock(status_code=504, reason="x")
+    client._mock.query_workspace.side_effect = HttpResponseError(message="late", response=response)
+    with pytest.raises(QueryError, match="raise `timeout`") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTransientError)
+
+
+def test_authentication_error_is_not_a_connection_error(client):
+    client._mock.query_workspace.side_effect = ClientAuthenticationError(message="expired")
+    with pytest.raises(QueryError, match="az login") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTransientError)
+
+
 def test_workspace_from_env(monkeypatch):
     with mock.patch("security_notebook_tools._sentinel.LogsQueryClient"):
         monkeypatch.setenv("SENTINEL_WORKSPACE_ID", WS)
@@ -183,3 +248,102 @@ def test_table_to_df_records_kql_types():
     df = _table_to_df(table)
     assert df.attrs["kql_types"] == {"A": "datetime", "B": "long", "C": "string"}
     assert df["A"].dt.tz is not None
+
+
+def _coded_error(status, code, inner=None):
+    exc = HttpResponseError(message="svc message", response=mock.Mock(status_code=status))
+    body = {"code": code, "message": "m"}
+    if inner:
+        body["details"] = [{"code": inner, "message": "i"}]
+    exc.error = ODataV4Format(body)
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("code", "inner", "fragment"),
+    [
+        ("BadArgumentError", "SyntaxError", "syntax error"),
+        ("BadArgumentError", "SemanticError", "semantic error"),
+        ("PathNotFoundError", None, "table or function was not found"),
+        ("WorkspaceNotFoundError", None, "workspace not found"),
+        ("InsufficientAccessError", None, "reader role"),
+        ("GatewayTimeout", None, "timed out"),
+        ("ResponsePayloadTooLarge", None, "too large"),
+    ],
+)
+def test_service_error_code_hints(client, code, inner, fragment):
+    client._mock.query_workspace.side_effect = _coded_error(400, code, inner)
+    with pytest.raises(QueryError, match=fragment) as ei:
+        client.query("T")
+    assert f"service error code: {code}" in str(ei.value)
+
+
+def test_credential_unavailable_says_to_install_and_log_in(client):
+    client._mock.query_workspace.side_effect = CredentialUnavailableError("az not found")
+    with pytest.raises(QueryError, match="Install the Azure CLI and run `az login`") as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTransientError)
+
+
+def test_other_azure_errors_are_explained_not_unexpected(client, caplog):
+    client._mock.query_workspace.side_effect = AzureError("odd")
+    with pytest.raises(QueryError, match="AzureError: odd"):
+        client.query("T")
+    assert not any(r.exc_info for r in caplog.records)
+
+
+def test_partial_result_gets_a_code_hint(client):
+    client._mock.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[_table()],
+        partial_error=LogsQueryError(code="ResponsePayloadTooLarge", message="big"),
+    )
+    with pytest.warns(UserWarning, match="partial results.*too large"):
+        client.query("T")
+
+
+def test_unexpected_error_is_wrapped_and_logged_with_traceback(client, caplog):
+    boom = RuntimeError("boom")
+    client._mock.query_workspace.side_effect = boom
+    with (
+        caplog.at_level(logging.ERROR, logger="security_notebook_tools"),
+        pytest.raises(QueryError, match="Unexpected RuntimeError during Sentinel query") as ei,
+    ):
+        client.query("T")
+    assert ei.value.__cause__ is boom
+    records = [r for r in caplog.records if r.exc_info]
+    assert records
+    assert records[0].exc_info[1] is boom
+
+
+def test_unexpected_error_converting_the_result(client):
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    with (
+        mock.patch("security_notebook_tools._sentinel._table_to_df", side_effect=ValueError("x")),
+        pytest.raises(QueryError, match="Unexpected ValueError during converting"),
+    ):
+        client.query("T")
+
+
+def test_unexpected_error_building_the_client():
+    with (
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient", side_effect=OSError("x")),
+        pytest.raises(QueryError, match="Unexpected OSError during Sentinel client setup"),
+    ):
+        SentinelClient(WS, credential=mock.Mock(), resource_id=RID)
+
+
+def test_package_errors_and_interrupts_are_not_wrapped(client):
+    config = ConfigurationError("nope")
+    client._mock.query_workspace.side_effect = config
+    with pytest.raises(ConfigurationError) as ei:
+        client.query("T")
+    assert ei.value is config
+    client._mock.query_workspace.side_effect = KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        client.query("T")
+
+
+def test_cost_guard_errors_are_not_wrapped(client):
+    with pytest.raises(ConfigurationError, match="Cost guard"):
+        client.query("Aux_CL | take 1")
+    client._mock.query_workspace.assert_not_called()

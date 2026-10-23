@@ -202,6 +202,27 @@ tables. Sentinel datetime columns are UTC-aware. `df.attrs["kql_types"]` maps ea
 to its lowercase KQL type (`"long"`, `"dynamic"` ...), which `format_dataframe` uses. If Sentinel
 returns only a partial result, a warning is logged and the data received is returned.
 
+### Errors
+
+Known failures are raised as `QueryError` (or a subclass) with a message that explains the cause:
+
+- Network failures (reset by peer, refused, timed out, DNS) raise `QueryConnectionError` and say
+  what they usually mean.
+- HTTP statuses (400, 401, 403, 404, 408, 413, 429, 5xx) and service error codes (Log Analytics
+  `SyntaxError`, `SemanticError`, `PathNotFoundError`, `InsufficientAccessError`,
+  `ResponsePayloadTooLarge`, timeouts; Kusto `BadRequest_SyntaxError`, `BadRequest_EntityNotFound`,
+  limits exceeded, ...) add a hint. Partial Sentinel results get the same hint.
+- A missing Azure CLI or an expired login says to install it or run `az login`.
+- `exec_batch_query` retries `QueryTransientError` (throttling, connection errors, HTTP 502/503).
+
+An error nobody anticipated is logged at ERROR with its traceback to the `security_notebook_tools`
+logger, and raised as a `QueryError` that names the operation and chains the original exception
+(its traceback shows in the notebook). It is not retried. Nothing is printed unless logging is
+set up, so to keep the log attach a handler, for example
+`logging.getLogger("security_notebook_tools").addHandler(logging.FileHandler("snt.log"))`, or call
+`enable_logging()`. Configuration and cost guard errors (`ConfigurationError`), `KeyboardInterrupt`
+and `SystemExit` are never wrapped.
+
 ### Raises
 
 - `ConfigurationError` (also a `ValueError`): `timeout` is not positive, `target` is unknown,
@@ -211,7 +232,12 @@ returns only a partial result, a warning is logged and the data received is retu
   management command is not `.show`, ADX KQL uses `cluster()`, `external_table()`,
   `externaldata` or a blocked plugin, or the Sentinel cost guard rejects the query.
 - `QueryError`: the service rejected or failed the query (bad KQL, authorisation, timeout, ...),
-  or the Sentinel table plans could not be verified (the query was then not sent).
+  or the Sentinel table plans could not be verified (the query was then not sent). The message
+  adds a hint for common HTTP statuses (401, 403, 504, ...). Two subclasses mark failures that
+  may succeed if retried: `QueryThrottledError` (HTTP 429) and `QueryConnectionError` (the
+  connection failed before a response arrived: reset by peer, refused, timed out, DNS; the
+  message explains the likely cause). HTTP 502/503 raise `QueryTransientError`, their base
+  class.
 
 Neither class is exported; catch `ValueError` for configuration problems, or `Exception`.
 
@@ -258,10 +284,12 @@ client, credential and table-plan caches are warm), then the rest run in paralle
 windows not yet started are skipped, running ones are waited for, and the error of the
 lowest-numbered failed window is raised.
 
-A window the service throttles (HTTP 429, "too many requests") is retried up to 4 times, waiting
-a random time between 0 and 2, 4, 8 and 16 seconds (exponential backoff with full jitter, capped
-at 30 s) and logging a warning each time; after that it fails like any other error. Other errors
-are not retried.
+A window that fails with a transient error is retried up to 4 times: the service throttles it
+(HTTP 429, "too many requests"), the connection drops before a response arrives (reset by peer,
+timed out, DNS), or the service answers 502/503. The wait is a random time between 0 and 2, 4, 8
+and 16 seconds (exponential backoff with full jitter, capped at 30 s), and a warning names the
+reason each time; after that the window fails with an error that says it was retried. Other
+errors (bad KQL, 401/403, a server-side timeout) are not retried.
 
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
 BatchEnd = datetime("...");` added in front of your KQL. The window is half-open, so the KQL must
@@ -322,8 +350,9 @@ results, adding columns that only later windows have.
   overlapping, `agg_func` is invalid or given without `agg_column`, a named column is missing from
   the result, the aggregation fails, or
   any configuration or cost guard error `exec_query` raises. It is also a `ValueError`.
-* `QueryError`: a window failed (including one still throttled after its retries); the message
-  names the window (number, total, bounds) and the original error is chained.
+* `QueryError`: a window failed (including one that still failed transiently after its retries,
+  which the message says); the message names the window (number, total, bounds) and the original
+  error is chained.
 
 ### Examples
 

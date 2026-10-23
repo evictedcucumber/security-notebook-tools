@@ -423,11 +423,16 @@ def test_batch_prefix_passes_cost_guard():
 
 # --- exec_batch_query: parallel windows and throttling retries ----------------------------------
 
+import errno  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
 from security_notebook_tools import _batch  # noqa: E402
-from security_notebook_tools._exceptions import QueryThrottledError  # noqa: E402
+from security_notebook_tools._exceptions import (  # noqa: E402
+    QueryConnectionError,
+    QueryThrottledError,
+    QueryTransientError,
+)
 
 
 def _window_no(timespan) -> int:
@@ -594,6 +599,32 @@ def test_batch_retries_are_exhausted(sentinel, backoff):
     assert caps == [2, 4, 8, 16]
     assert len(sleeps) == 4
     assert cls.return_value.query_tables.call_count == 5  # 1 try + 4 retries
+
+
+def test_batch_connection_error_is_retried(sentinel, backoff, caplog):
+    cls, _ = sentinel
+    reset = ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+    boom = QueryConnectionError("Sentinel query failed: could not reach the service: [Errno 104]")
+    boom.__cause__ = reset
+    ok = [pd.DataFrame({"a": [1]})]
+    cls.return_value.query_tables.side_effect = [boom, ok]
+    caplog.set_level(logging.WARNING, logger="security_notebook_tools")
+    assert snt.exec_batch_query(FILTER, D0, _days(1)).shape == (1, 1)
+    assert backoff[0] == [1.0]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "Batch 1/1 failed with a transient error (connection reset by peer); retrying in 1.0 s"
+        " (attempt 1/4)" in m
+        for m in messages
+    )
+
+
+def test_batch_transient_error_is_retried_then_exhausted(sentinel, backoff):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = QueryTransientError("503")
+    with pytest.raises(QueryError, match=r"window 1/1 .*failed after 4 retries: 503"):
+        snt.exec_batch_query(FILTER, D0, _days(1))
+    assert cls.return_value.query_tables.call_count == 5
 
 
 def test_batch_backoff_is_capped(sentinel, backoff):
@@ -998,3 +1029,27 @@ def test_batch_rerun_reuses_succeeded_windows(sentinel):
     assert _sdk_calls(cls) == 3  # only the failed window ran again
     snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2), cache=False)
     assert _sdk_calls(cls) == 5
+
+
+def test_batch_unexpected_error_is_wrapped_logged_and_not_retried(sentinel, backoff, caplog):
+    cls, _ = sentinel
+    boom = RuntimeError("boom")
+    cls.return_value.query_tables.side_effect = boom
+    caplog.set_level(logging.ERROR, logger="security_notebook_tools")
+    with pytest.raises(QueryError, match=r"window 1/2 .*unexpected RuntimeError: boom") as ei:
+        snt.exec_batch_query(FILTER, D0, _days(2))
+    assert ei.value.__cause__ is boom
+    assert cls.return_value.query_tables.call_count == 1
+    assert backoff[0] == []
+    records = [r for r in caplog.records if r.exc_info]
+    assert records[0].exc_info[1] is boom
+    assert "Batch window 1/2" in records[0].getMessage()
+
+
+def test_batch_configuration_error_passes_through_unchanged(sentinel, backoff):
+    cls, _ = sentinel
+    config = ConfigurationError("cost guard")
+    cls.return_value.query_tables.side_effect = config
+    with pytest.raises(ConfigurationError) as ei:
+        snt.exec_batch_query(FILTER, D0, _days(2))
+    assert ei.value is config

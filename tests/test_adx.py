@@ -1,15 +1,30 @@
+import errno
+import logging
 from unittest import mock
 
 import pandas as pd
 import pytest
+from azure.identity import CredentialUnavailableError
 from azure.kusto.data import ClientRequestProperties
-from azure.kusto.data.exceptions import KustoServiceError, KustoThrottlingError
+from azure.kusto.data.exceptions import (
+    KustoApiError,
+    KustoAuthenticationError,
+    KustoClientError,
+    KustoClosedError,
+    KustoError,
+    KustoMultiApiError,
+    KustoNetworkError,
+    KustoServiceError,
+    KustoThrottlingError,
+)
 
 from security_notebook_tools._adx import ADXClient
 from security_notebook_tools._exceptions import (
     ConfigurationError,
+    QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTransientError,
 )
 
 
@@ -109,6 +124,47 @@ def test_other_service_errors_are_not_throttling(patched):
     with pytest.raises(QueryError) as ei:
         c.query("T")
     assert not isinstance(ei.value, QueryThrottledError)
+
+
+def test_network_error_maps_to_connection_error(patched):
+    client, _, _ = patched
+    error = KustoNetworkError("https://c.kusto.windows.net", "id")
+    error.__cause__ = ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+    client.execute_query.side_effect = error
+    client.execute_mgmt.side_effect = error
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    with pytest.raises(QueryConnectionError, match="ADX query failed.*reset by peer") as ei:
+        c.query("T")
+    assert isinstance(ei.value, QueryTransientError)
+    assert ei.value.__cause__ is error
+    with pytest.raises(QueryConnectionError, match="ADX command failed"):
+        c.show(".show tables")
+
+
+@pytest.mark.parametrize(
+    ("status", "transient", "fragment"),
+    [
+        (503, True, "temporarily unavailable"),
+        (403, False, "no read access"),
+        (504, False, "timeout"),
+    ],
+)
+def test_service_error_status_hint(patched, status, transient, fragment):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoServiceError("x", mock.Mock(status_code=status))
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    with pytest.raises(QueryError, match=fragment) as ei:
+        c.query("T")
+    assert isinstance(ei.value, QueryTransientError) is transient
+
+
+def test_authentication_error_is_a_query_error(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoAuthenticationError("az", ValueError("expired"))
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    with pytest.raises(QueryError, match="ADX query failed.*az login") as ei:
+        c.query("T")
+    assert not isinstance(ei.value, QueryTransientError)
 
 
 def test_env_defaults(patched, monkeypatch):
@@ -290,3 +346,100 @@ def test_table_to_df_records_kql_types():
         df = _table_to_df(table)
     conv.assert_called_once_with(table)
     assert df.attrs["kql_types"] == {"A": "long", "B": "datetime"}
+
+
+def _adx():
+    return ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+
+
+@pytest.mark.parametrize(
+    ("code", "fragment"),
+    [
+        ("BadRequest_SyntaxError", "syntax error"),
+        ("BadRequest_EntityNotFound", "was not found"),
+        ("BadRequest_SemanticError", "semantic error"),
+        ("LimitsExceeded", "service limit"),
+        ("Request_Timeout", "timed out"),
+    ],
+)
+def test_kusto_api_error_code_hints(patched, code, fragment):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {"error": {"code": code, "message": "m", "@message": "details"}}
+    )
+    with pytest.raises(QueryError, match=fragment) as ei:
+        _adx().query("T")
+    assert f"service error code: {code}" in str(ei.value)
+
+
+def test_kusto_multi_api_error_code_hint(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoMultiApiError(
+        [
+            {
+                "OneApiErrors": [
+                    {"error": {"code": "BadRequest_SyntaxError", "message": "m", "@message": "d"}}
+                ]
+            }
+        ]
+    )
+    with pytest.raises(QueryError, match="syntax error"):
+        _adx().query("T")
+
+
+def test_credential_unavailable(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = CredentialUnavailableError("az missing")
+    with pytest.raises(QueryError, match="Install the Azure CLI and run `az login`"):
+        _adx().query("T")
+
+
+@pytest.mark.parametrize(
+    ("error", "fragment"),
+    [
+        (KustoClosedError(), "client was closed"),
+        (KustoClientError("bad"), "client side"),
+        (KustoError("odd"), "KustoError: odd"),
+    ],
+)
+def test_other_kusto_errors_are_explained(patched, caplog, error, fragment):
+    client, _, _ = patched
+    client.execute_query.side_effect = error
+    with pytest.raises(QueryError, match=fragment):
+        _adx().query("T")
+    assert not any(r.exc_info for r in caplog.records)
+
+
+def test_unexpected_error_is_wrapped_and_logged(patched, caplog):
+    client, _, _ = patched
+    boom = RuntimeError("boom")
+    client.execute_query.side_effect = boom
+    with (
+        caplog.at_level(logging.ERROR, logger="security_notebook_tools"),
+        pytest.raises(QueryError, match="Unexpected RuntimeError during ADX query") as ei,
+    ):
+        _adx().query("T")
+    assert ei.value.__cause__ is boom
+    assert [r for r in caplog.records if r.exc_info][0].exc_info[1] is boom
+
+
+def test_unexpected_error_converting_and_constructing(patched):
+    client, _, conv = patched
+    client.execute_query.return_value = mock.Mock(primary_results=[object()])
+    conv.side_effect = ValueError("x")
+    with pytest.raises(QueryError, match="Unexpected ValueError during ADX query"):
+        _adx().query("T")
+    with (
+        mock.patch("security_notebook_tools._adx.KustoClient", side_effect=OSError("x")),
+        pytest.raises(QueryError, match="ADX client setup"),
+    ):
+        _adx()
+
+
+def test_configuration_errors_and_interrupts_are_not_wrapped(patched):
+    client, _, _ = patched
+    with pytest.raises(ConfigurationError):
+        _adx().show("drop table T")
+    client.execute_query.side_effect = KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        _adx().query("T")

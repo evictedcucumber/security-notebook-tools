@@ -13,7 +13,14 @@ from typing import Any
 
 import pandas as pd
 
-from ._exceptions import ConfigurationError, QueryError, QueryThrottledError
+from ._errors import describe_network_error
+from ._exceptions import (
+    ConfigurationError,
+    QueryError,
+    QueryThrottledError,
+    QueryTransientError,
+    SecurityNotebookToolsError,
+)
 from ._format import KQL_TYPES_ATTR
 from ._kql import Token, tokenize
 from ._log import verbose_logging
@@ -31,8 +38,9 @@ _ARITHMETIC = frozenset("+-*/%")
 # wait counts against the timeout; more workers than that gain nothing. ADX shares its limit
 # with everyone using the cluster.
 MAX_WORKERS = 5
-# A throttled window is retried this many times, waiting a random time (full jitter) between 0
-# and min(_BACKOFF_CAP, _BACKOFF_BASE * 2 ** retries_so_far) seconds.
+# A window that fails transiently (throttled, connection dropped) is retried this many times,
+# waiting a random time (full jitter) between 0 and
+# min(_BACKOFF_CAP, _BACKOFF_BASE * 2 ** retries_so_far) seconds.
 _MAX_RETRIES = 4
 _BACKOFF_BASE = 2.0
 _BACKOFF_CAP = 30.0
@@ -163,6 +171,16 @@ def _sleep(delay: float, stop: threading.Event) -> bool:
     return stop.wait(delay)
 
 
+def _reason(exc: QueryError) -> str:
+    """A short cause for a retry warning: the network cause if known, else the message."""
+    cause = exc.__cause__
+    if cause is not None:
+        text = describe_network_error(cause)
+        if text.startswith("[Errno"):
+            return text.split(":", 1)[0].split(" ", 2)[-1]
+    return str(exc).split("\n")[0][:120]
+
+
 def _run_window(
     index: int,
     total: int,
@@ -173,10 +191,11 @@ def _run_window(
     cache: bool,
     stop: threading.Event,
 ) -> pd.DataFrame:
-    """Run one window, retrying throttled attempts; wrap a failure with the window's name.
+    """Run one window, retrying transient failures; wrap a failure with the window's name.
 
     Raises:
-        QueryError: The window failed, or was still throttled after ``_MAX_RETRIES`` retries.
+        QueryError: The window failed, or still failed transiently after ``_MAX_RETRIES``
+            retries (the message then says it was retried).
         _Stopped: ``stop`` was set while waiting to retry.
     """
     w_start, w_end = bounds
@@ -189,23 +208,49 @@ def _run_window(
             else:
                 tables = _query_adx(prefix + kql, timeout, cache=cache)
             break
-        except QueryError as exc:
-            if not isinstance(exc, QueryThrottledError) or retries >= _MAX_RETRIES:
+        except SecurityNotebookToolsError as exc:
+            if not isinstance(exc, QueryError):
+                raise  # e.g. ConfigurationError from the cost guard: unchanged
+            if not isinstance(exc, QueryTransientError):
                 raise QueryError(
                     f"Batch window {index}/{total} ({w_start} to {w_end}) failed: {exc}"
                 ) from exc
+            if retries >= _MAX_RETRIES:
+                raise QueryError(
+                    f"Batch window {index}/{total} ({w_start} to {w_end}) failed after "
+                    f"{retries} retries: {exc}"
+                ) from exc
             delay = random.uniform(0, min(_BACKOFF_CAP, _BACKOFF_BASE * 2**retries))
             retries += 1
+            if isinstance(exc, QueryThrottledError):
+                why = "throttled"
+            else:
+                why = f"failed with a transient error ({_reason(exc)})"
             logger.warning(
-                "Batch %d/%d throttled; retrying in %.1f s (attempt %d/%d)",
+                "Batch %d/%d %s; retrying in %.1f s (attempt %d/%d)",
                 index,
                 total,
+                why,
                 delay,
                 retries,
                 _MAX_RETRIES,
             )
             if _sleep(delay, stop):
                 raise _Stopped from exc
+        except Exception as exc:
+            name = f"Batch window {index}/{total} ({w_start} to {w_end})"
+            logger.error(
+                "Unexpected %s in %s; this case is not handled yet, please report it with the "
+                "traceback",
+                type(exc).__name__,
+                name,
+                exc_info=exc,
+            )
+            raise QueryError(
+                f"{name} failed with an unexpected {type(exc).__name__}: {exc}. This case is "
+                "not handled yet and is not retried; the original exception and its traceback "
+                "are chained below. Please report it."
+            ) from exc
     df = tables[0] if tables else pd.DataFrame()
     logger.info("Batch %d/%d: %s → %s, rows=%d", index, total, w_start, w_end, len(df))
     return df
@@ -373,10 +418,13 @@ def exec_batch_query(
     The first failure stops the batch: windows not yet started are skipped, running ones are
     waited for, and the error of the lowest-numbered failed window is raised.
 
-    A window that the service throttles (HTTP 429, "too many requests") is retried up to 4
-    times, waiting a random time between 0 and 2, 4, 8 and 16 seconds (full jitter, capped at
-    30 s) and logging a warning each time. After that it fails like any other error. Other
-    errors are not retried.
+    A window that fails with a transient error is retried up to 4 times: throttling (HTTP 429,
+    "too many requests"), a connection that dropped before a response arrived (reset by peer,
+    timed out, DNS), or HTTP 502/503. The wait is a random time between 0 and 2, 4, 8 and 16
+    seconds (full jitter, capped at 30 s), and a warning names the reason each time. After that
+    the window fails with an error that says it was retried. Other errors (bad KQL, HTTP
+    401/403, a server-side timeout) are not retried. An error nobody anticipated is logged at
+    ERROR with its traceback, wrapped in a ``QueryError`` that names the window, and not retried.
 
     Window bounds reach the query in two ways:
 
@@ -457,8 +505,8 @@ def exec_batch_query(
             window, before the rest run), or any error ``exec_query`` raises for configuration
             or the cost guard. It is also a ``ValueError``.
         QueryError: A window failed. The message names the window (number, total and bounds)
-            and the original error is chained. A window still throttled after its retries fails
-            this way too.
+            and the original error is chained. A window that still failed transiently after
+            its retries fails this way too, and the message says it was retried.
 
     Example:
         >>> from datetime import datetime, timedelta

@@ -14,6 +14,23 @@
 
 ### Added
 
+- Network and HTTP failures become package errors that explain the cause, instead of raw SDK
+  tracebacks. A dropped connection (for example "[Errno 104] Connection reset by peer") raises
+  `QueryConnectionError`, and the message says what it usually means and what to try. HTTP error
+  messages gain a hint for 400, 401, 403, 404, 408, 413, 429, 5xx. ADX authentication and client
+  errors are now `QueryError` too. The new classes derive from `QueryError`; they are not
+  exported.
+- Every SDK boundary (client setup, the query call, result conversion, the table-plan check) now
+  maps its known errors to an explaining `QueryError`: service error codes (Log Analytics
+  `SyntaxError`, `PathNotFoundError`, `InsufficientAccessError`, ...; Kusto
+  `BadRequest_SyntaxError`, `BadRequest_EntityNotFound`, ...), a missing Azure CLI or login, and
+  Sentinel partial results get hints. Any other exception is logged at ERROR with its traceback
+  (to the `security_notebook_tools` logger), raised as a `QueryError` that chains it, and not
+  retried by `exec_batch_query`. `ConfigurationError`, `KeyboardInterrupt` and `SystemExit` pass
+  through unchanged.
+- `exec_batch_query` retries any transient failure (connection errors, HTTP 429/502/503), not
+  only throttling, with the same backoff and limit. The warning names the reason, and a window
+  that still fails says it was retried.
 - `pivot_dataframe(df, index, columns, values=None, *, agg_func="sum", fill_value=None,
   totals=False, max_columns=100)` pivots a result into one row per `index` key and one column per
   `columns` key, counting rows or aggregating `values`. The flat result keeps `kql_types` and goes

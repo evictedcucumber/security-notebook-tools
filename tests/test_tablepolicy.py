@@ -1,3 +1,5 @@
+import errno
+import logging
 import time
 from unittest import mock
 
@@ -6,7 +8,11 @@ import requests
 from azure.core.credentials import AccessToken
 
 from security_notebook_tools import _tablepolicy as tp
-from security_notebook_tools._exceptions import ConfigurationError, QueryError
+from security_notebook_tools._exceptions import (
+    ConfigurationError,
+    QueryConnectionError,
+    QueryError,
+)
 from security_notebook_tools._kql import ARG_TABLE_NAMES
 from security_notebook_tools._tablepolicy import TablePolicy, check_sentinel_query
 
@@ -143,6 +149,20 @@ def test_fails_closed_on_any_fetch_error(exc):
     ):
         tp.get_policy(RID, WS, mock.Mock())
     assert not tp._cache  # nothing cached after a failure
+
+
+def test_network_error_while_verifying_is_a_connection_error():
+    reset = ConnectionResetError(errno.ECONNRESET, "Connection reset by peer")
+    exc = requests.ConnectionError("Connection aborted.")
+    exc.__cause__ = reset
+    with (
+        mock.patch.object(tp, "_get_json", side_effect=exc),
+        mock.patch.object(tp, "_arm_client"),
+        pytest.raises(QueryConnectionError, match="reset by peer.*not sent") as ei,
+    ):
+        tp.get_policy(RID, WS, mock.Mock())
+    assert isinstance(ei.value, QueryError)
+    assert not tp._cache
 
 
 @pytest.mark.parametrize(
@@ -689,3 +709,27 @@ def test_policy_without_functions():
     check_sentinel_query("T | take 1", policy)
     with pytest.raises(ConfigurationError, match="'Other'"):
         check_sentinel_query("Other | take 1", policy)
+
+
+@pytest.mark.parametrize(
+    ("exc", "traceback_logged"),
+    [
+        (RuntimeError("boom"), True),
+        (QueryError("HTTP 403"), False),
+        (ValueError("bad json"), False),
+    ],
+)
+def test_unknown_fetch_errors_are_logged_with_traceback_and_still_fail_closed(
+    caplog, exc, traceback_logged
+):
+    with (
+        caplog.at_level(logging.ERROR, logger="security_notebook_tools"),
+        mock.patch.object(tp, "_get_json", side_effect=exc),
+        mock.patch.object(tp, "_arm_client"),
+        pytest.raises(QueryError, match="Could not verify Sentinel table tiers.*not sent") as ei,
+    ):
+        tp.get_policy(RID, WS, mock.Mock())
+    assert ei.value.__cause__ is exc
+    assert ("please report it" in str(ei.value)) is traceback_logged
+    assert any(r.exc_info for r in caplog.records) is traceback_logged
+    assert not tp._cache

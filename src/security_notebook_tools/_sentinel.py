@@ -11,13 +11,41 @@ import time
 import warnings
 
 import pandas as pd
-from azure.core.exceptions import HttpResponseError
-from azure.identity import AzureCliCredential
-from azure.monitor.query import LogsQueryClient, LogsQueryStatus, LogsTable
+from azure.core.exceptions import (
+    AzureError,
+    ClientAuthenticationError,
+    DecodeError,
+    HttpResponseError,
+    ServiceRequestError,
+    ServiceResponseError,
+    TooManyRedirectsError,
+)
+from azure.identity import AzureCliCredential, CredentialUnavailableError
+from azure.monitor.query import (
+    LogsQueryClient,
+    LogsQueryPartialResult,
+    LogsQueryResult,
+    LogsQueryStatus,
+    LogsTable,
+)
 
 from ._auth import get_credential
 from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_resource_id
-from ._exceptions import PartialResultError, QueryError, QueryThrottledError
+from ._errors import (
+    TRANSIENT_STATUS,
+    azure_error_codes,
+    describe_codes,
+    describe_network_error,
+    hints_for,
+    unexpected_errors,
+)
+from ._exceptions import (
+    PartialResultError,
+    QueryConnectionError,
+    QueryError,
+    QueryThrottledError,
+    QueryTransientError,
+)
 from ._format import KQL_TYPES_ATTR
 from ._log import shorten, verbose_logging
 from ._tablepolicy import check_sentinel_query, get_policy
@@ -77,9 +105,63 @@ class SentinelClient:
             self.workspace_id = resolve_workspace_id(workspace_id)
             self.resource_id = resolve_workspace_resource_id(resource_id)
             self.tenant_id = resolve_tenant_id(tenant_id)
-            self.credential = credential or get_credential(self.tenant_id)
-            self._client = LogsQueryClient(self.credential)
+            with unexpected_errors(logger, "Sentinel client setup"):
+                self.credential = credential or get_credential(self.tenant_id)
+                self._client = LogsQueryClient(self.credential)
             logger.info("Sentinel client ready for workspace %s", self.workspace_id)
+
+    def _run(
+        self, kql: str, timespan: Timespan | None, server_timeout: int | None
+    ) -> LogsQueryResult | LogsQueryPartialResult:
+        """Send the query and map every known SDK failure to a ``QueryError`` that explains it.
+
+        Anything not mapped here propagates; the caller turns it into an "unexpected" error.
+        """
+        try:
+            return self._client.query_workspace(
+                self.workspace_id, kql, timespan=timespan, server_timeout=server_timeout
+            )
+        except CredentialUnavailableError as exc:
+            message = (
+                f"Sentinel query failed: no Azure credential available ({exc}). Install the "
+                "Azure CLI and run `az login`"
+            )
+            logger.error(message)
+            raise QueryError(message) from exc
+        except ClientAuthenticationError as exc:
+            message = (
+                f"Sentinel query failed: {exc.message or exc} (not authenticated: run "
+                "`az login`; the token may have expired)"
+            )
+            logger.error(message)
+            raise QueryError(message) from exc
+        except (ServiceRequestError, ServiceResponseError) as exc:
+            message = (
+                f"Sentinel query failed: could not reach the service: {describe_network_error(exc)}"
+            )
+            logger.error(message)
+            raise QueryConnectionError(message) from exc
+        except HttpResponseError as exc:
+            status = exc.status_code
+            message = f"Sentinel query failed: {exc.message or exc}"
+            if isinstance(exc, DecodeError):
+                message += " (the service sent a response that could not be read; retry)"
+            elif isinstance(exc, TooManyRedirectsError):
+                message += " (too many redirects: check the endpoint and any proxy)"
+            else:
+                message += hints_for(status, azure_error_codes(exc))
+            logger.error(message)
+            if status == _TOO_MANY_REQUESTS:
+                error = QueryThrottledError
+            elif status in TRANSIENT_STATUS:
+                error = QueryTransientError
+            else:
+                error = QueryError
+            raise error(message) from exc
+        except AzureError as exc:
+            message = f"Sentinel query failed: {type(exc).__name__}: {exc}"
+            logger.error(message)
+            raise QueryError(message) from exc
 
     def query_tables(
         self,
@@ -111,8 +193,18 @@ class SentinelClient:
                 that is not on the Analytics plan), or the workspace ID does not match the
                 resource ID.
             QueryError: The table plans could not be verified, or the service returned an error.
-            QueryThrottledError: The service throttled the request (HTTP 429). It is a
+                The message adds hints for the HTTP status and the service error code
+                (``SyntaxError``, ``PathNotFoundError``, ``InsufficientAccessError`` ...), and
+                says to run `az login` for authentication problems. An error nobody anticipated
+                is logged at ERROR with its traceback and raised as a ``QueryError`` that
+                chains the original.
+            QueryTransientError: A failure that may succeed if retried (HTTP 502/503). It is a
                 ``QueryError``.
+            QueryThrottledError: The service throttled the request (HTTP 429). It is a
+                ``QueryTransientError``.
+            QueryConnectionError: The connection failed before a response arrived (reset,
+                refused, timed out, DNS); the message explains the cause. It is a
+                ``QueryTransientError``.
             PartialResultError: The result was partial and ``raise_on_partial`` is set.
         """
         with verbose_logging(self.verbose if verbose is None else verbose):
@@ -122,20 +214,17 @@ class SentinelClient:
             check_sentinel_query(kql, policy)
             logger.info("Running Sentinel query (timespan=%s): %s", timespan, shorten(kql))
             start = time.perf_counter()
-            try:
-                result = self._client.query_workspace(
-                    self.workspace_id, kql, timespan=timespan, server_timeout=server_timeout
-                )
-            except HttpResponseError as exc:
-                logger.error("Sentinel query failed: %s", exc.message or exc)
-                error = QueryThrottledError if exc.status_code == _TOO_MANY_REQUESTS else QueryError
-                raise error(f"Sentinel query failed: {exc.message or exc}") from exc
+            with unexpected_errors(logger, "Sentinel query"):
+                result = self._run(kql, timespan, server_timeout)
 
             if result.status == LogsQueryStatus.SUCCESS:
                 tables = result.tables
             elif result.status == LogsQueryStatus.PARTIAL:
                 err = result.partial_error
+                hint = describe_codes([c for c in [getattr(err, "code", None)] if c])
                 msg = f"Sentinel query returned partial results: {err}"
+                if hint:
+                    msg += f" ({hint})"
                 logger.warning(msg)
                 if raise_on_partial:
                     raise PartialResultError(
@@ -146,7 +235,8 @@ class SentinelClient:
             else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
                 raise QueryError(f"Sentinel query failed: {getattr(result, 'error', result)}")
 
-            dfs = [_table_to_df(t) for t in tables]
+            with unexpected_errors(logger, "converting the Sentinel result to a DataFrame"):
+                dfs = [_table_to_df(t) for t in tables]
             logger.info(
                 "Sentinel query returned %d table(s), rows=%s in %.2fs",
                 len(dfs),

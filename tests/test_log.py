@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 
 from security_notebook_tools import disable_logging, enable_logging
+from security_notebook_tools._exceptions import QueryError
 from security_notebook_tools._log import _NotebookHandler, logger, shorten, verbose_logging
 from security_notebook_tools._sentinel import SentinelClient
 from security_notebook_tools._tablepolicy import TablePolicy
@@ -79,10 +80,10 @@ def test_client_verbose_default_and_override(capsys):
             verbose=True,
         )
         assert "workspace 11111111-1111-1111-1111-111111111111" in capsys.readouterr().out
-        with pytest.raises(RuntimeError):
+        with pytest.raises(QueryError, match="stop"):
             client.query("T", verbose=False)
         assert capsys.readouterr().out == ""
-        with pytest.raises(RuntimeError):
+        with pytest.raises(QueryError, match="stop"):
             client.query("T  |\n take 1")
         assert "Running Sentinel query" in capsys.readouterr().out
 

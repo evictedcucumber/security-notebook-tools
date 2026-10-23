@@ -2,7 +2,9 @@
 
 They are not exported from the package; catch ``ValueError`` for configuration problems or
 ``Exception`` generally. ``QueryError`` and ``ConfigurationError`` derive from
-``SecurityNotebookToolsError``.
+``SecurityNotebookToolsError``. ``QueryTransientError`` (a ``QueryError``) marks a failure that
+may succeed if retried; ``QueryThrottledError`` and ``QueryConnectionError`` derive from it, and
+``exec_batch_query`` retries them.
 """
 
 from __future__ import annotations
@@ -18,10 +20,21 @@ class QueryError(SecurityNotebookToolsError):
     """A query failed (service error, bad KQL, authorisation failure, ...)."""
 
 
-class QueryThrottledError(QueryError):
-    """The service throttled the request (HTTP 429 or a "too many requests" error).
+class QueryTransientError(QueryError):
+    """A failure that may succeed if retried (throttling, a dropped connection, HTTP 502/503).
 
     ``exec_batch_query`` retries a window that fails with this; otherwise it is a ``QueryError``.
+    """
+
+
+class QueryThrottledError(QueryTransientError):
+    """The service throttled the request (HTTP 429 or a "too many requests" error)."""
+
+
+class QueryConnectionError(QueryTransientError):
+    """The connection failed before a full HTTP response arrived.
+
+    Covers a reset, a refusal, a timeout and DNS failures. The message explains the cause.
     """
 
 

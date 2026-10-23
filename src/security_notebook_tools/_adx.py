@@ -14,14 +14,35 @@ import time
 from typing import Any
 
 import pandas as pd
-from azure.identity import AzureCliCredential
+from azure.identity import AzureCliCredential, CredentialUnavailableError
 from azure.kusto.data import ClientRequestProperties, KustoClient, KustoConnectionStringBuilder
-from azure.kusto.data.exceptions import KustoServiceError, KustoThrottlingError
+from azure.kusto.data.exceptions import (
+    KustoAuthenticationError,
+    KustoClientError,
+    KustoClosedError,
+    KustoError,
+    KustoNetworkError,
+    KustoServiceError,
+    KustoThrottlingError,
+)
 from azure.kusto.data.helpers import dataframe_from_result_table
 
 from ._auth import get_credential
 from ._config import DATABASE_VAR, require, resolve_cluster_uri, resolve_database, validate_database
-from ._exceptions import ConfigurationError, QueryError, QueryThrottledError
+from ._errors import (
+    TRANSIENT_STATUS,
+    describe_network_error,
+    hints_for,
+    kusto_error_codes,
+    unexpected_errors,
+)
+from ._exceptions import (
+    ConfigurationError,
+    QueryConnectionError,
+    QueryError,
+    QueryThrottledError,
+    QueryTransientError,
+)
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import shorten, verbose_logging
@@ -44,6 +65,12 @@ _SHOW_RE = re.compile(r"\.show(\s|$)", re.IGNORECASE)
 _THROTTLED_RE = re.compile(r"TooManyRequests|throttl", re.IGNORECASE)
 # Kusto's server-enforced read-only request option (the SDK has no constant for it).
 _READONLY_OPTION = "request_readonly"
+
+
+def _status(exc: KustoServiceError) -> int | None:
+    """The HTTP status of a Kusto error's response, or None if absent or not an int."""
+    status = getattr(getattr(exc, "http_response", None), "status_code", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 class ADXClient:
@@ -74,11 +101,12 @@ class ADXClient:
         with verbose_logging(verbose):
             self.cluster_uri = resolve_cluster_uri(cluster_uri)
             self.database = resolve_database(database)
-            self.credential = credential or get_credential()
-            kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
-                self.cluster_uri, self.credential
-            )
-            self._client = KustoClient(kcsb)
+            with unexpected_errors(logger, "ADX client setup"):
+                self.credential = credential or get_credential()
+                kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
+                    self.cluster_uri, self.credential
+                )
+                self._client = KustoClient(kcsb)
             logger.info(
                 "ADX client ready for %s (default database: %s)",
                 self.cluster_uri,
@@ -99,6 +127,59 @@ class ADXClient:
             props.set_option(key, value)
         return props
 
+    @staticmethod
+    def _call(kind: str, execute: Any, db: str, text: str, props: Any) -> Any:
+        """Send the request and map every known SDK failure to a ``QueryError`` that explains it.
+
+        Anything not mapped here propagates; the caller turns it into an "unexpected" error.
+        """
+        try:
+            return execute(db, text, props)
+        except CredentialUnavailableError as exc:
+            message = (
+                f"ADX {kind} failed: no Azure credential available ({exc}). Install the Azure "
+                "CLI and run `az login`"
+            )
+            logger.error(message)
+            raise QueryError(message) from exc
+        except KustoNetworkError as exc:
+            message = (
+                f"ADX {kind} failed: could not reach the service: {describe_network_error(exc)}"
+            )
+            logger.error(message)
+            raise QueryConnectionError(message) from exc
+        except (KustoServiceError, KustoThrottlingError) as exc:
+            # KustoApiError / KustoMultiApiError are KustoServiceErrors with error codes.
+            status = _status(exc) if isinstance(exc, KustoServiceError) else None
+            message = f"ADX {kind} failed: {exc}{hints_for(status, kusto_error_codes(exc))}"
+            logger.error(message)
+            if isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc)):
+                error = QueryThrottledError
+            elif status in TRANSIENT_STATUS:
+                error = QueryTransientError
+            else:
+                error = QueryError
+            raise error(message) from exc
+        except KustoAuthenticationError as exc:
+            message = (
+                f"ADX {kind} failed: authentication failed: {exc} (run `az login`, and check "
+                "that your account may access the cluster)"
+            )
+            logger.error(message)
+            raise QueryError(message) from exc
+        except KustoClosedError as exc:
+            message = f"ADX {kind} failed: the client was closed; create a new one"
+            logger.error(message)
+            raise QueryError(message) from exc
+        except KustoClientError as exc:
+            message = f"ADX {kind} failed on the client side: {type(exc).__name__}: {exc}"
+            logger.error(message)
+            raise QueryError(message) from exc
+        except KustoError as exc:
+            message = f"ADX {kind} failed: {type(exc).__name__}: {exc}"
+            logger.error(message)
+            raise QueryError(message) from exc
+
     def _execute(
         self, kind: str, text: str, database: str | None, properties: Properties
     ) -> list[pd.DataFrame]:
@@ -118,14 +199,9 @@ class ADXClient:
         execute = self._client.execute_mgmt if kind == "command" else self._client.execute_query
         logger.info("Running ADX %s on %s: %s", kind, db, shorten(text))
         start = time.perf_counter()
-        try:
-            response = execute(db, text, props)
-        except (KustoServiceError, KustoThrottlingError) as exc:
-            logger.error("ADX %s failed: %s", kind, exc)
-            throttled = isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc))
-            error = QueryThrottledError if throttled else QueryError
-            raise error(f"ADX {kind} failed: {exc}") from exc
-        dfs = [_table_to_df(t) for t in response.primary_results]
+        with unexpected_errors(logger, f"ADX {kind}"):
+            response = self._call(kind, execute, db, text, props)
+            dfs = [_table_to_df(t) for t in response.primary_results]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",
             kind,
@@ -155,7 +231,12 @@ class ADXClient:
             ConfigurationError: No database is available or it is invalid, or the KQL uses
                 ``cluster()``, ``external_table()``, ``externaldata`` or a blocked ``evaluate``
                 plugin (it could reach the Sentinel data lake or a workspace).
-            QueryError: The service returned an error.
+            QueryError: The service returned an error. The message adds hints for the HTTP
+                status and the Kusto error code (``BadRequest_SyntaxError`` ...). An error
+                nobody anticipated is logged at ERROR with its traceback and raised as a
+                ``QueryError`` that chains the original.
+            QueryConnectionError: The connection failed before a response arrived; it is a
+                ``QueryTransientError``.
             QueryThrottledError: The service throttled the request (HTTP 429 or a throttling
                 error). It is a ``QueryError``.
         """

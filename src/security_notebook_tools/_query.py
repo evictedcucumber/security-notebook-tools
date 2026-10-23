@@ -28,6 +28,7 @@ from ._config import (
     resolve_workspace_resource_id,
     validate_database,
 )
+from ._errors import unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
 from ._log import verbose_logging
 from ._sentinel import SentinelClient, _table_to_df
@@ -57,16 +58,18 @@ class _PartialResult(Exception):  # noqa: N818 - internal control flow, not an e
 @cache
 def _sentinel_client(workspace_id: str, resource_id: str, tenant_id: str | None) -> SentinelClient:
     """Return the cached Sentinel client for this workspace, resource ID and tenant."""
-    return SentinelClient(
-        workspace_id, get_credential(tenant_id), resource_id=resource_id, tenant_id=tenant_id
-    )
+    with unexpected_errors(logger, "Sentinel client setup"):
+        credential = get_credential(tenant_id)
+    return SentinelClient(workspace_id, credential, resource_id=resource_id, tenant_id=tenant_id)
 
 
 @cache
 def _adx_client(cluster_uri: str, tenant_id: str | None) -> ADXClient:
     """Return the cached ADX client for this cluster and tenant."""
     # The database is chosen per call, so one client serves every database on the cluster.
-    return ADXClient(cluster_uri, credential=get_credential(tenant_id))
+    with unexpected_errors(logger, "ADX client setup"):
+        credential = get_credential(tenant_id)
+    return ADXClient(cluster_uri, credential=credential)
 
 
 def _clear_clients() -> None:
@@ -309,6 +312,13 @@ def exec_query(
             cost guard rejects the query. It is also a ``ValueError``.
         QueryError: The service rejected or failed the query (bad KQL, authorisation, ...), or
             the Sentinel table plans could not be verified (the query was then not sent).
+            The message adds a hint for common HTTP statuses (401, 403, 504, ...). Subclasses
+            mark failures that may succeed if retried: ``QueryThrottledError`` (HTTP 429) and
+            ``QueryConnectionError`` (the connection failed before a response arrived: reset,
+            refused, timed out, DNS), both under ``QueryTransientError`` (also raised for HTTP
+            502/503). None of them is exported. An error nobody anticipated is logged at ERROR
+            with its traceback (to the ``security_notebook_tools`` logger) and raised as a
+            ``QueryError`` that chains the original.
 
     Example:
         >>> from datetime import timedelta

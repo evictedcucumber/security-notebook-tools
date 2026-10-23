@@ -179,7 +179,8 @@ Windows run one after another by default. `max_workers` (1 to 5) runs them in pa
 window runs alone to check the query and warm the caches, then the rest run concurrently, with
 results still in window order. 5 is the Log Analytics limit of concurrent queries per user (more
 only queue on the server and eat into `timeout`); ADX's limit is shared with everyone on the
-cluster, so raise it with care. A throttled window (HTTP 429) is retried up to 4 times with
+cluster, so raise it with care. A window that fails transiently (HTTP 429, 502/503, or a dropped connection such as "connection
+reset by peer") is retried up to 4 times with
 exponential backoff and jitter; any other failure stops the batch (running windows finish, the
 rest are skipped).
 
@@ -465,7 +466,15 @@ The exception classes are not part of the public API; read the message. Messages
 - `timeout must be a positive number of seconds, got ...`
 - `Unknown target ...; use 'sentinel' or 'adx'.`
 - `Sentinel query failed: ...` / `ADX query failed: ...` / `ADX command failed: ...`: the
-  service rejected the query (bad KQL, no access, timeout); the service's message follows.
+  service rejected the query (bad KQL, no access, timeout); the service's message follows,
+  with a hint for the HTTP status and the service error code. `... could not reach the service:
+  [Errno 104] connection reset by peer ...` (or refused, timed out, DNS) is a dropped
+  connection; `exec_batch_query` retries it.
+- `... no Azure credential available ...`: install the Azure CLI and run `az login`.
+- `Unexpected X during ...`: an error the package does not handle yet. It is logged at ERROR
+  with its traceback to the `security_notebook_tools` logger (call `enable_logging()` or attach
+  a handler such as `logging.FileHandler` to see or keep it), and the original exception is
+  chained. Please report it.
 - `Sentinel query returned partial results: ...`: a warning, not an error.
 
 The configuration errors above are also `ValueError`s.

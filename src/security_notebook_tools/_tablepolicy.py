@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from azure.core import PipelineClient
+from azure.core.exceptions import AzureError, ServiceRequestError, ServiceResponseError
 from azure.core.pipeline.policies import (
     BearerTokenCredentialPolicy,
     HeadersPolicy,
@@ -36,7 +37,8 @@ from azure.core.pipeline.policies import (
 from azure.core.rest import HttpRequest
 from azure.identity import AzureCliCredential
 
-from ._exceptions import ConfigurationError, QueryError
+from ._errors import describe_network_error, is_network_error
+from ._exceptions import ConfigurationError, QueryConnectionError, QueryError
 from ._kql import (
     ALLOWED_PLUGINS,
     BLOCKED_PLUGINS,
@@ -277,7 +279,7 @@ def get_policy(
         ConfigurationError: The workspace behind ``resource_id`` has a different ID than
             ``workspace_id``.
         QueryError: The tiers could not be verified (network, authorisation or parse error).
-            The query must not be sent.
+            The query must not be sent. A network failure raises ``QueryConnectionError``.
     """
     key = (resource_id.lower(), tenant_id)
     with _lock:
@@ -290,12 +292,35 @@ def get_policy(
             try:
                 policy = _fetch_policy(resource_id, credential)
             except Exception as exc:
-                logger.error("Could not read table plans: %s: %s", type(exc).__name__, exc)
-                raise QueryError(
+                is_network = isinstance(
+                    exc, ServiceRequestError | ServiceResponseError
+                ) or is_network_error(exc)
+                known = is_network or isinstance(exc, QueryError | AzureError | ValueError)
+                if known:
+                    logger.error("Could not read table plans: %s: %s", type(exc).__name__, exc)
+                else:
+                    logger.error(
+                        "Unexpected %s while reading table plans; this case is not handled yet, "
+                        "please report it with the traceback",
+                        type(exc).__name__,
+                        exc_info=exc,
+                    )
+                error = QueryConnectionError if is_network else QueryError
+                detail = (
+                    describe_network_error(exc)
+                    if is_network
+                    else f"{type(exc).__name__}: {str(exc)[:300]}"
+                )
+                report = (
+                    ""
+                    if known
+                    else " This error is unexpected; its traceback is chained: please report it."
+                )
+                raise error(
                     "Could not verify Sentinel table tiers "
-                    f"({type(exc).__name__}: {str(exc)[:300]}), so the query was not sent. "
+                    f"({detail}), so the query was not sent. "
                     "Check `az login` and read access to the workspace's tables and saved "
-                    "searches."
+                    f"searches.{report}"
                 ) from exc
             _cache[key] = (time.monotonic(), policy)
             logger.info(
