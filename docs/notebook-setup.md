@@ -8,7 +8,7 @@ developing this repository itself, see the README and `.vscode/` in the repo.
 ```sh
 uv init my-sec-notebooks
 cd my-sec-notebooks
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v5.1.0
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v5.2.0
 uv add --dev ipykernel
 ```
 

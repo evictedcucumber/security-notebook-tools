@@ -49,7 +49,7 @@ from ._log import describe_exception
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
-__version__ = "5.1.0"
+__version__ = "5.2.0"
 
 __all__ = [
     "clear_cache",
