@@ -35,6 +35,12 @@
   written only if it is a regular file you own with a single link. The project root search no
   longer goes above your home directory and is cached per working directory.
 
+### Fixed
+
+- `timeout` above 300 seconds now takes effect on Sentinel queries. azure-core's HTTP read timeout
+  (300 seconds by default) used to end the request before the server-side timeout; it is now set
+  to `timeout` plus 30 seconds. ADX was not affected.
+
 ### Security
 
 - `notebooks.log` never contains KQL text: queries are logged as `kql=hmac:<12 hex> len=<n>`

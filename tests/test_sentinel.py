@@ -82,6 +82,20 @@ def test_timespan_tuple_and_timeout(client):
     kwargs = client._mock.query_workspace.call_args.kwargs
     assert kwargs["timespan"] == span
     assert kwargs["server_timeout"] == 60
+    assert kwargs["read_timeout"] == 90
+
+
+def test_timeout_above_azure_core_default_raises_read_timeout(client):
+    # azure-core's HTTP read timeout defaults to 300 s, which used to cut off timeout=600.
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client.query("T", server_timeout=600)
+    assert client._mock.query_workspace.call_args.kwargs["read_timeout"] == 630
+
+
+def test_no_timeout_keeps_transport_default(client):
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client.query("T")
+    assert "read_timeout" not in client._mock.query_workspace.call_args.kwargs
 
 
 def test_no_tables(client):

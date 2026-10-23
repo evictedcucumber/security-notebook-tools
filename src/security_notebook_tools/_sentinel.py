@@ -61,6 +61,10 @@ logger = logging.getLogger("security_notebook_tools.sentinel")
 
 _TOO_MANY_REQUESTS = 429
 
+# Extra seconds the HTTP read waits beyond ``server_timeout``, so the server's own timeout
+# error arrives before the socket gives up (azure-core's default read timeout is 300 s).
+_CLIENT_SERVER_DELTA = 30
+
 
 def _table_to_df(table: LogsTable) -> pd.DataFrame:
     """Convert a result table to a DataFrame, parsing datetime columns as UTC.
@@ -132,8 +136,15 @@ class SentinelClient:
                 timespan=describe_timespan(timespan),
                 server_timeout=server_timeout,
             ) as call:
+                transport = {}
+                if server_timeout:
+                    transport["read_timeout"] = server_timeout + _CLIENT_SERVER_DELTA
                 result = self._client.query_workspace(
-                    self.workspace_id, kql, timespan=timespan, server_timeout=server_timeout
+                    self.workspace_id,
+                    kql,
+                    timespan=timespan,
+                    server_timeout=server_timeout,
+                    **transport,
                 )
                 call["status"] = getattr(result.status, "value", result.status)
                 return result
@@ -192,7 +203,9 @@ class SentinelClient:
             timespan: A ``timedelta``, a ``(start, end)`` / ``(start, timedelta)`` tuple, or
                 ``None`` (no time restriction beyond the query itself).
             raise_on_partial: Raise instead of warning when the result is partial.
-            server_timeout: Server-side timeout in seconds.
+            server_timeout: Server-side timeout in seconds. The HTTP read timeout is raised to
+                match (plus 30 seconds), so a value above azure-core's 300-second default
+                takes effect.
 
         Returns:
             One DataFrame per result table.
