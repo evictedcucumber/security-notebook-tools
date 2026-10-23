@@ -14,7 +14,8 @@
   (`ConfigurationError` otherwise).
 
 - Sentinel queries and `exec_batch_query` now warn (a `UserWarning` plus a WARNING log line, no
-  KQL text) when the time range starts before the Analytics retention (`retentionInDays`) of a
+  KQL text) when the time range starts more than a day before the Analytics retention
+  (`retentionInDays`) of a
   table the query reads, for example 120 days on a table that keeps 90. The older rows are in
   long-term retention / the Sentinel data lake, which the cost guard keeps these queries away
   from, so they used to come back empty without a hint. The warning gives the cutoff date and

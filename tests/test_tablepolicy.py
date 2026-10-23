@@ -903,3 +903,13 @@ def test_retention_notice_without_long_term_tier():
     message, _ = tp.retention_notice("T", policy, NOW - timedelta(days=60), NOW)
     assert "in total" not in message
     assert "long-term" not in message
+
+
+def test_retention_notice_grace_of_a_day():
+    policy = _ret_policy()
+    assert tp.retention_notice("Syslog", policy, NOW - timedelta(days=90, hours=23), NOW) is None
+    assert tp.retention_notice("Syslog", policy, NOW - timedelta(days=92), NOW) is not None
+    message, _ = tp.retention_notice("Syslog", policy, NOW - timedelta(days=365, hours=23), NOW)
+    assert "gone" not in message
+    message, _ = tp.retention_notice("Syslog", policy, NOW - timedelta(days=367), NOW)
+    assert "gone" in message

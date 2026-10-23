@@ -111,6 +111,11 @@ _TABULAR_ARG_CALLS = frozenset({"materialize", "toscalar", "view"})
 _LOOKUP_PLUGINS = frozenset({"ipv4_lookup", "ipv6_lookup", "geo_polygon_lookup", "geo_line_lookup"})
 
 
+# Retention is purged at day granularity and a range's start is computed a moment before the
+# check runs, so a range up to this much past the retention is not worth a warning.
+RETENTION_GRACE = timedelta(days=1)
+
+
 @dataclass(frozen=True)
 class TablePolicy:
     """The verified table plans and function names of one workspace.
@@ -447,7 +452,8 @@ def retention_notice(
     Args:
         kql: The KQL query (only used to find the tables it mentions).
         policy: The workspace's table policy.
-        start: The start of the queried time range (timezone-aware).
+        start: The start of the queried time range (timezone-aware). Within
+            :data:`RETENTION_GRACE` of a retention limit it is not reported.
         now: The current time (timezone-aware).
 
     Returns:
@@ -458,7 +464,7 @@ def retention_notice(
     names: list[str] = []
     for low in sorted(tables_read(kql, policy)):
         analytics, total = policy.retention.get(low, (None, None))
-        if analytics is None or start >= now - timedelta(days=analytics):
+        if analytics is None or start >= now - timedelta(days=analytics) - RETENTION_GRACE:
             continue
         name = policy.tables[low][0]
         cutoff = (now - timedelta(days=analytics)).date()
@@ -472,7 +478,7 @@ def retention_notice(
                 "lake, which these queries cannot read, so that part of the range returns no rows."
             )
             gone = (now - timedelta(days=total)).date()
-            if start < now - timedelta(days=total):
+            if start < now - timedelta(days=total) - RETENTION_GRACE:
                 sentence += f" Rows before {gone} are gone entirely."
         else:
             sentence = (

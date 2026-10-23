@@ -7,6 +7,7 @@ query passes the cost guard (:mod:`._tablepolicy`) first: only Analytics-plan ta
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import warnings
@@ -65,6 +66,7 @@ from ._tablepolicy import check_sentinel_query, get_policy, retention_notice
 from ._timerange import Timespan, timespan_start
 
 logger = logging.getLogger("security_notebook_tools.sentinel")
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _TOO_MANY_REQUESTS = 429
 
@@ -311,7 +313,8 @@ class SentinelClient:
             ", ".join(names),
             message,
         )
-        warnings.warn(message, stacklevel=2)
+        # Attribute the warning to the first caller outside the package (the notebook cell).
+        warnings.warn(message, skip_file_prefixes=(_PACKAGE_DIR,))
 
     def query_tables(
         self,

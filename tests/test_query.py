@@ -1681,3 +1681,21 @@ def test_batch_does_not_warn_within_retention(retention):
         )
         == []
     )
+
+
+def test_exact_retention_range_does_not_warn(retention):
+    kql = "Syslog | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    assert _retention_warnings(snt.exec_query, "Syslog", timedelta(days=90)) == []
+    assert _retention_warnings(snt.exec_batch_query, kql, timedelta(days=90)) == []
+    assert len(_retention_warnings(snt.exec_query, "Syslog", timedelta(days=92))) == 1
+    assert len(_retention_warnings(snt.exec_batch_query, kql, timedelta(days=92))) == 1
+
+
+def test_retention_warning_points_at_the_caller(retention):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        snt.exec_query("Syslog", timedelta(days=120))
+        kql = "Syslog | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+        snt.exec_batch_query(kql, timedelta(days=120), interval=timedelta(days=60))
+    files = [w.filename for w in caught if "Analytics" in str(w.message)]
+    assert files == [__file__, __file__]
