@@ -33,7 +33,7 @@ from ._exceptions import ConfigurationError, PartialResultError
 from ._log import dependency_call, fingerprint
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
-from ._timerange import Timespan, resolve_timespan
+from ._timerange import Timespan, resolve_timespan, validate_timespan
 
 logger = logging.getLogger("security_notebook_tools.query")
 
@@ -53,6 +53,28 @@ class _PartialResult(Exception):  # noqa: N818 - internal control flow, not an e
         super().__init__(message)
         self.tables = tables
         self.message = message
+
+
+def _check_kql(kql: object) -> None:
+    """Raise ``ConfigurationError`` unless ``kql`` is a non-blank string (never echoes it)."""
+    if not isinstance(kql, str):
+        raise ConfigurationError(f"kql must be a string, got {type(kql).__name__}.")
+    if not kql.strip():
+        raise ConfigurationError("kql must not be blank.")
+
+
+def _check_timeout(timeout: object) -> None:
+    """Raise ``ConfigurationError`` unless ``timeout`` is a positive ``int`` (not a bool)."""
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ConfigurationError(
+            f"timeout must be a positive integer number of seconds, got {timeout!r}."
+        )
+
+
+def _check_bool(name: str, value: object) -> None:
+    """Raise ``ConfigurationError`` unless ``value`` is a ``bool``."""
+    if not isinstance(value, bool):
+        raise ConfigurationError(f"{name} must be a bool, got {value!r}.")
 
 
 @cache
@@ -358,10 +380,10 @@ def exec_query(
     ``clear_cache()`` for fresh data.
 
     Args:
-        kql: The KQL query. With ``target="adx"``, text starting with ``.`` (after leading
-            whitespace) is run as a management command, but only ``.show`` commands (such as
-            ``.show tables``, case-insensitive) are allowed; any other command raises
-            ``ConfigurationError`` without contacting the service. Every ADX request is sent
+        kql: The KQL query, a non-blank string. With ``target="adx"``, text starting with ``.``
+            (after leading whitespace) is run as a management command, but only ``.show``
+            commands (such as ``.show tables``, case-insensitive) are allowed; any other command
+            raises ``ConfigurationError`` without contacting the service. Every ADX request is sent
             read-only (``request_readonly``), so the server also refuses writes. ADX text
             using ``cluster()``, ``external_table()``, ``externaldata`` or a data-reading
             ``evaluate`` plugin is rejected too, and the cluster URI may not be the Sentinel
@@ -372,8 +394,8 @@ def exec_query(
             time range rules above. Passing it with ``target="adx"`` raises an error; filter
             on time in the KQL instead.
         target: ``"sentinel"`` (default) or ``"adx"``.
-        timeout: Server-side timeout in seconds (default 300); must be positive. Applies to
-            both targets.
+        timeout: Server-side timeout in seconds (default 300); must be a positive
+            ``int``. Applies to both targets.
         cache: If true (default), return a cached result for an identical earlier query and
             keep this one for later. Pass false to always run the query (the result is not
             stored and does not replace a cached one). See Caching above.
@@ -394,7 +416,10 @@ def exec_query(
         rows are in long-term retention, which these queries cannot read. Nothing is skipped.
 
     Raises:
-        ConfigurationError: ``timeout`` is not positive, ``target`` is unknown, ``timespan``
+        ConfigurationError: ``kql`` is not a string or is blank, ``timeout`` is not a positive
+            integer, ``cache`` or ``debug`` is not a bool, ``target`` is unknown, ``timespan``
+            is not one of the accepted forms (a positive ``timedelta``, or a ``(start, end)`` /
+            ``(start, timedelta)`` tuple of datetimes with a positive length), ``timespan``
             is combined with ``target="adx"``, a required environment variable is unset or
             invalid (workspace ID not a GUID, workspace resource ID not an
             ``/subscriptions/.../workspaces/<name>`` ID, tenant not a GUID or domain name,
@@ -431,11 +456,12 @@ def exec_query(
         debug=debug,
         kql=fingerprint(kql),
     ) as call:
-        if timeout <= 0:
-            raise ConfigurationError(
-                f"timeout must be a positive number of seconds, got {timeout}."
-            )
+        _check_kql(kql)
+        _check_timeout(timeout)
+        _check_bool("cache", cache)
+        _check_bool("debug", debug)
         if target == "sentinel":
+            validate_timespan(timespan)
             tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
         elif target == "adx":
             if timespan is not None:

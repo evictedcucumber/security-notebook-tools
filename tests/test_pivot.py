@@ -173,6 +173,7 @@ def test_max_columns_invalid(df, bad):
         ({"agg_func": "sum"}, "need values"),
         ({"fill_value": 0}, "need values"),
         ({"totals": "yes"}, "totals"),
+        ({"debug": 1}, "debug must be a bool"),
     ],
 )
 def test_validation(df, kwargs, match):

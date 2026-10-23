@@ -391,3 +391,15 @@ def test_grouped_numbers_output_is_escaped():
 def test_column_styles_removed():
     with pytest.raises(TypeError, match="column_styles"):
         format_dataframe(_typed([1], "long"), column_styles={"c": "readable_numbers"})
+
+
+@pytest.mark.parametrize("bad", [None, [1, 2], {"a": [1]}, "text"])
+def test_df_must_be_dataframe(bad):
+    with pytest.raises(ValueError, match="df must be a pandas DataFrame"):
+        format_dataframe(bad)
+
+
+@pytest.mark.parametrize("bad", [1, None, "yes"])
+def test_debug_must_be_bool(bad):
+    with pytest.raises(ValueError, match="debug must be a bool"):
+        format_dataframe(pd.DataFrame({"a": [1]}), debug=bad)

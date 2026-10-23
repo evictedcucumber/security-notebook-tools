@@ -10,6 +10,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 
+from ._exceptions import ConfigurationError
 from ._kql import strip_noise
 from ._log import describe_timespan
 
@@ -25,6 +26,69 @@ _TIME_REF = re.compile(
     r"|endof(?:day|week|month|year))\s*\(",
     re.IGNORECASE,
 )
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Return ``value`` as UTC-aware; a naive datetime is taken to be UTC."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+
+
+def validate_timespan(timespan: object) -> None:
+    """Check that ``timespan`` has one of the accepted shapes.
+
+    Accepted: ``None``; a ``timedelta`` greater than zero; a ``(start, end)`` tuple of
+    datetimes with ``end`` after ``start``; or a ``(start, timedelta)`` tuple with a positive
+    duration. A naive datetime is taken to be UTC when comparing.
+
+    Args:
+        timespan: The value to check.
+
+    Raises:
+        ConfigurationError: ``timespan`` has any other shape (a list, a ``date`` that is not
+            a datetime, a tuple of another length), a duration is not positive, or the end is
+            not after the start.
+    """
+    if timespan is None:
+        return
+    shapes = "a timedelta, (start, end) datetimes or (start, timedelta)"
+    if isinstance(timespan, timedelta):
+        if timespan <= timedelta(0):
+            raise ConfigurationError(f"timespan must be positive, got {timespan}.")
+        return
+    if not isinstance(timespan, tuple) or len(timespan) != 2:
+        raise ConfigurationError(f"timespan must be {shapes}, got {type(timespan).__name__}.")
+    start, end = timespan
+    if not isinstance(start, datetime):
+        raise ConfigurationError(f"timespan must be {shapes}; the start is not a datetime.")
+    if isinstance(end, timedelta):
+        if end <= timedelta(0):
+            raise ConfigurationError(f"timespan duration must be positive, got {end}.")
+    elif isinstance(end, datetime):
+        if _as_utc(end) <= _as_utc(start):
+            raise ConfigurationError("timespan end must be after its start.")
+    else:
+        raise ConfigurationError(f"timespan must be {shapes}; the second item is neither.")
+
+
+def validate_window_args(start: object, end: object, interval: object) -> None:
+    """Check the types of ``exec_batch_query``'s ``start``, ``end`` and ``interval``.
+
+    Args:
+        start: Must be a ``datetime`` or a ``timedelta``.
+        end: Must be a ``datetime`` or ``None``.
+        interval: Must be a ``timedelta`` (its sign is checked by the caller).
+
+    Raises:
+        ConfigurationError: Any of them has the wrong type.
+    """
+    if not isinstance(start, datetime | timedelta):
+        raise ConfigurationError(
+            f"start must be a datetime or a timedelta, got {type(start).__name__}."
+        )
+    if end is not None and not isinstance(end, datetime):
+        raise ConfigurationError(f"end must be a datetime or None, got {type(end).__name__}.")
+    if not isinstance(interval, timedelta):
+        raise ConfigurationError(f"interval must be a timedelta, got {type(interval).__name__}.")
 
 
 _LET = re.compile(r"\blet\s+(\w+)\s*=\s*([^;]*)", re.IGNORECASE)

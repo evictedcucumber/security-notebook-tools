@@ -479,13 +479,15 @@ class Secretive:
 
 def test_timespan_value_is_never_logged(sentinel, caplog, _log_file):
     caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
-    snt.exec_query("T | where TimeGenerated > ago(1d)", Secretive())  # warns: both apply
-    snt.exec_query("T", Secretive(), cache=False)
+    for kql in ("T | where TimeGenerated > ago(1d)", "T"):
+        with pytest.raises(ConfigurationError, match="timespan") as info:
+            snt.exec_query(kql, Secretive())
+        assert "topsecretvalue" not in str(info.value)
     logged = _log_file.read_text(encoding="utf-8") + "\n".join(
         r.getMessage() for r in caplog.records
     )
     assert "topsecretvalue" not in logged
-    assert "<Secretive>" in logged
+    assert "got Secretive" in logged
 
 
 def test_timespan_durations_are_logged_as_durations(sentinel, caplog):
