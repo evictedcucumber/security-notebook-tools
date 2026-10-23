@@ -86,4 +86,6 @@ the same commit (`chore(release): bump version to X.Y.Z`):
 - `README.md` and `docs/notebook-setup.md` (install pin `@vX.Y.Z`)
 - `docs/api.md` (`__version__` examples) and the `Version` line in this file
 
-Bump only when asked to cut a release. Breaking commits use `!` and a `BREAKING CHANGE:` footer.
+A merge into `main` is a release: when merging a branch whose `Unreleased` section has entries,
+add the release commit to that branch first, without asking. Feature-branch commits never bump.
+Breaking commits use `!` and a `BREAKING CHANGE:` footer.
