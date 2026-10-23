@@ -4,7 +4,9 @@ They are not exported from the package; catch ``ValueError`` for configuration p
 ``Exception`` generally. ``QueryError`` and ``ConfigurationError`` derive from
 ``SecurityNotebookToolsError``. ``QueryTransientError`` (a ``QueryError``) marks a failure that
 may succeed if retried; ``QueryThrottledError`` and ``QueryConnectionError`` derive from it, and
-``exec_batch_query`` retries them.
+``exec_batch_query`` retries them. ``QueryTimeoutError`` (also a ``QueryError``, but not a
+transient one) marks a query the service or the client gave up on for taking too long; with
+``min_interval`` ``exec_batch_query`` splits such a window instead of failing.
 """
 
 from __future__ import annotations
@@ -35,6 +37,17 @@ class QueryConnectionError(QueryTransientError):
     """The connection failed before a full HTTP response arrived.
 
     Covers a reset, a refusal, a timeout and DNS failures. The message explains the cause.
+    """
+
+
+class QueryTimeoutError(QueryError):
+    """A query ran out of time: the service timed it out or the client's deadline passed.
+
+    Raised for HTTP 504 and 408 (``GatewayTimeout``), for a Sentinel request that took longer than
+    ``server_timeout`` plus the client allowance, and by ``exec_batch_query`` for a connection
+    reset after a window ran for at least half of ``timeout`` (the query was cut off for being
+    too slow). It is not transient: the same query would time out again, so it is not retried.
+    ``exec_batch_query`` splits such a window into halves when ``min_interval`` is given.
     """
 
 

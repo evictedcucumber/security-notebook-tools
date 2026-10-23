@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A Sentinel request now has a total deadline of `timeout` plus 30 seconds. Before, only the
+  HTTP read timeout applied, which restarts with every socket read, and azure-core also retries
+  a 504 on a POST up to 3 times on its own, so one window could run for 15 to 20 minutes with
+  `timeout=300`. A request that is not answered in time is abandoned (its helper thread ends
+  when the SDK call does) and raises a timeout error instead of hanging.
+- HTTP 504, 408 and `GatewayTimeout` responses raise an internal `QueryTimeoutError` (a
+  `QueryError`, not exported, not retried), so `except QueryError` still catches them.
+
 ## 4.0.0 - 2026-10-23
 
 ### Breaking

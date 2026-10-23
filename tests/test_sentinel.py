@@ -1,5 +1,7 @@
 import errno
 import logging
+import threading
+import time
 from datetime import UTC, datetime
 from unittest import mock
 
@@ -26,8 +28,10 @@ from security_notebook_tools._exceptions import (
     QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
 )
+from security_notebook_tools._log import debug_scope
 from security_notebook_tools._sentinel import SentinelClient
 from security_notebook_tools._tablepolicy import TablePolicy
 
@@ -83,6 +87,7 @@ def test_timespan_tuple_and_timeout(client):
     assert kwargs["timespan"] == span
     assert kwargs["server_timeout"] == 60
     assert kwargs["read_timeout"] == 90
+    assert kwargs["timeout"] == 90  # azure-core's retry budget equals the total deadline
 
 
 def test_timeout_above_azure_core_default_raises_read_timeout(client):
@@ -95,7 +100,9 @@ def test_timeout_above_azure_core_default_raises_read_timeout(client):
 def test_no_timeout_keeps_transport_default(client):
     client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
     client.query("T")
-    assert "read_timeout" not in client._mock.query_workspace.call_args.kwargs
+    kwargs = client._mock.query_workspace.call_args.kwargs
+    assert "read_timeout" not in kwargs
+    assert "timeout" not in kwargs  # no server_timeout, no total deadline
 
 
 def test_no_tables(client):
@@ -179,12 +186,114 @@ def test_403_has_a_hint(client):
     assert not isinstance(ei.value, QueryTransientError)
 
 
-def test_504_is_not_transient(client):
-    response = mock.Mock(status_code=504, reason="x")
-    client._mock.query_workspace.side_effect = HttpResponseError(message="late", response=response)
-    with pytest.raises(QueryError, match="raise `timeout`") as ei:
+@pytest.mark.parametrize("status", [504, 408])
+def test_timeout_statuses_are_timeout_errors_not_transient(client, status):
+    response = mock.Mock(status_code=status, reason="x")
+    error = HttpResponseError(message="late", response=response)
+    client._mock.query_workspace.side_effect = error
+    with pytest.raises(QueryTimeoutError, match="raise `timeout`") as ei:
         client.query("T")
     assert not isinstance(ei.value, QueryTransientError)
+    assert isinstance(ei.value, QueryError)
+    assert ei.value.__cause__ is error
+    assert client._mock.query_workspace.call_count == 1
+
+
+def test_gateway_timeout_code_is_a_timeout_error(client):
+    # The code decides, whatever the status: the inner message was "ADX query timed out".
+    client._mock.query_workspace.side_effect = _coded_error(500, "GatewayTimeout")
+    with pytest.raises(QueryTimeoutError, match="GatewayTimeout"):
+        client.query("T")
+
+
+@pytest.mark.parametrize("status", [400, 403, 500, 502, 503])
+def test_other_statuses_are_not_timeout_errors(client, status):
+    response = mock.Mock(status_code=status, reason="x")
+    client._mock.query_workspace.side_effect = HttpResponseError(message="no", response=response)
+    with pytest.raises(QueryError) as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTimeoutError)
+
+
+# --- total deadline ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hung(client):
+    """A query_workspace that blocks until released; a short deadline in place of 330 s."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def block(*args, **kwargs):
+        started.set()
+        release.wait(30)
+        return LogsQueryResult(tables=[_table()])
+
+    client._mock.query_workspace.side_effect = block
+    with mock.patch("security_notebook_tools._sentinel._deadline_for", return_value=0.2):
+        yield client, release, started
+    release.set()
+
+
+def test_hung_request_raises_a_timeout_error_at_the_deadline(hung):
+    client, release, started = hung
+    before = time.perf_counter()
+    with pytest.raises(QueryTimeoutError, match="no answer within 0.2 s.*abandoned") as ei:
+        client.query("T", server_timeout=300)
+    assert time.perf_counter() - before < 5
+    assert started.is_set()
+    assert not isinstance(ei.value, QueryTransientError)
+    assert "min_interval" in str(ei.value)
+
+
+def test_abandoned_request_does_not_keep_the_process_alive_or_leak(hung):
+    client, release, _ = hung
+    before = threading.active_count()
+    with pytest.raises(QueryTimeoutError):
+        client.query("T", server_timeout=300)
+    helpers = [t for t in threading.enumerate() if t.name == "snt-sentinel-request"]
+    assert len(helpers) == 1
+    assert helpers[0].daemon
+    release.set()  # the SDK call returns late: the helper ends and its result is dropped
+    helpers[0].join(5)
+    assert not helpers[0].is_alive()
+    assert threading.active_count() == before
+
+
+def test_deadline_is_server_timeout_plus_the_client_delta(client):
+    from security_notebook_tools import _sentinel
+
+    assert _sentinel._deadline_for(300) == 300 + _sentinel._CLIENT_SERVER_DELTA == 330
+    assert _sentinel._deadline_for(None) is None
+    assert _sentinel._deadline_for(0) is None
+
+
+def test_request_that_finishes_in_time_is_unchanged(client):
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    assert len(client.query("T", server_timeout=300)) == 2
+
+
+def test_error_in_the_helper_thread_is_mapped_as_before(client):
+    error = _reset_error(ServiceResponseError)
+    client._mock.query_workspace.side_effect = error
+    with pytest.raises(QueryConnectionError) as ei:
+        client.query("T", server_timeout=300)
+    assert ei.value.__cause__ is error
+
+
+def test_helper_thread_keeps_the_debug_scope(client, capsys):
+    seen = []
+
+    def query(*args, **kwargs):
+        logging.getLogger("security_notebook_tools.sentinel").debug("inside the helper thread")
+        seen.append(threading.current_thread().name)
+        return LogsQueryResult(tables=[_table()])
+
+    client._mock.query_workspace.side_effect = query
+    with debug_scope(True):
+        client.query("T", server_timeout=300)
+    assert seen == ["snt-sentinel-request"]
+    assert "inside the helper thread" in capsys.readouterr().out
 
 
 def test_authentication_error_is_not_a_connection_error(client):

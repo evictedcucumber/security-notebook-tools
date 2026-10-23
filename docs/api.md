@@ -211,6 +211,9 @@ Known failures are raised as `QueryError` (or a subclass) with a message that ex
   `ResponsePayloadTooLarge`, timeouts; Kusto `BadRequest_SyntaxError`, `BadRequest_EntityNotFound`,
   limits exceeded, ...) add a hint. Partial Sentinel results get the same hint.
 - A missing Azure CLI or an expired login says to install it or run `az login`.
+- A query that ran out of time raises `QueryTimeoutError`: HTTP 504 or 408 (`GatewayTimeout`), or a
+  Sentinel request that has not been answered within `timeout` plus 30 seconds in total (the
+  request is then abandoned). It is not retried, as the same query would time out again.
 - `exec_batch_query` retries `QueryTransientError` (throttling, connection errors, HTTP 502/503).
 
 An error nobody anticipated is logged at ERROR with its traceback to the `security_notebook_tools`
@@ -233,9 +236,10 @@ and `SystemExit` are never wrapped.
   may succeed if retried: `QueryThrottledError` (HTTP 429) and `QueryConnectionError` (the
   connection failed before a response arrived: reset by peer, refused, timed out, DNS; the
   message explains the likely cause). HTTP 502/503 raise `QueryTransientError`, their base
-  class.
+  class. `QueryTimeoutError` (HTTP 504/408, or no answer within `timeout` plus 30 seconds on
+  Sentinel) is a `QueryError` that is not transient.
 
-Neither class is exported; catch `ValueError` for configuration problems, or `Exception`.
+None of these classes is exported; catch `ValueError` for configuration problems, or `Exception`.
 
 ### Examples
 

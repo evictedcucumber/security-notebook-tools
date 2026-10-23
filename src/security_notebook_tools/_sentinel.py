@@ -7,8 +7,11 @@ query passes the cost guard (:mod:`._tablepolicy`) first: only Analytics-plan ta
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import warnings
+from collections.abc import Callable
+from typing import Any
 
 import pandas as pd
 from azure.core.exceptions import (
@@ -37,6 +40,7 @@ from ._errors import (
     describe_codes,
     describe_network_error,
     hints_for,
+    is_timeout,
     unexpected_errors,
 )
 from ._exceptions import (
@@ -44,6 +48,7 @@ from ._exceptions import (
     QueryConnectionError,
     QueryError,
     QueryThrottledError,
+    QueryTimeoutError,
     QueryTransientError,
 )
 from ._format import KQL_TYPES_ATTR
@@ -51,6 +56,7 @@ from ._log import (
     dependency_call,
     describe_timespan,
     fingerprint,
+    in_current_context,
     mask_id,
     redact_exception_text,
 )
@@ -64,6 +70,66 @@ _TOO_MANY_REQUESTS = 429
 # Extra seconds the HTTP read waits beyond ``server_timeout``, so the server's own timeout
 # error arrives before the socket gives up (azure-core's default read timeout is 300 s).
 _CLIENT_SERVER_DELTA = 30
+
+
+def _deadline_for(server_timeout: int | None) -> float | None:
+    """The most seconds a request may take in total: ``server_timeout`` plus the client delta.
+
+    None (no ``server_timeout``) means no total deadline; the SDK's own limits apply.
+    """
+    return server_timeout + _CLIENT_SERVER_DELTA if server_timeout else None
+
+
+def _call_with_deadline[T](func: Callable[[], T], deadline: float, message: str) -> T:
+    """Run ``func`` on a helper thread and give up on it after ``deadline`` seconds.
+
+    The read timeout of the HTTP transport restarts with every socket read, so it does not bound
+    the total time (a server that trickles data, or an SDK retry after a 504, can run on for
+    many minutes). This does: the caller waits at most ``deadline`` seconds, then gets a
+    ``QueryTimeoutError(message)`` and the result, if it ever arrives, is dropped.
+
+    The helper is a daemon thread (it never keeps the interpreter alive), runs in a copy of the
+    caller's context (so a ``debug=True`` scope keeps printing) and is never shared, so at most
+    one is left over per timed-out request. It ends when the SDK call returns or fails; the
+    request's own read timeout (and the retry budget given to the SDK) bounds that. The shared
+    client is not closed to abort it: that would break other requests using the same client.
+
+    Raises:
+        QueryTimeoutError: ``func`` did not finish within ``deadline`` seconds.
+    """
+    outcome: dict[str, Any] = {}
+    finished = threading.Event()
+    started = time.perf_counter()
+
+    def work() -> None:
+        try:
+            outcome["value"] = func()
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            finished.set()
+            if outcome.get("abandoned"):
+                logger.debug(
+                    "The abandoned Log Analytics request ended after %.1fs (%s); its result "
+                    "was dropped",
+                    time.perf_counter() - started,
+                    "failed" if "error" in outcome else "returned",
+                )
+
+    thread = threading.Thread(
+        target=in_current_context(work), name="snt-sentinel-request", daemon=True
+    )
+    thread.start()
+    if not finished.wait(deadline):
+        outcome["abandoned"] = True
+        logger.debug(
+            "Log Analytics request still running after %.1fs; abandoning its helper thread",
+            deadline,
+        )
+        raise QueryTimeoutError(message)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def _table_to_df(table: LogsTable) -> pd.DataFrame:
@@ -120,6 +186,43 @@ class SentinelClient:
             "Sentinel client workspace_id=%s resource_id=%s", self.workspace_id, self.resource_id
         )
 
+    def _send(
+        self, kql: str, timespan: Timespan | None, server_timeout: int | None
+    ) -> LogsQueryResult | LogsQueryPartialResult:
+        """Send the query to the SDK, with the HTTP read timeout and the total deadline.
+
+        Raises:
+            QueryTimeoutError: The request took longer than ``server_timeout`` plus
+                ``_CLIENT_SERVER_DELTA`` seconds in total.
+        """
+        transport: dict[str, Any] = {}
+        deadline = _deadline_for(server_timeout)
+        if server_timeout:
+            transport["read_timeout"] = server_timeout + _CLIENT_SERVER_DELTA
+        if deadline is not None:
+            transport["timeout"] = deadline  # azure-core's retry budget: no attempt after it
+
+        def send() -> LogsQueryResult | LogsQueryPartialResult:
+            return self._client.query_workspace(
+                self.workspace_id,
+                kql,
+                timespan=timespan,
+                server_timeout=server_timeout,
+                **transport,
+            )
+
+        if deadline is None:
+            return send()
+        return _call_with_deadline(
+            send,
+            deadline,
+            f"Sentinel query failed: no answer within {deadline:g} s (server_timeout "
+            f"{server_timeout} s plus {_CLIENT_SERVER_DELTA} s), so the request was abandoned "
+            "(the server did not time the query out in time, or the connection hung). Narrow "
+            "the time range or raise `timeout`; in a batch, use a smaller `interval` or set "
+            "`min_interval`",
+        )
+
     def _run(
         self, kql: str, timespan: Timespan | None, server_timeout: int | None
     ) -> LogsQueryResult | LogsQueryPartialResult:
@@ -136,16 +239,7 @@ class SentinelClient:
                 timespan=describe_timespan(timespan),
                 server_timeout=server_timeout,
             ) as call:
-                transport = {}
-                if server_timeout:
-                    transport["read_timeout"] = server_timeout + _CLIENT_SERVER_DELTA
-                result = self._client.query_workspace(
-                    self.workspace_id,
-                    kql,
-                    timespan=timespan,
-                    server_timeout=server_timeout,
-                    **transport,
-                )
+                result = self._send(kql, timespan, server_timeout)
                 call["status"] = getattr(result.status, "value", result.status)
                 return result
         except CredentialUnavailableError as exc:
@@ -167,14 +261,17 @@ class SentinelClient:
             raise QueryConnectionError(message) from exc
         except HttpResponseError as exc:
             status = exc.status_code
+            codes = azure_error_codes(exc)
             message = f"Sentinel query failed: {exc.message or exc}"
             if isinstance(exc, DecodeError):
                 message += " (the service sent a response that could not be read; retry)"
             elif isinstance(exc, TooManyRedirectsError):
                 message += " (too many redirects: check the endpoint and any proxy)"
             else:
-                message += hints_for(status, azure_error_codes(exc))
-            if status == _TOO_MANY_REQUESTS:
+                message += hints_for(status, codes)
+            if is_timeout(status, codes):
+                error = QueryTimeoutError
+            elif status == _TOO_MANY_REQUESTS:
                 error = QueryThrottledError
             elif status in TRANSIENT_STATUS:
                 error = QueryTransientError
@@ -220,6 +317,9 @@ class SentinelClient:
                 says to run `az login` for authentication problems. An error nobody anticipated
                 is logged at ERROR with its traceback and raised as a ``QueryError`` that
                 chains the original.
+            QueryTimeoutError: The query ran out of time: HTTP 504/408 (``GatewayTimeout``) or no
+                answer within ``server_timeout`` plus 30 seconds in total (the request is then
+                abandoned). It is a ``QueryError``, not a transient one.
             QueryTransientError: A failure that may succeed if retried (HTTP 502/503). It is a
                 ``QueryError``.
             QueryThrottledError: The service throttled the request (HTTP 429). It is a

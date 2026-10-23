@@ -7,6 +7,7 @@ from azure.core.exceptions import HttpResponseError, ODataV4Format, ServiceRespo
 from azure.kusto.data.exceptions import KustoApiError, KustoMultiApiError, KustoServiceError
 
 from security_notebook_tools._errors import (
+    TIMEOUT_STATUS,
     TRANSIENT_STATUS,
     azure_error_codes,
     describe_codes,
@@ -14,6 +15,7 @@ from security_notebook_tools._errors import (
     describe_status,
     hints_for,
     is_network_error,
+    is_timeout,
     kusto_error_codes,
     unexpected,
     unexpected_errors,
@@ -118,6 +120,31 @@ def test_describe_status_none(status):
 
 def test_transient_status_excludes_timeouts():
     assert {429, 502, 503} == TRANSIENT_STATUS
+    assert {408, 504} == TIMEOUT_STATUS
+    assert not TRANSIENT_STATUS & TIMEOUT_STATUS
+
+
+@pytest.mark.parametrize(
+    ("status", "codes", "expected"),
+    [
+        (504, [], True),
+        (408, [], True),
+        (500, ["GatewayTimeout"], True),
+        (400, ["BadRequest", "QueryExecutionTimedOut"], True),
+        (None, ["gatewaytimeout"], True),
+        (500, [], False),
+        (503, ["ServiceUnavailable"], False),
+        (400, ["BadArgumentError", "SyntaxError"], False),
+        (None, [], False),
+    ],
+)
+def test_is_timeout(status, codes, expected):
+    assert is_timeout(status, codes) is expected
+
+
+@pytest.mark.parametrize("status", [408, 504])
+def test_timeout_status_hint_mentions_min_interval(status):
+    assert "min_interval" in describe_status(status)
 
 
 def test_is_network_error_ignores_non_socket_os_errors():

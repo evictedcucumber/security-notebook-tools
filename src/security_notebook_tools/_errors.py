@@ -40,6 +40,8 @@ _public = threading.local()  # per thread: how deep public calls are nested
 # HTTP statuses worth retrying. 504 and 408 are deliberately absent: a query that timed out
 # would only time out again.
 TRANSIENT_STATUS = frozenset({429, 502, 503})
+# HTTP statuses that mean the service gave up on a query for taking too long (QueryTimeoutError).
+TIMEOUT_STATUS = frozenset({408, 504})
 
 _RESET = (
     "connection reset by peer: the server or something between you and it (proxy, firewall, "
@@ -74,13 +76,19 @@ _STATUS_HINTS = {
     401: "not authenticated: run `az login` (the token may have expired)",
     403: "forbidden: your account has no read access to the workspace/database",
     404: "not found: check the workspace, cluster URI and database names",
-    408: "the request timed out: narrow the time range or raise `timeout`",
+    408: (
+        "the request timed out: narrow the time range or raise `timeout`; in a batch, use a "
+        "smaller `interval` or set `min_interval`"
+    ),
     413: "the request or response is too large: narrow the time range or return fewer rows",
     429: "too many requests: the service is throttling; wait and retry",
     500: "internal server error on the service: retry, and report it if it persists",
     502: "bad gateway: the service is temporarily unavailable; retry",
     503: "service temporarily unavailable; retry",
-    504: "the gateway timed out: narrow the time range or raise `timeout`",
+    504: (
+        "the gateway timed out: narrow the time range or raise `timeout`; in a batch, use a "
+        "smaller `interval` or set `min_interval`"
+    ),
 }
 
 
@@ -251,6 +259,13 @@ def describe_codes(codes: Iterable[str]) -> str | None:
         if hint and hint not in hints:
             hints.append(hint)
     return "; ".join(hints) or None
+
+
+def is_timeout(status: int | None, codes: Iterable[str]) -> bool:
+    """Whether a service failure means the query ran out of time (HTTP 408/504, a timeout code)."""
+    if status in TIMEOUT_STATUS:
+        return True
+    return any(needle in code.lower() for code in codes for needle in ("timeout", "timedout"))
 
 
 def hints_for(status: int | None, codes: Iterable[str]) -> str:

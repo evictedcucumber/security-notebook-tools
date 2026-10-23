@@ -506,7 +506,9 @@ The exception classes are not part of the public API; read the message. Messages
 - `Unknown target ...; use 'sentinel' or 'adx'.`
 - `Sentinel query failed: ...` / `ADX query failed: ...` / `ADX command failed: ...`: the
   service rejected the query (bad KQL, no access, timeout); the service's message follows,
-  with a hint for the HTTP status and the service error code. `... could not reach the service:
+  with a hint for the HTTP status and the service error code. A Sentinel request is also
+  abandoned when it has not been answered within `timeout` plus 30 seconds in total (the message
+  says so). `... could not reach the service:
   [Errno 104] connection reset by peer ...` (or refused, timed out, DNS) is a dropped
   connection; `exec_batch_query` retries it.
 - `... no Azure credential available ...`: install the Azure CLI and run `az login`.
