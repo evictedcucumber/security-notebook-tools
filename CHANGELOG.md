@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 4.0.0 - 2026-10-23
+
+### Breaking
+
+- `format_dataframe` no longer takes `column_styles`; passing it raises `TypeError`. Its one
+  style, `"readable_numbers"`, is now always on: every numeric (`int`, `long`, `real`,
+  `decimal`) column, recorded or inferred type alike, has its integer digits grouped with spaces
+  (`1 000 000 000.00000`). The fraction is not grouped, and a `real` in exponent form (`1e+20`)
+  is left as it is.
 
 ### Added
 
