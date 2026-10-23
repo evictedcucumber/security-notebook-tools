@@ -1,5 +1,7 @@
 import logging
 import re
+import sys
+import types
 
 import pytest
 
@@ -639,3 +641,71 @@ def test_project_root_is_cached_per_working_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(_log.Path, "exists", lambda self: calls.append(self) or False)
     assert project_root() == first
     assert not calls
+
+
+class _Shell:
+    def __init__(self, user_ns):
+        self.user_ns = user_ns
+
+
+@pytest.fixture
+def shell(monkeypatch):
+    """A fake running IPython shell whose namespace the test fills in."""
+    user_ns: dict[str, object] = {}
+    module = types.SimpleNamespace(get_ipython=lambda: _Shell(user_ns))
+    monkeypatch.setitem(sys.modules, "IPython", module)
+    return user_ns
+
+
+def test_notebook_name_unknown_outside_a_notebook(_log_file):
+    assert _log.notebook_name() is None
+    child.info("plain")
+    assert _log_file.read_text().split(" ", 2)[2] == "security_notebook_tools.test: plain\n"
+
+
+def test_notebook_name_from_vscode(shell, _log_file):
+    shell["__vsc_ipynb_file__"] = "/home/alice/hunts/Hunt 2026.ipynb"
+    assert _log.notebook_name() == "Hunt 2026.ipynb"
+    child.info("hello")
+    line = _log_file.read_text()
+    assert " INFO security_notebook_tools.test [Hunt 2026.ipynb]: hello" in line
+    assert "alice" not in line
+
+
+def test_notebook_name_from_session_then_env(shell, monkeypatch):
+    monkeypatch.setenv("JPY_SESSION_NAME", "C:\\work\\env.ipynb")
+    assert _log.notebook_name() == "env.ipynb"
+    shell["__session__"] = "notebooks/session.ipynb"
+    assert _log.notebook_name() == "session.ipynb"
+    shell["__vsc_ipynb_file__"] = "vsc.ipynb"
+    assert _log.notebook_name() == "vsc.ipynb"
+
+
+def test_notebook_name_is_sanitised(shell):
+    shell["__vsc_ipynb_file__"] = "/x/a]b\n[c: d.ipynb"
+    assert _log.notebook_name() == "a?b??c? d.ipynb"
+    shell["__vsc_ipynb_file__"] = "n" * 100
+    name = _log.notebook_name()
+    assert name is not None and len(name) == 64 and name.endswith("…")
+
+
+@pytest.mark.parametrize("value", [None, 42, "", "  ", "/dir/"])
+def test_notebook_name_ignores_unusable_values(shell, value):
+    shell["__vsc_ipynb_file__"] = value
+    assert _log.notebook_name() is None
+
+
+def test_notebook_name_never_raises(monkeypatch):
+    def boom():
+        raise RuntimeError("no shell")
+
+    module = types.SimpleNamespace(get_ipython=boom)
+    monkeypatch.setitem(sys.modules, "IPython", module)
+    assert _log.notebook_name() is None
+
+
+def test_cell_output_shows_the_notebook_too(shell, capsys):
+    shell["__vsc_ipynb_file__"] = "cell.ipynb"
+    with _log.debug_scope(True):
+        child.debug("detail")
+    assert "DEBUG security_notebook_tools.test [cell.ipynb]: detail" in capsys.readouterr().out

@@ -18,9 +18,15 @@ The same handler is attached to the ``azure`` logger namespace (``azure.core``,
 SDKs' warnings and errors reach the file and their request/response chatter does not. Their
 logger levels are not changed. The Kusto SDK (``azure.kusto``) does not log.
 
-Each line is ``<UTC RFC 3339 timestamp> <LEVEL> <logger>: <message>``, for example::
+Each line is ``<UTC RFC 3339 timestamp> <LEVEL> <logger> [<notebook>]: <message>``, for
+example::
 
-    2026-10-23T14:03:12.345Z INFO security_notebook_tools.sentinel: Running Sentinel query ...
+    2026-10-23T14:03:12.345Z INFO security_notebook_tools.sentinel [hunt.ipynb]: Running ...
+
+The notebook is the file name (no directory) of the notebook the kernel runs, so lines from
+several notebooks sharing one ``notebooks.log`` can be told apart (see :func:`notebook_name`).
+When it is unknown (a plain script or console, or a front end that does not say) the
+`` [<notebook>]`` part is left out.
 
 Levels, the same in every module:
 
@@ -42,7 +48,8 @@ Nothing sensitive is written. Call sites log fingerprints instead of KQL text (a
 keyed HMAC-SHA256 with a per-process random key, and the length, :func:`fingerprint`), mask
 names that come from the environment (:func:`mask_name`, :func:`mask_id`), never log result
 values, environment variable values, HTTP headers, bodies or query strings, credentials,
-tokens, request properties or the notebook's namespace, describe a ``timespan`` by its
+tokens, request properties or the notebook's namespace (only the notebook's file name is
+read from it, see :func:`notebook_name`), describe a ``timespan`` by its
 duration or dates only (:func:`describe_timespan`), pass fields through :func:`format_fields`
 (which writes only plain values and ``<TypeName>`` for anything else), and log SDK exception
 messages only through :func:`redact_exception_text` (best effort: quoted text, known secret
@@ -91,13 +98,14 @@ from typing import IO, Any
 PACKAGE_LOGGER = "security_notebook_tools"
 THIRD_PARTY_LOGGERS = ("azure",)
 LOG_FILE_NAME = "notebooks.log"
-LOG_FORMAT = "%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s: %(message)s"
+LOG_FORMAT = "%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s%(snt_notebook)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _ROOT_MARKERS = (".git", "pyproject.toml")
 _EXCEPTION_TEXT_LIMIT = 200
 _TRACEBACK_TEXT_LIMIT = 300
 _MAX_CHAIN = 20
 _LOGGED_ATTR = "_snt_failure_logged"
+_NOTEBOOK_ATTR = "snt_notebook"
 
 # --- Redaction ---------------------------------------------------------------------------------
 
@@ -723,10 +731,56 @@ def _render_exception(exc: BaseException, seen: set[int]) -> list[str]:
     return out
 
 
+# Where front ends record the notebook a kernel runs: VS Code puts its path in the user
+# namespace, Jupyter Server (2.0+) sets JPY_SESSION_NAME and ipykernel copies it to __session__.
+_NOTEBOOK_NAMESPACE_KEYS = ("__vsc_ipynb_file__", "__session__")
+_NOTEBOOK_ENV = "JPY_SESSION_NAME"
+_NOTEBOOK_NAME_LIMIT = 64
+_NOTEBOOK_UNSAFE = re.compile(r"[^\w .+()-]")
+
+
+def notebook_name() -> str | None:
+    """Return the file name of the notebook this kernel runs, or None if it is unknown.
+
+    Looked up on every call, never cached, from the running IPython shell's
+    ``__vsc_ipynb_file__`` (VS Code) or ``__session__`` (ipykernel) variable, then the
+    ``JPY_SESSION_NAME`` environment variable (Jupyter Server). Only those two names are read
+    from the namespace, and IPython is not imported if it is not loaded already. Only the last
+    path component is kept; characters other than letters, digits, space and ``_.+()-`` become
+    ``?`` and the result is cut to 64 characters. This never raises.
+    """
+    try:
+        candidates: list[object] = []
+        ipython = sys.modules.get("IPython")
+        get_ipython = getattr(ipython, "get_ipython", None)
+        shell = get_ipython() if get_ipython is not None else None
+        namespace = getattr(shell, "user_ns", None)
+        if isinstance(namespace, dict):
+            candidates += [namespace.get(key) for key in _NOTEBOOK_NAMESPACE_KEYS]
+        candidates.append(os.environ.get(_NOTEBOOK_ENV))
+        for value in candidates:
+            if isinstance(value, str):
+                name = re.split(r"[\\/]", value.strip())[-1].strip()
+                if name:
+                    name = _NOTEBOOK_UNSAFE.sub("?", name)
+                    if len(name) > _NOTEBOOK_NAME_LIMIT:
+                        name = name[: _NOTEBOOK_NAME_LIMIT - 1] + "…"
+                    return name
+    except Exception:
+        return None
+    return None
+
+
 class _UtcFormatter(logging.Formatter):
-    """Formatter that renders timestamps in UTC."""
+    """Formatter that renders timestamps in UTC and adds the notebook name to the line."""
 
     converter = time.gmtime
+
+    def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802 - logging hook
+        """Format the line, filling in `` [<notebook>]`` (empty when it is unknown)."""
+        name = notebook_name()
+        setattr(record, _NOTEBOOK_ATTR, f" [{name}]" if name else "")
+        return super().formatMessage(record)
 
 
 class _RedactingFormatter(_UtcFormatter):

@@ -306,10 +306,15 @@ loggers go there too, so Azure SDK warnings now appear only in `notebooks.log`, 
 stderr. Nothing is printed to the notebook cell unless you pass `debug=True` (see
 [Debug output](#debug-output-in-the-cell)). Add `notebooks.log` to your `.gitignore`.
 
+Each line names the notebook that wrote it (its file name, in brackets after the logger), so
+several notebooks can share one log file. VS Code and Jupyter Server 2.0+ both report it; when
+the name is unknown, such as in a plain script, the bracket is left out (see
+[docs/api.md](docs/api.md#logging) for details).
+
 ```text
-2026-10-23T14:02:11.402Z INFO security_notebook_tools.query: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
-2026-10-23T14:02:12.101Z INFO security_notebook_tools.sentinel: Log Analytics query: done in 0.84s workspace=1111… kql=hmac:1a2b3c4d5e6f len=24 timespan=1 day, 0:00:00 server_timeout=300 status=Success
-2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 1.01s tables=1 rows=10 columns=4
+2026-10-23T14:02:11.402Z INFO security_notebook_tools.query [hunt.ipynb]: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
+2026-10-23T14:02:12.101Z INFO security_notebook_tools.sentinel [hunt.ipynb]: Log Analytics query: done in 0.84s workspace=1111… kql=hmac:1a2b3c4d5e6f len=24 timespan=1 day, 0:00:00 server_timeout=300 status=Success
+2026-10-23T14:02:12.247Z INFO security_notebook_tools.query [hunt.ipynb]: exec_query: finished in 1.01s tables=1 rows=10 columns=4
 ```
 
 Levels are the same everywhere: DEBUG is internal detail and never reaches the file; INFO is an

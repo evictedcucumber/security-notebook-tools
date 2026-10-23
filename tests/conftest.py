@@ -25,6 +25,7 @@ def _clean_env(monkeypatch, _log_file):
         config.WORKSPACE_NAME_VAR,
         config.CLUSTER_URI_VAR,
         config.DATABASE_VAR,
+        _log._NOTEBOOK_ENV,
     ):
         monkeypatch.delenv(var, raising=False)
     _query.clear_cache()

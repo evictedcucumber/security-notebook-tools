@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Every `notebooks.log` line (and the `debug=True` cell output) now names the notebook that
+  wrote it, in brackets after the logger:
+  `2026-10-23T14:03:12.345Z INFO security_notebook_tools.query [hunt.ipynb]: ...`, so several
+  notebooks sharing one log file can be told apart. The name is the notebook's file name only,
+  taken from VS Code's `__vsc_ipynb_file__`, ipykernel's `__session__` or Jupyter Server's
+  `JPY_SESSION_NAME`, sanitised and cut to 64 characters. When none is set the bracket is left
+  out and the line is unchanged; everything up to the logger name and the `: ` before the
+  message stays where it was.
+
 ## 5.1.0 - 2026-10-23
 
 ### Added

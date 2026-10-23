@@ -625,12 +625,20 @@ The path follows `os.chdir`, and the file is created, with permissions 0600, whe
 is written. It is opened without following symbolic links, and records are dropped silently
 unless it is a regular file you own with a single link. Add `notebooks.log` to your `.gitignore`.
 
-Each line is an RFC 3339 UTC timestamp with milliseconds, the level, the logger name and the
-message; tracebacks follow on the next lines:
+Each line is an RFC 3339 UTC timestamp with milliseconds, the level, the logger name, the
+notebook in brackets and the message; tracebacks follow on the next lines:
 
 ```
-2026-10-23T14:03:12.345Z INFO security_notebook_tools.sentinel: Running Sentinel query ...
+2026-10-23T14:03:12.345Z INFO security_notebook_tools.sentinel [hunt.ipynb]: Running Sentinel query ...
 ```
+
+The notebook is the file name (without its directory) of the notebook the kernel runs, so lines
+from several notebooks writing to the same `notebooks.log` can be told apart. It is looked up on
+every record: VS Code's `__vsc_ipynb_file__` variable, then ipykernel's `__session__` variable,
+then the `JPY_SESSION_NAME` environment variable set by Jupyter Server 2.0 and later. Characters
+other than letters, digits, space and `_.+()-` become `?`, and the name is cut to 64 characters.
+When none of these is set (a plain script or IPython console) the ` [<notebook>]` part is left
+out and the line looks as before. The `debug=True` cell output shows it too.
 
 If the file cannot be opened or written, the record is dropped silently; logging never breaks a
 query. The records come from these loggers:
