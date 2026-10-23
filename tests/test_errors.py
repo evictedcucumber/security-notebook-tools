@@ -132,6 +132,10 @@ def test_transient_status_excludes_timeouts():
         (500, ["GatewayTimeout"], True),
         (400, ["BadRequest", "QueryExecutionTimedOut"], True),
         (None, ["gatewaytimeout"], True),
+        (429, ["RequestTimeout"], False),  # retried statuses keep their own class
+        (502, ["GatewayTimeout"], False),
+        (503, ["Timeout"], False),
+        (504, ["BadRequest"], True),
         (500, [], False),
         (503, ["ServiceUnavailable"], False),
         (400, ["BadArgumentError", "SyntaxError"], False),

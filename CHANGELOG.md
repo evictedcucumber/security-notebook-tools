@@ -35,8 +35,11 @@
   too slow, not a network blip, and each retry wasted another 4 to 15 minutes (30 minutes for one
   window). It now fails at once with a timeout error that says how long the window ran and
   suggests a smaller `interval` or a larger `timeout`. Early resets are still retried.
-- HTTP 504, 408 and `GatewayTimeout` responses raise an internal `QueryTimeoutError` (a
-  `QueryError`, not exported, not retried), so `except QueryError` still catches them.
+- Sentinel: HTTP 504, 408 and `GatewayTimeout` responses, a spent azure-core retry budget and a
+  read timeout raise an internal `QueryTimeoutError` (a `QueryError`, not exported, not
+  retried), so `except QueryError` still catches them. A timeout error code never overrides a
+  429, 502 or 503, which stay throttling or transient errors, and a connect timeout is still a
+  connection error.
 
 ## 4.0.0 - 2026-10-23
 

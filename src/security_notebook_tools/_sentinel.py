@@ -22,7 +22,9 @@ from azure.core.exceptions import (
     DecodeError,
     HttpResponseError,
     ServiceRequestError,
+    ServiceRequestTimeoutError,
     ServiceResponseError,
+    ServiceResponseTimeoutError,
     TooManyRedirectsError,
 )
 from azure.identity import AzureCliCredential, CredentialUnavailableError
@@ -257,6 +259,22 @@ class SentinelClient:
                 "`az login`; the token may have expired)"
             )
             raise QueryError(message) from exc
+        except (ServiceRequestTimeoutError, ServiceResponseTimeoutError) as exc:
+            # Spent azure-core retry budget ("Response timeout"/"Request timeout", no inner error)
+            # or a read timeout: the query was too slow. A connect timeout (inner error set) is
+            # a network failure and falls through to the connection error below.
+            if isinstance(exc, ServiceRequestTimeoutError) and exc.inner_exception is not None:
+                message = (
+                    "Sentinel query failed: could not reach the service: "
+                    f"{describe_network_error(exc)}"
+                )
+                raise QueryConnectionError(message) from exc
+            message = (
+                f"Sentinel query failed: no answer in time ({exc.message or exc}); the query ran "
+                "longer than `timeout` allows. Narrow the time range or raise `timeout`; in a "
+                "batch, use a smaller `interval` or set `min_interval`"
+            )
+            raise QueryTimeoutError(message) from exc
         except (ServiceRequestError, ServiceResponseError) as exc:
             message = (
                 f"Sentinel query failed: could not reach the service: {describe_network_error(exc)}"

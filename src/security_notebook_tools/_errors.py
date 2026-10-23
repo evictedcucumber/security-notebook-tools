@@ -262,9 +262,16 @@ def describe_codes(codes: Iterable[str]) -> str | None:
 
 
 def is_timeout(status: int | None, codes: Iterable[str]) -> bool:
-    """Whether a service failure means the query ran out of time (HTTP 408/504, a timeout code)."""
+    """Whether a service failure means the query ran out of time.
+
+    HTTP 408/504 always do. A service error code containing "timeout" or "timedout" does too,
+    unless the status is one that is retried (429, 502, 503): those keep their throttling or
+    transient classification whatever the code says.
+    """
     if status in TIMEOUT_STATUS:
         return True
+    if status in TRANSIENT_STATUS:
+        return False
     return any(needle in code.lower() for code in codes for needle in ("timeout", "timedout"))
 
 

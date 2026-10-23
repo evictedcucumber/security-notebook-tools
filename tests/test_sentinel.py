@@ -12,7 +12,9 @@ from azure.core.exceptions import (
     HttpResponseError,
     ODataV4Format,
     ServiceRequestError,
+    ServiceRequestTimeoutError,
     ServiceResponseError,
+    ServiceResponseTimeoutError,
 )
 from azure.identity import CredentialUnavailableError
 from azure.monitor.query import (
@@ -204,6 +206,40 @@ def test_gateway_timeout_code_is_a_timeout_error(client):
     client._mock.query_workspace.side_effect = _coded_error(500, "GatewayTimeout")
     with pytest.raises(QueryTimeoutError, match="GatewayTimeout"):
         client.query("T")
+
+
+@pytest.mark.parametrize("status", [429, 502, 503])
+def test_retried_statuses_keep_their_class_even_with_a_timeout_code(client, status):
+    client._mock.query_workspace.side_effect = _coded_error(status, "GatewayTimeout")
+    with pytest.raises(QueryTransientError) as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTimeoutError)
+
+
+def test_spent_azure_core_retry_budget_is_a_timeout_error(client):
+    # azure-core raises these when the `timeout=` retry budget is used up.
+    for error in (
+        ServiceResponseTimeoutError("Response timeout"),
+        ServiceRequestTimeoutError("Request timeout"),
+    ):
+        client._mock.query_workspace.side_effect = error
+        with pytest.raises(QueryTimeoutError, match="no answer in time") as ei:
+            client.query("T")
+        assert ei.value.__cause__ is error
+        assert not isinstance(ei.value, QueryTransientError)
+
+
+def test_read_timeout_is_a_timeout_error_but_a_connect_timeout_is_not(client):
+    inner = TimeoutError("read timed out")
+    client._mock.query_workspace.side_effect = ServiceResponseTimeoutError("Read", error=inner)
+    with pytest.raises(QueryTimeoutError):
+        client.query("T")
+    client._mock.query_workspace.side_effect = ServiceRequestTimeoutError(
+        "Connect", error=TimeoutError("connect timed out")
+    )
+    with pytest.raises(QueryConnectionError) as ei:
+        client.query("T")
+    assert not isinstance(ei.value, QueryTimeoutError)
 
 
 @pytest.mark.parametrize("status", [400, 403, 500, 502, 503])
