@@ -112,6 +112,9 @@ class SentinelClient:
             with dependency_call(logger, "LogsQueryClient creation"):
                 self._client = LogsQueryClient(self.credential)
         logger.info("Sentinel client ready for workspace %s", mask_id(self.workspace_id))
+        logger.debug(
+            "Sentinel client workspace_id=%s resource_id=%s", self.workspace_id, self.resource_id
+        )
 
     def _run(
         self, kql: str, timespan: Timespan | None, server_timeout: int | None
@@ -219,6 +222,12 @@ class SentinelClient:
             "Running Sentinel query (timespan=%s, kql=%s)",
             describe_timespan(timespan),
             fingerprint(kql),
+        )
+        logger.debug(
+            "Sentinel query text (workspace_id=%s, timespan=%r):\n%s",
+            self.workspace_id,
+            timespan,
+            kql,
         )
         start = time.perf_counter()
         with unexpected_errors(logger, "Sentinel query"):

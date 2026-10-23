@@ -33,6 +33,7 @@ def pivot_dataframe(
     fill_value: Any = None,
     totals: bool = False,
     max_columns: int | None = 100,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """Pivot a query result: one row per ``index`` key, one column per ``columns`` key.
 
@@ -67,6 +68,11 @@ def pivot_dataframe(
             With several ``values`` the total columns are named ``"<value>_Total"``.
         max_columns: Raise instead of building more than this many value columns (totals not
             counted), as a guard against a high-cardinality ``columns`` key. ``None`` disables.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs. Default false. The lines are printed unredacted
+            (debug output is not written to the file; be careful when sharing a notebook saved
+            with debug output). See the
+            logging section of the README.
 
     Returns:
         A new DataFrame as described above. If ``df`` has no rows, only the ``index`` columns (and
@@ -91,6 +97,7 @@ def pivot_dataframe(
     with public_call(
         logger,
         "pivot_dataframe",
+        debug=debug,
         rows=shape[0] if shape else None,
         columns=shape[1] if shape else None,
         index=index,

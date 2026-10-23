@@ -70,6 +70,7 @@ def test_defaults(shell):
                 "target": "sentinel",
                 "timeout": DEFAULT_TIMEOUT,
                 "cache": True,
+                "debug": False,
             },
         )
     ]
@@ -115,12 +116,18 @@ def test_options_forwarded(shell):
         "target": "adx",
         "timeout": 60,
         "cache": True,
+        "debug": False,
     }
 
 
 def test_no_cache_flag(shell):
     run(shell, "--no-cache", "T")
     assert shell.calls[0][2]["cache"] is False
+
+
+def test_debug_flag_forwarded(shell):
+    run(shell, "--debug", "T")
+    assert shell.calls[0][2]["debug"] is True
 
 
 def test_body_verbatim(shell):
@@ -192,7 +199,7 @@ def test_bad_argument_is_a_dependency_warning_and_a_rejection(shell, caplog):
 
 
 def test_timespan_expression_text_is_never_logged(shell, caplog, _log_file):
-    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")  # DEBUG carries raw text
     with pytest.raises(UsageError):
         run(shell, '--timespan "timedelta(hours=secret_marker_9)"', "T")
     logged = _log_file.read_text(encoding="utf-8") + "\n".join(

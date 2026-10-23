@@ -26,6 +26,7 @@ exec_query(
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
     cache: bool = True,
+    debug: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -43,8 +44,9 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds (default 300); must be positive. Applies to both targets. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (clients, credentials, table policy, the query itself). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
-`target`, `timeout` and `cache` are keyword-only.
+`target`, `timeout`, `cache` and `debug` are keyword-only.
 
 ### Environment variables
 
@@ -265,6 +267,7 @@ exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable = "sum",
     cache: bool = True,
+    debug: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -319,6 +322,7 @@ after the first window, so a typo fails before the other windows run.
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
 | `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (every window, also those run on worker threads). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
 ### Returns
 
@@ -373,6 +377,7 @@ format_dataframe(
     *,
     max_rows: int | None = 1000,
     column_styles: Mapping[str, str] | None = None,
+    debug: bool = False,
 ) -> pandas.io.formats.style.Styler
 ```
 
@@ -411,8 +416,9 @@ inferred).
 | `df` | The DataFrame to format, usually the result of `exec_query`. |
 | `max_rows` | Show at most this many rows (default 1000), with a caption giving the total. `None` shows every row. Rendering very large tables can make a notebook slow. |
 | `column_styles` | Mapping of column name to style name, for example `{"Bytes": "readable_numbers"}`. `None` (default) styles no column. |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
-`max_rows` and `column_styles` are keyword-only. `ValueError` is raised if `max_rows` is not a
+`max_rows`, `column_styles` and `debug` are keyword-only. `ValueError` is raised if `max_rows` is not a
 positive integer or `None`, or if `column_styles` names a column not in `df` or a style that does
 not exist. `TypeError` is raised if `column_styles` is not a mapping, or a style is given for a
 column whose type it does not fit (for example `"readable_numbers"` on a `string` column).
@@ -439,6 +445,7 @@ pivot_dataframe(
     fill_value: Any = None,
     totals: bool = False,
     max_columns: int | None = 100,
+    debug: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -471,8 +478,9 @@ totals stand out. `df` is not modified, and a `df` with no rows gives just the `
 | `fill_value` | Cell value for combinations with no rows. Not allowed without `values`. |
 | `totals` | Add a `Total` column and a `Total` row (named in the first `index` column), aggregated with the same function over the underlying rows. With several `values` the total columns are `<value>_Total`. |
 | `max_columns` | Raise instead of building more than this many value columns (totals not counted). Default 100; `None` disables. |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
-`agg_func`, `fill_value`, `totals` and `max_columns` are keyword-only. It raises `ValueError`
+`agg_func`, `fill_value`, `totals`, `max_columns` and `debug` are keyword-only. It raises `ValueError`
 (`ConfigurationError`) if a name is empty, repeated, used in more than one of `index`, `columns` and
 `values` or missing from `df` (the message lists the available columns); if `agg_func` or
 `fill_value` is given without `values`; if `agg_func` is not a non-empty string or a callable; if
@@ -492,7 +500,7 @@ format_dataframe(
 ## %%kql
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--debug]
 <KQL>
 ```
 
@@ -508,6 +516,7 @@ the package does not import IPython; it is only needed when the extension is loa
 | `--target` | `sentinel` (default) or `adx`. |
 | `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
 | `--no-cache` | Same as `cache=False`: skip the [result cache](#caching) for this cell. |
+| `--debug` | Same as `debug=True` for the whole run (`exec_query` and `format_dataframe`): print the run's log records, at DEBUG and above, below the cell. See [Debug output](#debug-output-in-the-cell). |
 
 The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, a positional
 argument or a timespan expression that fails to evaluate raises `UsageError` before any query runs.
@@ -567,7 +576,8 @@ df = exec_query("SigninLogs | take 100", cache=False)  # runs again
 ## Logging
 
 Every log record at INFO and above is appended to `notebooks.log` in your project root. Nothing
-is printed to the notebook cell; errors that cannot be recovered from still reach the cell as
+is printed to the notebook cell unless you ask for it with `debug=True` (see
+[Debug output](#debug-output-in-the-cell)); errors that cannot be recovered from still reach the cell as
 exceptions. The project root is the first directory, walking up from the current working
 directory, that contains `.git` or `pyproject.toml`. The walk stops at your home directory (it
 never looks above it), and the working directory itself is used if no marker is found by then.
@@ -633,3 +643,36 @@ treatment as above.
 ## `__version__`
 
 The installed version string, e.g. `"3.0.0"`.
+
+### Debug output in the cell
+
+`exec_query`, `exec_batch_query`, `format_dataframe` and `pivot_dataframe` take a keyword-only
+`debug=False`, and `%%kql` takes `--debug`. With it, the package's log records at DEBUG and above
+are also printed to that notebook cell's output for as long as the call runs, in the same format
+as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
+output is not written to the file; be careful when sharing a notebook saved with debug output:
+
+```python
+df = exec_query("SigninLogs | take 100", debug=True)
+```
+
+```
+2026-10-23T14:02:11.402Z INFO security_notebook_tools.query: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
+2026-10-23T14:02:11.403Z DEBUG security_notebook_tools.config: SENTINEL_WORKSPACE_ID: read from the environment
+2026-10-23T14:02:11.404Z INFO security_notebook_tools.query: Result cache miss; running the query on Sentinel
+...
+2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 0.85s tables=1 rows=10 columns=4
+```
+
+- **Scope.** The call and everything it calls are covered: nested public calls (`%%kql --debug`
+  covers `exec_query` and `format_dataframe`; `exec_batch_query` covers every window, including
+  those run on worker threads with `max_workers`). A nested call with `debug=False` does not
+  switch it off, and a nested `debug=True` inside a call without it covers just that inner call.
+- **Only that call.** Other calls, including ones running at the same time in other threads, print
+  nothing, and nothing is printed once the call has returned or raised.
+- **Where it goes.** To the output stream the cell had when the call started (`sys.stdout`).
+  Only the package's own records are printed, not the `azure` loggers'.
+- **Never in the file.** DEBUG records are not written to `notebooks.log`; what the file gets at
+  INFO and above is the same with or without `debug`.
+- **Cost.** Off by default; the package logger itself is at DEBUG so the records can be created,
+  but nothing is formatted or printed unless a call asked for it.

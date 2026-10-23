@@ -31,9 +31,12 @@ runs the cell body as KQL through ``exec_query`` and displays it with ``format_d
 
 Logging: every record at INFO and above from every module is appended to ``notebooks.log`` in
 the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
-above from the ``azure`` SDK loggers; nothing is printed to the cell. Every line is redacted:
-KQL text, result values, environment variable values, tokens and URL query strings are never
-written. Gitignore the file.
+above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
+redacted: KQL text, result values, environment variable values, tokens and URL query strings are
+never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``format_dataframe`` and
+``pivot_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``): for that call, and
+everything it calls, the records at DEBUG and above are also printed to the cell's output,
+unredacted (raw KQL, workspace IDs, cluster URIs). DEBUG records are never written to the file.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
@@ -62,7 +65,7 @@ def load_ipython_extension(ipython) -> None:
 
     Run ``%load_ext security_notebook_tools`` in a notebook, then write raw KQL in a cell::
 
-        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache]
+        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--debug]
 
     The body is passed verbatim to ``exec_query``, which does all validation, and the result is
     displayed with ``format_dataframe``. The DataFrame is not kept; call ``exec_query`` directly

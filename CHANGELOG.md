@@ -2,7 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- `debug=False` keyword-only argument on `exec_query`, `exec_batch_query`, `format_dataframe` and
+  `pivot_dataframe`, and `--debug` on `%%kql`. With it, the package's log records at DEBUG and
+  above are also printed to that notebook cell's output while the call runs, unredacted (debug output is
+  not written to the file; be careful when sharing a notebook saved with it), for the call and everything it calls (nested public calls and `exec_batch_query`'s
+  worker threads); other calls, including concurrent ones, print nothing. DEBUG records are
+  never written to `notebooks.log`. Off by default; the public API is otherwise unchanged.
+
 ### Changed
+
+- The `security_notebook_tools` logger is now at DEBUG (the file handler stays at INFO), so a
+  handler or `caplog` you attach to it sees DEBUG records too.
 
 - Logging now covers every module with the same levels: DEBUG internal detail (never written),
   INFO an operation starting or completing, WARNING recoverable or refused, ERROR a failed

@@ -108,6 +108,7 @@ class ADXClient:
         logger.info(
             "ADX client ready for %s (default database: %s)", host, mask_name(self.database)
         )
+        logger.debug("ADX cluster_uri=%s database=%s", self.cluster_uri, self.database)
 
     def _db(self, database: str | None) -> str:
         """Resolve the database: argument, then client default, then ``$ADX_DATABASE``."""
@@ -190,6 +191,9 @@ class ADXClient:
         props.set_option(_READONLY_OPTION, True)
         execute = self._client.execute_mgmt if kind == "command" else self._client.execute_query
         logger.info("Running ADX %s on %s (kql=%s)", kind, mask_name(db), fingerprint(text))
+        logger.debug(
+            "ADX %s text (cluster_uri=%s, database=%s):\n%s", kind, self.cluster_uri, db, text
+        )
         start = time.perf_counter()
         with unexpected_errors(logger, f"ADX {kind}"):
             response = self._call(kind, execute, db, text, props)

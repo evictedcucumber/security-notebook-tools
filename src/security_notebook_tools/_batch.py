@@ -27,6 +27,7 @@ from ._log import (
     dependency_call,
     describe_exception,
     fingerprint,
+    in_current_context,
     mark_failure_logged,
     redact_exception_text,
 )
@@ -293,7 +294,7 @@ def _run_parallel(
     pool = ThreadPoolExecutor(max_workers=min(max_workers, len(jobs)), thread_name_prefix="snt")
     futures: list[Future[pd.DataFrame]] = []
     try:
-        futures = [pool.submit(job) for job in jobs]
+        futures = [pool.submit(in_current_context(job)) for job in jobs]
         wait(futures, return_when=FIRST_EXCEPTION)
         failed = any(not f.cancelled() and f.exception() is not None for f in futures if f.done())
         if failed:
@@ -425,6 +426,7 @@ def exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable[..., Any] = _DEFAULT_AGG,
     cache: bool = True,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
 
@@ -505,6 +507,12 @@ def exec_batch_query(
             ``agg_column`` is an error.
         cache: If true (default), each window may be served from, and kept in, the in-memory
             result cache. Pass false to run every window.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs, including the calls it makes (every window,
+            also those run on worker threads). Default false. The lines are printed unredacted
+            (debug output is not written to the file; be careful when sharing a notebook saved
+            with debug output). See the logging
+            section of the README.
 
     Returns:
         The window results concatenated in window order with a fresh index. Windows with no
@@ -559,6 +567,7 @@ def exec_batch_query(
         timeout=timeout,
         max_workers=max_workers,
         cache=cache,
+        debug=debug,
         merge_on=merge_on,
         agg_column=agg_column,
         kql=fingerprint(kql),

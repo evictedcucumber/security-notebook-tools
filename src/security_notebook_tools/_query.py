@@ -210,6 +210,7 @@ def exec_query(
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
     cache: bool = True,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """Run KQL against Microsoft Sentinel (default) or Azure Data Explorer (ADX).
 
@@ -308,6 +309,12 @@ def exec_query(
         cache: If true (default), return a cached result for an identical earlier query and
             keep this one for later. Pass false to always run the query (the result is not
             stored and does not replace a cached one). See Caching above.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs, including the calls it makes (clients,
+            credentials, table policy, the query itself). Default false. The lines are printed
+            unredacted (debug output is not written to the file; be careful when sharing a
+            notebook saved with debug output). See
+            the logging section of the README.
 
     Returns:
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
@@ -351,6 +358,7 @@ def exec_query(
         target=target,
         timeout=timeout,
         cache=cache,
+        debug=debug,
         kql=fingerprint(kql),
     ) as call:
         if timeout <= 0:

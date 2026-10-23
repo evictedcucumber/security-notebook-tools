@@ -43,8 +43,12 @@ Flakes only see git-tracked files; `git add` new files before relying on `nix de
   Ruff rules: E, F, I, UP, B, SIM, C4, D.
 - No `print`. Log through child loggers of `security_notebook_tools` (for example
   `logging.getLogger("security_notebook_tools.sentinel")`). Everything at INFO and above goes to
-  `notebooks.log` in the project root, redacted (`_log.py` documents the levels). Never log KQL
-  text (use `fingerprint`), result values, env var values or headers; wrap dependency calls in
+  `notebooks.log` in the project root, redacted (`_log.py` documents the levels). DEBUG is never
+  written there; it is shown, unredacted, in the notebook cell only for a call made with
+  `debug=True`
+  (`_log.debug_scope`, a `ContextVar`, opened by `public_call(debug=...)`; submit worker-thread
+  jobs through `_log.in_current_context`, keep DEBUG-only work cheap). Never log KQL
+  text at INFO and above (use `fingerprint`; raw details go in `logger.debug` companions), result values, env var values or headers; wrap dependency calls in
   `dependency_call`, public functions in `_errors.public_call`, and pass SDK messages through
   `redact_exception_text`.
 - Environment variables are read on every call (`_config.py`), never at import time. Clients and

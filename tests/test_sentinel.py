@@ -416,7 +416,7 @@ def test_client_creation_is_logged(caplog):
 
 
 def test_kql_and_service_text_are_never_logged(client, caplog, _log_file):
-    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")  # DEBUG carries raw text
     echo = "near 'topsecretvalue' for bob.smith@contoso.com from 203.0.113.77"
     client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
     client.query(SECRET_KQL)

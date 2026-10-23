@@ -117,7 +117,7 @@ df = exec_query("Events | take 100", target="adx")
 df = exec_query(".show tables", target="adx")  # only .show commands are allowed
 ```
 
-`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True)` returns the
+`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True, debug=False)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
 columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
@@ -223,7 +223,7 @@ the extension once per kernel:
 ```
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [-v]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--debug]
 SigninLogs
 | summarize count() by UserPrincipalName
 ```
@@ -286,7 +286,8 @@ the working directory with `.git` or `pyproject.toml`, never looking above your 
 else the working directory). The file is created with permissions 0600 and is not written if it
 is a symbolic link, a hard link or owned by someone else. WARNING and above from the `azure` SDK
 loggers go there too, so Azure SDK warnings now appear only in `notebooks.log`, not in the cell's
-stderr. Nothing is printed to the notebook cell. Add `notebooks.log` to your `.gitignore`.
+stderr. Nothing is printed to the notebook cell unless you pass `debug=True` (see
+[Debug output](#debug-output-in-the-cell)). Add `notebooks.log` to your `.gitignore`.
 
 ```text
 2026-10-23T14:02:11.402Z INFO security_notebook_tools.query: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
@@ -309,6 +310,32 @@ identifiers removed. Whatever is logged is also redacted by
 the file formatter: tokens, `Authorization` values, URL query strings, `sig=`/`code=`/`token=`/
 `key=`/`password=` style parameters, email addresses, IP addresses, GUIDs (first four digits
 kept) and user names in home directories. Tracebacks list files and lines but no source text.
+
+### Debug output in the cell
+
+To see what a call does, pass `debug=True` (`--debug` in `%%kql`) to `exec_query`,
+`exec_batch_query`, `format_dataframe` or `pivot_dataframe`. While that call runs, the package's
+log records at DEBUG and above are also printed to the cell's output, in the same line format as
+the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
+
+```python
+df = exec_query("SigninLogs | take 100", debug=True)
+```
+
+```text
+2026-10-23T14:02:11.402Z INFO security_notebook_tools.query: exec_query: started target=sentinel timeout=300 cache=True kql=hmac:1a2b3c4d5e6f len=24
+2026-10-23T14:02:11.403Z DEBUG security_notebook_tools.config: SENTINEL_WORKSPACE_ID: read from the environment
+2026-10-23T14:02:11.404Z INFO security_notebook_tools.query: Result cache miss; running the query on Sentinel
+2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 0.85s tables=1 rows=10 columns=4
+```
+
+It covers the call and everything it calls: `%%kql --debug` covers both `exec_query` and
+`format_dataframe`, and `exec_batch_query(..., debug=True)` covers every window, also with
+`max_workers`. Other calls print nothing, including ones running at the same time, and so does
+everything after the call returns or raises. It is off by default, only the package's own
+records are shown (not the Azure SDK loggers'), and DEBUG records are never written to
+`notebooks.log`. The cell shows the raw text, which is not written to the file; be careful when sharing a
+notebook saved with debug output, because notebooks are saved with their outputs.
 
 ## Security
 

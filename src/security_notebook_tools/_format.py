@@ -264,6 +264,7 @@ def format_dataframe(
     *,
     max_rows: int | None = DEFAULT_MAX_ROWS,
     column_styles: Mapping[Any, str] | None = None,
+    debug: bool = False,
 ) -> Styler:
     """Format a query result for display in a notebook.
 
@@ -301,6 +302,11 @@ def format_dataframe(
             ``None`` shows every row. Rendering very large tables can make a notebook slow.
         column_styles: Optional mapping of column name to style name, for example
             ``{"Bytes": "readable_numbers"}``. ``None`` (the default) styles no column.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs. Default false. The lines are printed unredacted
+            (debug output is not written to the file; be careful when sharing a notebook saved
+            with debug output). See the
+            logging section of the README.
 
     Returns:
         A pandas ``Styler``. Jupyter renders it as an HTML table when it is the last
@@ -324,6 +330,7 @@ def format_dataframe(
         logger,
         "format_dataframe",
         rejected=(ValueError, TypeError),
+        debug=debug,
         rows=shape[0] if shape else None,
         columns=shape[1] if shape else None,
         max_rows=max_rows,

@@ -2,7 +2,10 @@
 
 Logging (``security_notebook_tools.magic``): a run is logged like a public function (entry,
 result summary, one WARNING if the cell is rejected). The cell body is logged only as a
-fingerprint, and the ``--timespan`` text never: only whether it was a duration or an expression.
+fingerprint, and the ``--timespan`` text never at INFO and above: only whether it was a duration
+or an expression. ``--debug`` prints the run's log records, at DEBUG and above, below the cell,
+unredacted and never to the file, including the raw ``--timespan`` text and its evaluated value
+(see :func:`security_notebook_tools._log.debug_scope`).
 """
 
 import logging
@@ -50,6 +53,7 @@ def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
     Raises:
         UsageError: If the expression cannot be evaluated.
     """
+    logger.debug("Raw --timespan text: %r", text)
     text = text.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         # IPython keeps the shell-style quotes around an argument; they only group words.
@@ -59,10 +63,14 @@ def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
         for number, unit in _PART.findall(text):
             name = _UNITS[unit.lower()]
             parts[name] = parts.get(name, 0) + int(number)
-        return timedelta(**parts)
+        value = timedelta(**parts)
+        logger.debug("Evaluated --timespan %r to %r", text, value)
+        return value
     try:
         with dependency_call(logger, "timespan expression evaluation"):
-            return eval(text, user_ns)
+            value = eval(text, user_ns)
+        logger.debug("Evaluated --timespan %r to %r", text, value)
+        return value
     except Exception as exc:
         raise UsageError(f"Could not evaluate --timespan {text!r}: {exc!r}") from exc
 
@@ -70,6 +78,13 @@ def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
 @magics_class
 class KqlMagics(Magics):
     """Magics provided by security_notebook_tools."""
+
+    def _wants_debug(self, line: str) -> bool:
+        """Whether ``line`` has ``--debug``, so the scope covers the whole run (never raises)."""
+        try:
+            return bool(parse_argstring(self.kql, line).debug)
+        except Exception, SystemExit:
+            return False  # the real parse in kql() reports the problem
 
     @magic_arguments()
     @argument(
@@ -92,14 +107,27 @@ class KqlMagics(Magics):
         action="store_true",
         help="Run the query even if an identical result is cached.",
     )
+    @argument(
+        "--debug",
+        action="store_true",
+        help="Also print this run's log records, at DEBUG and above, below the cell.",
+    )
     @cell_magic
     def kql(self, line: str, cell: str) -> Styler:
         """Run the cell body as KQL with exec_query and display the result.
 
         The body is passed verbatim (no ``{}`` or ``$`` expansion). The result is shown with
         format_dataframe and not kept; call exec_query directly to work with the DataFrame.
+        With ``--debug`` the run's log records, at DEBUG and above, are also printed below the
+        cell.
         """
-        with public_call(logger, "%%kql", rejected=(UsageError,), kql=fingerprint(cell)) as call:
+        with public_call(
+            logger,
+            "%%kql",
+            rejected=(UsageError,),
+            debug=self._wants_debug(line),
+            kql=fingerprint(cell),
+        ) as call:
             with dependency_call(logger, "IPython argument parsing"):
                 args = parse_argstring(self.kql, line)
             if not cell.strip():
@@ -118,5 +146,6 @@ class KqlMagics(Magics):
                 target=args.target,
                 timeout=args.timeout,
                 cache=not args.no_cache,
+                debug=args.debug,
             )
-            return format_dataframe(df)
+            return format_dataframe(df, debug=args.debug)

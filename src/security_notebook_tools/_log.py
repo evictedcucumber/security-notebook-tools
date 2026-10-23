@@ -3,7 +3,8 @@
 All modules log to children of the ``security_notebook_tools`` logger (``.auth``, ``.config``,
 ``.sentinel``, ``.adx``, ``.timerange``, ``.tablepolicy``, ``.query``, ``.batch``, ``.format``,
 ``.pivot`` and ``.magic``). Every record at INFO and above is appended to ``notebooks.log`` in the
-project root and nothing is printed to the notebook cell. The project root is the first
+project root and nothing is printed to the notebook cell, unless a call is made with
+``debug=True`` (see below). The project root is the first
 directory, walking up from the current working directory, that contains ``.git`` or
 ``pyproject.toml``; the walk never goes above the user's home directory, and if there is no
 marker the working directory itself is used. The path is resolved on every record (the root is
@@ -51,11 +52,25 @@ tracebacks itself: each frame is a file, line and function name without source t
 exception message is shortened and stripped of quoted strings.
 
 Failures to open or write the file are ignored so logging never breaks a query.
+
+Debug output (``debug=True``): ``exec_query``, ``exec_batch_query``, ``format_dataframe``,
+``pivot_dataframe`` and ``%%kql --debug`` open a debug scope for the duration of the call (see
+:func:`debug_scope`). While it is active, every package record at DEBUG and above is also
+printed to that notebook cell's output, unredacted (same line format as the file), whichever
+function or thread logs it: nested public calls inherit the scope and the batch's worker
+threads run in a copy of the caller's context. The scope lives in a ``contextvars.ContextVar``,
+so a concurrent call (another thread, another task) that did not ask for it prints nothing.
+The package logger itself is at DEBUG so the records exist; the file handler stays at INFO, so
+debug records never reach ``notebooks.log``, and the cell handler only passes records while a
+scope is active. It writes to the ``sys.stdout`` the scope captured on entry (Jupyter points it
+at the running cell) and only ever receives the package's own records, never the ``azure``
+loggers'. Nothing is printed outside such a scope.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import hmac
 import ipaddress
@@ -64,6 +79,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import threading
 import time
 import traceback
@@ -444,6 +460,22 @@ def failure_logged(exc: BaseException) -> bool:
 _calls = threading.local()  # per thread: how deep dependency calls are nested, what was reported
 
 
+class _LazyFields:
+    """:func:`format_fields` of a mapping, computed only if a handler formats the record.
+
+    DEBUG records are created on every call but almost never formatted, so the DEBUG start line
+    of a dependency call does not render its fields up front.
+    """
+
+    __slots__ = ("fields",)
+
+    def __init__(self, fields: Mapping[str, Any]) -> None:
+        self.fields = fields
+
+    def __str__(self) -> str:
+        return format_fields(self.fields)
+
+
 @contextlib.contextmanager
 def dependency_call(
     logger: logging.Logger, name: str, *, level: int = logging.INFO, **fields: Any
@@ -470,7 +502,7 @@ def dependency_call(
     start = time.perf_counter()
     try:
         _calls.depth = depth + 1
-        logger.debug("%s: calling%s", name, format_fields(fields))
+        logger.debug("%s: calling%s", name, _LazyFields(fields))
         yield result
     except BaseException as exc:
         elapsed = time.perf_counter() - start
@@ -498,6 +530,85 @@ def dependency_call(
         _calls.depth = depth
         if depth == 0:
             _calls.reported = None
+
+
+# --- Debug scope: per-call output in the notebook cell --------------------------------------------
+
+
+class _DebugScope:
+    """A debug scope: the stream of the cell that asked for it (None: use stdout).
+
+    Context copies share the object, so ending the scope (``active = False``) also silences a
+    worker thread that outlives the call, such as one left running after a ``KeyboardInterrupt``.
+    """
+
+    __slots__ = ("active", "stream")
+
+    def __init__(self, stream: Any) -> None:
+        self.stream = stream
+        self.active = True
+
+
+_debug: contextvars.ContextVar[_DebugScope | None] = contextvars.ContextVar(
+    "security_notebook_tools_debug", default=None
+)
+
+
+def debug_active() -> bool:
+    """Whether the calling context is inside a :func:`debug_scope`."""
+    scope = _debug.get()
+    return scope is not None and scope.active
+
+
+@contextlib.contextmanager
+def debug_scope(enabled: bool) -> Iterator[None]:
+    """Print the package's DEBUG-and-above records to the notebook cell while the block runs.
+
+    Does nothing when ``enabled`` is false or a scope is already active (an inner call inherits
+    it, and an inner ``debug=False`` never turns it off). Otherwise it captures the current
+    ``sys.stdout`` (the running cell's stream in Jupyter) and ends the scope on exit, however
+    the block ends. The scope belongs to the current context: other threads and tasks are not
+    affected, and a worker thread sees it only if it runs in a copy of this context (see
+    :func:`in_current_context`).
+
+    Args:
+        enabled: The call's ``debug`` argument.
+
+    Yields:
+        None.
+    """
+    if not enabled or debug_active():
+        yield
+        return
+    scope = _DebugScope(sys.stdout)
+    token = _debug.set(scope)
+    try:
+        yield
+    finally:
+        scope.active = False
+        try:
+            _debug.reset(token)
+        except ValueError:  # reset from another context: end the scope the plain way
+            _debug.set(None)
+
+
+def in_current_context(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Bind ``func(*args, **kwargs)`` to a copy of the current context, to run it elsewhere.
+
+    ``ThreadPoolExecutor`` threads do not inherit context variables, so a job that must log
+    into the caller's debug scope is submitted through this. Each call takes its own copy, so
+    jobs can run at the same time (a ``Context`` can only be entered once at a time).
+
+    Args:
+        func: The callable to run.
+        *args: Its positional arguments.
+        **kwargs: Its keyword arguments.
+
+    Returns:
+        A callable with no arguments that runs ``func`` inside the captured context.
+    """
+    context = contextvars.copy_context()
+    return lambda: context.run(func, *args, **kwargs)
 
 
 # --- The log file ------------------------------------------------------------------------------
@@ -695,22 +806,68 @@ class _ProjectFileHandler(logging.Handler):
         super().close()
 
 
-def _install(handler: _ProjectFileHandler) -> None:
-    """Attach ``handler`` to the package and ``azure`` loggers, replacing any older copy."""
-    for name in (PACKAGE_LOGGER, *THIRD_PARTY_LOGGERS):
-        target = logging.getLogger(name)
-        for old in [h for h in target.handlers if getattr(h, "snt_file_handler", False)]:
-            if old is not handler:
-                target.removeHandler(old)
-                old.close()
-        if handler not in target.handlers:
-            target.addHandler(handler)
+class _CellHandler(logging.Handler):
+    """Print records to the notebook cell that opened the active :func:`debug_scope`.
+
+    The filter passes a record only while the emitting context is in a scope, so concurrent
+    calls that did not ask for debug output print nothing. It writes to the stream the scope
+    captured (the current ``sys.stdout`` if that is gone). Unlike the file handler it does not
+    redact: debug output is for the person running the call, and it is never written to the file
+    (be careful when sharing a notebook saved with debug output). Errors are swallowed so
+    output can never break a call.
+    """
+
+    snt_cell_handler = True
+
+    def __init__(self, level: int = logging.DEBUG) -> None:
+        super().__init__(level)
+        self.setFormatter(_UtcFormatter(LOG_FORMAT, DATE_FORMAT))
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        """Pass records at the handler level while a debug scope is active."""
+        return debug_active() and super().filter(record)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Write one formatted line to the cell, silently dropping it on any error."""
+        try:
+            scope = _debug.get()
+            stream = scope.stream if scope is not None else None
+            if stream is None:
+                stream = sys.stdout
+            stream.write(self.format(record) + "\n")
+            flush = getattr(stream, "flush", None)
+            if flush is not None:
+                flush()
+        except Exception:
+            return
+
+
+def _install(*handlers: logging.Handler) -> None:
+    """Attach the handlers to their loggers, replacing any older copy of the same kind.
+
+    The file handler goes on the package and ``azure`` loggers, the cell handler on the package
+    logger only. Run again (a module reload) it leaves exactly one handler of each kind.
+    """
+    for handler in handlers:
+        if isinstance(handler, _CellHandler):
+            kind, names = "snt_cell_handler", (PACKAGE_LOGGER,)
+        else:
+            kind, names = "snt_file_handler", (PACKAGE_LOGGER, *THIRD_PARTY_LOGGERS)
+        for name in names:
+            target = logging.getLogger(name)
+            for old in [h for h in target.handlers if getattr(h, kind, False)]:
+                if old is not handler:
+                    target.removeHandler(old)
+                    old.close()
+            if handler not in target.handlers:
+                target.addHandler(handler)
 
 
 logger = logging.getLogger(PACKAGE_LOGGER)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # records exist; the handlers decide who sees which level
 file_handler = _ProjectFileHandler()
-_install(file_handler)
+cell_handler = _CellHandler()
+_install(file_handler, cell_handler)
 
 
 def close_log_file() -> None:

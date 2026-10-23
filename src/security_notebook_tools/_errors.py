@@ -27,6 +27,7 @@ from typing import Any
 from ._exceptions import ConfigurationError, QueryError, SecurityNotebookToolsError
 from ._log import (
     clear_failure_mark,
+    debug_scope,
     describe_exception,
     failure_logged,
     format_fields,
@@ -329,9 +330,14 @@ def public_call(
     name: str,
     *,
     rejected: tuple[type[BaseException], ...] = (ConfigurationError,),
+    debug: bool = False,
     **fields: Any,
 ) -> Iterator[dict[str, Any]]:
     """Log a public function: entry, result summary, and its failure exactly once.
+
+    With ``debug=True`` the call also runs in a debug scope (:func:`._log.debug_scope`): while
+    it lasts, the package's records at DEBUG and above, from this call and everything it calls,
+    are printed to the notebook cell. An enclosing scope is inherited and never turned off.
 
     INFO on entry (with ``fields``) and on success (with the duration and the result fields the
     block adds to the yielded dict, such as ``rows`` and ``columns``). An exception is logged
@@ -346,11 +352,27 @@ def public_call(
         logger: The public function's module logger.
         name: The public name, e.g. ``"exec_query"``.
         rejected: Exception types that mean "refused", logged at WARNING.
+        debug: Print this call's DEBUG-and-above records to the notebook cell.
         **fields: Facts about the call (never KQL, values or environment variable values).
 
     Yields:
         A dict to put result facts in (``call["rows"] = 10``).
     """
+    with (
+        debug_scope(debug),
+        _logged_call(logger, name, rejected, fields) as result,
+    ):
+        yield result
+
+
+@contextmanager
+def _logged_call(
+    logger: logging.Logger,
+    name: str,
+    rejected: tuple[type[BaseException], ...],
+    fields: dict[str, Any],
+) -> Iterator[dict[str, Any]]:
+    """The logging half of :func:`public_call`: entry, summary and the failure, once."""
     result: dict[str, Any] = {}
     depth = getattr(_public, "depth", 0)
     start = time.perf_counter()

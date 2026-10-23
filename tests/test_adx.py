@@ -505,7 +505,7 @@ def test_command_is_logged_as_a_command(patched, caplog):
 
 
 def test_kql_and_service_text_are_never_logged(patched, caplog, _log_file):
-    caplog.set_level(logging.DEBUG, logger="security_notebook_tools")
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")  # DEBUG carries raw text
     client, _, conv = patched
     echo = "near 'topsecretvalue' for bob.smith@contoso.com from 203.0.113.77"
     client.execute_query.return_value.primary_results = ["t"]

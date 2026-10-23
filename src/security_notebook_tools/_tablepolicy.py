@@ -316,6 +316,7 @@ def get_policy(
             policy = cached[1]
         else:
             logger.info("Reading table plans and functions for workspace %s", workspace)
+            logger.debug("Reading table plans from ARM resource_id=%s", resource_id)
             stats = {"pages": 0}
             try:
                 with dependency_call(logger, "ARM table policy fetch", workspace=workspace) as call:
