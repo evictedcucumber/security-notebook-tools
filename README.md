@@ -119,7 +119,9 @@ df = exec_query(".show tables", target="adx")  # only .show commands are allowed
 
 `exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True, debug=False)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
-columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received.
+columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received. So does a time range
+that starts before a table's Analytics retention (for example 120 days on a table that keeps 90):
+the older rows are in long-term retention, which these queries cannot read.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
 
 ### Time range (Sentinel)
@@ -531,6 +533,8 @@ The exception classes are not part of the public API; read the message. Messages
   with its traceback to `notebooks.log` in the project root, and the original exception is
   chained. Please report it.
 - `Sentinel query returned partial results: ...`: a warning, not an error.
+- `<Table> keeps N days in Analytics ...`: a warning, not an error. The time range reaches back
+  past the table's Analytics retention, so the older part returns no rows.
 
 The configuration errors above are also `ValueError`s.
 

@@ -200,6 +200,16 @@ tables. Sentinel datetime columns are UTC-aware. `df.attrs["kql_types"]` maps ea
 to its lowercase KQL type (`"long"`, `"dynamic"` ...), which `format_dataframe` uses. If Sentinel
 returns only a partial result, a warning is logged and the data received is returned.
 
+On Sentinel, a `UserWarning` (and a WARNING log line) is also issued when the time range starts
+before the Analytics retention (`retentionInDays`) of a table the query reads, for example a
+120-day range on a table that keeps 90 days. Older rows are in long-term retention / the Sentinel
+data lake, which these queries cannot read, so that part of the range returns no rows; the warning
+names the table, the days kept and the cutoff date, and says when the data is beyond the total
+retention too. It is advice only: nothing is skipped or raised, and it is not issued when the
+time range is set in the query (`timespan` is `None`), when the retention is unknown, or on ADX.
+It is issued before the result cache, so a cached repeat warns again. `exec_batch_query` warns
+once per call for its whole range, not once per window.
+
 ### Errors
 
 Known failures are raised as `QueryError` (or a subclass) with a message that explains the cause:

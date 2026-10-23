@@ -1,5 +1,6 @@
 import logging
-from datetime import timedelta
+import warnings
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pandas as pd
@@ -176,8 +177,6 @@ def test_invalid_config_values(sentinel, adx, monkeypatch):
 
 
 # --- exec_batch_query ---------------------------------------------------------------------------
-
-from datetime import UTC, datetime  # noqa: E402
 
 from security_notebook_tools._exceptions import QueryError  # noqa: E402
 
@@ -1589,3 +1588,96 @@ def test_batch_min_interval_works_for_adx_late_resets(adx, backoff, clock):
         target="adx",
     )
     assert df["a"].tolist() == [2, 3]
+
+
+# --- retention warning --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def retention(monkeypatch):
+    from security_notebook_tools import _sentinel
+    from security_notebook_tools._tablepolicy import TablePolicy
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    policy = TablePolicy(
+        customer_id="11111111-1111-1111-1111-111111111111",
+        tables={"syslog": ("Syslog", "Analytics")},
+        retention={"syslog": (90, 365)},
+    )
+    with (
+        mock.patch.object(_sentinel, "get_policy", return_value=policy),
+        mock.patch.object(_sentinel, "check_sentinel_query"),
+        mock.patch("security_notebook_tools._query.get_credential"),
+        mock.patch.object(
+            _sentinel.SentinelClient, "query_tables", return_value=[pd.DataFrame({"a": [1]})]
+        ),
+    ):
+        yield
+
+
+def _retention_warnings(func, *args, **kwargs):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        func(*args, **kwargs)
+    return [str(w.message) for w in caught if "Analytics" in str(w.message)]
+
+
+def test_exec_query_warns_beyond_retention(retention, caplog):
+    with caplog.at_level(logging.WARNING):
+        got = _retention_warnings(snt.exec_query, "Syslog", timedelta(days=120))
+    assert len(got) == 1
+    assert got[0].startswith("Syslog keeps 90 days in Analytics (365 in total): rows before ")
+    assert "Syslog" in caplog.text
+    assert "\nSyslog\n" not in caplog.text
+
+
+def test_exec_query_does_not_warn_within_retention(retention):
+    assert _retention_warnings(snt.exec_query, "Syslog", timedelta(days=30)) == []
+
+
+def test_exec_query_does_not_warn_without_timespan(retention):
+    kql = "Syslog | where TimeGenerated > ago(400d)"
+    assert _retention_warnings(snt.exec_query, kql) == []
+
+
+def test_exec_query_warns_that_data_is_gone_beyond_total(retention):
+    got = _retention_warnings(snt.exec_query, "Syslog", timedelta(days=400))
+    assert len(got) == 1
+    assert "gone entirely" in got[0]
+
+
+def test_retention_warning_repeats_for_cached_results(retention):
+    start = datetime.now(UTC) - timedelta(days=120)
+    span = (start, start + timedelta(days=1))
+    assert len(_retention_warnings(snt.exec_query, "Syslog", span)) == 1
+    assert len(_retention_warnings(snt.exec_query, "Syslog", span)) == 1
+
+
+def test_retention_check_failure_does_not_break_the_query(retention):
+    from security_notebook_tools import _sentinel
+
+    with mock.patch.object(_sentinel, "get_policy", side_effect=RuntimeError("boom")):
+        # The query itself (check_sentinel_query is mocked here) still runs.
+        df = snt.exec_query("Syslog", timedelta(days=120))
+    assert list(df.columns) == ["a"]
+
+
+def test_batch_warns_once_for_the_whole_range(retention):
+    kql = "Syslog | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    got = _retention_warnings(
+        snt.exec_batch_query, kql, timedelta(days=120), interval=timedelta(days=30)
+    )
+    assert len(got) == 1
+
+
+def test_batch_does_not_warn_within_retention(retention):
+    kql = "Syslog | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    assert (
+        _retention_warnings(
+            snt.exec_batch_query, kql, timedelta(days=60), interval=timedelta(days=20)
+        )
+        == []
+    )

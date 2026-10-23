@@ -1,6 +1,7 @@
 import errno
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -40,8 +41,8 @@ TABLES = [
 FUNCTIONS = ["MyFunc"]  # built-in parsers such as _Im_NetworkSession are NOT saved searches
 
 
-def _table_item(name, plan):
-    props = {} if plan is None else {"plan": plan}
+def _table_item(name, plan, extra=None):
+    props = ({} if plan is None else {"plan": plan}) | (extra or {})
     return {"name": name, "properties": props}
 
 
@@ -824,3 +825,81 @@ def test_cost_guard_rejection_is_not_logged_here(policy, caplog):
     with pytest.raises(ConfigurationError):
         check_sentinel_query("Basic_CL | take 1", policy)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+# --- retention ----------------------------------------------------------------------------------
+
+
+def _retention_of(extra):
+    fake = _arm(tables=[("Syslog", "Analytics", extra)])
+    with mock.patch.object(tp, "_get_json", fake), mock.patch.object(tp, "_arm_client"):
+        return tp.get_policy(RID, WS, mock.Mock()).retention
+
+
+def test_retention_is_parsed():
+    assert _retention_of({"retentionInDays": 90, "totalRetentionInDays": 365}) == {
+        "syslog": (90, 365)
+    }
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({}, (None, None)),
+        ({"retentionInDays": "90", "totalRetentionInDays": None}, (None, None)),
+        ({"retentionInDays": True, "totalRetentionInDays": 1.5}, (None, None)),
+        ({"retentionInDays": -1, "totalRetentionInDays": [365]}, (None, None)),
+        ({"retentionInDays": 30}, (30, None)),
+    ],
+)
+def test_bad_or_missing_retention_is_ignored_not_raised(extra, expected):
+    assert _retention_of(extra) == {"syslog": expected}
+
+
+def test_retention_does_not_touch_the_cost_guard(policy):
+    assert policy.tables["signinlogs"] == ("SigninLogs", "Analytics")
+    assert policy.retention["signinlogs"] == (None, None)
+    with pytest.raises(ConfigurationError):
+        check_sentinel_query("Basic_CL", policy)
+
+
+NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
+
+
+def _ret_policy():
+    return TablePolicy(
+        customer_id=WS,
+        tables={"syslog": ("Syslog", "Analytics"), "other": ("Other", "Analytics")},
+        retention={"syslog": (90, 365), "other": (None, None)},
+    )
+
+
+def test_retention_notice_beyond_analytics():
+    message, names = tp.retention_notice("Syslog", _ret_policy(), NOW - timedelta(days=120), NOW)
+    assert names == ["Syslog"]
+    assert message.startswith(
+        "Syslog keeps 90 days in Analytics (365 in total): rows before 2026-07-25"
+    )
+    assert "long-term retention" in message
+    assert "gone" not in message
+
+
+def test_retention_notice_beyond_total():
+    message, _ = tp.retention_notice("Syslog", _ret_policy(), NOW - timedelta(days=400), NOW)
+    assert "Rows before 2025-10-23 are gone entirely." in message
+
+
+def test_retention_notice_none_within_or_unknown():
+    policy = _ret_policy()
+    assert tp.retention_notice("Syslog", policy, NOW - timedelta(days=89), NOW) is None
+    assert tp.retention_notice("Other", policy, NOW - timedelta(days=900), NOW) is None
+    assert tp.retention_notice("Unrelated", policy, NOW - timedelta(days=900), NOW) is None
+
+
+def test_retention_notice_without_long_term_tier():
+    policy = TablePolicy(
+        customer_id=WS, tables={"t": ("T", "Analytics")}, retention={"t": (30, None)}
+    )
+    message, _ = tp.retention_notice("T", policy, NOW - timedelta(days=60), NOW)
+    assert "in total" not in message
+    assert "long-term" not in message

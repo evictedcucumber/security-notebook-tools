@@ -34,7 +34,7 @@ from ._log import (
     mark_failure_logged,
     redact_exception_text,
 )
-from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel
+from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel, _warn_retention
 
 logger = logging.getLogger("security_notebook_tools.batch")
 
@@ -248,7 +248,9 @@ def _attempt_window(
         attempt_start = _clock()
         try:
             if target == "sentinel":
-                tables = _query_sentinel(prefix + kql, bounds, timeout, cache=cache)
+                tables = _query_sentinel(
+                    prefix + kql, bounds, timeout, cache=cache, check_retention=False
+                )
             else:
                 tables = _query_adx(prefix + kql, timeout, cache=cache)
             break
@@ -797,6 +799,10 @@ def exec_batch_query(
                 "Management commands cannot be run in windows; use exec_query for them."
             )
         _check_batch_filter(kql)
+
+        if target == "sentinel":
+            # Once for the whole range, not per window (the windows skip the check).
+            _warn_retention(kql, (start_utc, end_utc))
 
         windows = _windows(start_utc, end_utc, interval)
         total = len(windows)

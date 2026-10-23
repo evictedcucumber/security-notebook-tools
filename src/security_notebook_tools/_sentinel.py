@@ -11,6 +11,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -60,8 +61,8 @@ from ._log import (
     mask_id,
     redact_exception_text,
 )
-from ._tablepolicy import check_sentinel_query, get_policy
-from ._timerange import Timespan
+from ._tablepolicy import check_sentinel_query, get_policy, retention_notice
+from ._timerange import Timespan, timespan_start
 
 logger = logging.getLogger("security_notebook_tools.sentinel")
 
@@ -281,6 +282,36 @@ class SentinelClient:
         except AzureError as exc:
             message = f"Sentinel query failed: {type(exc).__name__}: {exc}"
             raise QueryError(message) from exc
+
+    def warn_retention(self, kql: str, timespan: Timespan | None) -> None:
+        """Warn if ``timespan`` reaches back past what the tables ``kql`` reads keep in Analytics.
+
+        Logs at WARNING (table names, never the query) and issues a ``UserWarning``. Nothing is
+        said without a known start (``timespan`` of ``None``) or a known retention. This is
+        advice only: it never raises and never changes what a query does, so any problem here
+        (such as the policy not being readable) is left to the query itself to report.
+        """
+        try:
+            now = datetime.now(UTC)
+            start = timespan_start(timespan, now)
+            if start is None:
+                return
+            policy = get_policy(
+                self.resource_id, self.workspace_id, self.credential, self.tenant_id
+            )
+            notice = retention_notice(kql, policy, start, now)
+        except Exception:  # advice must not break a query
+            logger.debug("Retention check skipped", exc_info=True)
+            return
+        if notice is None:
+            return
+        message, names = notice
+        logger.warning(
+            "The time range starts before the Analytics retention of %s: %s",
+            ", ".join(names),
+            message,
+        )
+        warnings.warn(message, stacklevel=2)
 
     def query_tables(
         self,

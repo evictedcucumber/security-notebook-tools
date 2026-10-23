@@ -99,7 +99,7 @@ def _sentinel_tables(
     """Fetch (and cache) all tables of a Sentinel query; partial results are not cached."""
     _fetch.ran = True
     logger.info("Result cache miss; running the query on Sentinel")
-    client = _client_for(_sentinel_client, workspace_id, resource_id, tenant_id)
+    client = _sentinel_client(workspace_id, resource_id, tenant_id)
     try:
         return tuple(
             client.query_tables(kql, timespan, raise_on_partial=True, server_timeout=timeout)
@@ -154,10 +154,34 @@ def _cached_call(fetch, args: tuple, *, cache: bool) -> list[pd.DataFrame]:
     return _copies(tables)
 
 
+def _warn_retention(kql: str, timespan: Timespan | None) -> None:
+    """Warn if ``timespan`` is longer than the Analytics retention of the tables ``kql`` reads."""
+    # This is the first client lookup of a call (and the only one on a result cache hit), so it
+    # logs the reuse; _sentinel_tables then looks the client up without logging it again.
+    client = _client_for(
+        _sentinel_client,
+        resolve_workspace_id(),
+        resolve_workspace_resource_id(),
+        resolve_tenant_id(),
+    )
+    client.warn_retention(kql, timespan)
+
+
 def _query_sentinel(
-    kql: str, timespan: Timespan | None, timeout: int, *, cache: bool = True
+    kql: str,
+    timespan: Timespan | None,
+    timeout: int,
+    *,
+    cache: bool = True,
+    check_retention: bool = True,
 ) -> list[pd.DataFrame]:
-    """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables."""
+    """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables.
+
+    The retention warning is issued here, before the result cache, so a cached repeat warns too.
+    A batch passes ``check_retention=False`` and warns once for its whole range instead.
+    """
+    if check_retention:
+        _warn_retention(kql, timespan)
     args = (
         resolve_workspace_id(),
         resolve_workspace_resource_id(),
@@ -321,7 +345,9 @@ def exec_query(
         tables. Sentinel datetime columns are UTC-aware. ``df.attrs["kql_types"]`` maps each
         column to its KQL type (``"long"``, ``"dynamic"`` ...), which ``format_dataframe`` uses.
         If Sentinel returns only a partial result, a warning is emitted and the data received is
-        returned.
+        returned. On Sentinel, a ``UserWarning`` is also emitted (on cached repeats too) when the
+        time range starts before the Analytics retention of a table the query reads: the older
+        rows are in long-term retention, which these queries cannot read. Nothing is skipped.
 
     Raises:
         ConfigurationError: ``timeout`` is not positive, ``target`` is unknown, ``timespan``

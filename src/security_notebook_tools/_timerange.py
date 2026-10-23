@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from ._kql import strip_noise
 from ._log import describe_timespan
@@ -74,3 +74,16 @@ def resolve_timespan(kql: str, timespan: Timespan | None) -> Timespan | None:
         return None
     logger.info("Time range: last %s (default; no time filter found in query)", DEFAULT_TIMESPAN)
     return DEFAULT_TIMESPAN
+
+
+def timespan_start(timespan: Timespan | None, now: datetime) -> datetime | None:
+    """The start of ``timespan`` as an aware datetime, or ``None`` if there is no known start.
+
+    A ``timedelta`` ends now, so it starts ``now - timedelta``. A naive datetime is taken as UTC.
+    """
+    if timespan is None:
+        return None
+    if isinstance(timespan, timedelta):
+        return now - timespan
+    start = timespan[0]
+    return start.replace(tzinfo=UTC) if start.tzinfo is None else start

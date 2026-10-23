@@ -22,6 +22,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -118,11 +119,20 @@ class TablePolicy:
         customer_id: The workspace GUID (``customerId``) reported by Azure Resource Manager.
         tables: Lower-case table name -> ``(name, plan)``. A missing plan is ``""``.
         functions: Lower-case saved-function alias -> alias.
+        retention: Lower-case table name -> ``(retentionInDays, totalRetentionInDays)``: the days
+            kept in Analytics and in total. Either is ``None`` when ARM did not report an integer.
+            Used only for a warning; it never takes part in the cost guard.
     """
 
     customer_id: str
     tables: dict[str, tuple[str, str]] = field(default_factory=dict)
     functions: dict[str, str] = field(default_factory=dict)
+    retention: dict[str, tuple[int | None, int | None]] = field(default_factory=dict)
+
+
+def _days(value: object) -> int | None:
+    """A retention value if it is a positive integer (not a bool), else ``None``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def _is_analytics(plan: str) -> bool:
@@ -245,16 +255,22 @@ def _fetch_policy(
         raise QueryError("the workspace has no customerId")
 
     table_map: dict[str, tuple[str, str]] = {}
+    retention: dict[str, tuple[int | None, int | None]] = {}
     for item in tables:
         name = item.get("name") if isinstance(item, dict) else None
         if not isinstance(name, str) or not name:
             raise QueryError("a table has no name")
-        plan = _props(item, "table").get("plan")
+        props = _props(item, "table")
+        plan = props.get("plan")
         plan = plan if isinstance(plan, str) else ""
         old = table_map.get(name.lower())
         # A name listed twice keeps the stricter entry: anything but Analytics wins.
         if old is None or _is_analytics(old[1]):
             table_map[name.lower()] = (name, plan)
+            retention[name.lower()] = (
+                _days(props.get("retentionInDays")),
+                _days(props.get("totalRetentionInDays")),
+            )
     if not table_map:
         raise QueryError("the workspace reports no tables")
 
@@ -264,7 +280,9 @@ def _fetch_policy(
         if isinstance(alias, str) and alias:
             functions[alias.lower()] = alias
 
-    return TablePolicy(customer_id=customer_id, tables=table_map, functions=functions)
+    return TablePolicy(
+        customer_id=customer_id, tables=table_map, functions=functions, retention=retention
+    )
 
 
 # --- Cache -------------------------------------------------------------------------------------
@@ -404,13 +422,66 @@ def check_sentinel_query(kql: str, policy: TablePolicy) -> None:
         )
     _Analyzer(tokens, policy).run()
     # Names come from the policy (the workspace's schema), never from the query text.
-    names = sorted(
-        {policy.tables[t.low][0] for t in tokens if t.kind == "id" and t.low in policy.tables}
-    )
+    names = sorted(policy.tables[low][0] for low in _tables_read(tokens, policy))
     shown = ", ".join(names[:_LOGGED_TABLES]) + (
         f" and {len(names) - _LOGGED_TABLES} more" if len(names) > _LOGGED_TABLES else ""
     )
     logger.info("Cost guard passed: the query reads Analytics tables [%s]", shown)
+
+
+def _tables_read(tokens: list[Token], policy: TablePolicy) -> set[str]:
+    """Lower-case names of the workspace tables that appear as identifiers in ``tokens``."""
+    return {t.low for t in tokens if t.kind == "id" and t.low in policy.tables}
+
+
+def tables_read(kql: str, policy: TablePolicy) -> set[str]:
+    """Lower-case names of the workspace tables ``kql`` mentions."""
+    return _tables_read(tokenize(kql), policy)
+
+
+def retention_notice(
+    kql: str, policy: TablePolicy, start: datetime, now: datetime
+) -> tuple[str, list[str]] | None:
+    """Describe the tables whose Analytics retention ends after ``start``, or ``None``.
+
+    Args:
+        kql: The KQL query (only used to find the tables it mentions).
+        policy: The workspace's table policy.
+        start: The start of the queried time range (timezone-aware).
+        now: The current time (timezone-aware).
+
+    Returns:
+        ``(message, table names)`` for the tables, named as the workspace spells them, with a
+        known retention that ``start`` reaches beyond; ``None`` if there are none.
+    """
+    sentences: list[str] = []
+    names: list[str] = []
+    for low in sorted(tables_read(kql, policy)):
+        analytics, total = policy.retention.get(low, (None, None))
+        if analytics is None or start >= now - timedelta(days=analytics):
+            continue
+        name = policy.tables[low][0]
+        cutoff = (now - timedelta(days=analytics)).date()
+        longer = total is not None and total > analytics
+        kept = f"{name} keeps {analytics} days in Analytics" + (
+            f" ({total} in total)" if longer and total is not None else ""
+        )
+        if longer and total is not None:
+            sentence = (
+                f"{kept}: rows before {cutoff} are in long-term retention / the Sentinel data "
+                "lake, which these queries cannot read, so that part of the range returns no rows."
+            )
+            gone = (now - timedelta(days=total)).date()
+            if start < now - timedelta(days=total):
+                sentence += f" Rows before {gone} are gone entirely."
+        else:
+            sentence = (
+                f"{kept}: rows before {cutoff} are no longer available, so that part of the "
+                "range returns no rows."
+            )
+        sentences.append(sentence)
+        names.append(name)
+    return (" ".join(sentences), names) if sentences else None
 
 
 def _reject(message: str) -> ConfigurationError:
