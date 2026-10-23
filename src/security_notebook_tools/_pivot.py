@@ -13,6 +13,7 @@ from ._errors import public_call
 from ._exceptions import ConfigurationError
 from ._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR
 from ._log import dependency_call
+from ._query import _check_bool
 
 logger = logging.getLogger("security_notebook_tools.pivot")
 
@@ -82,8 +83,9 @@ def pivot_dataframe(
         ConfigurationError: An argument is invalid: a name is empty, repeated, used in more than
             one of ``index``, ``columns`` and ``values`` or missing from ``df``; ``agg_func`` or
             ``fill_value`` is given without ``values``; ``max_columns`` is not a positive integer
-            or ``None``; there are more columns than ``max_columns``; a generated header equals an
-            ``index`` column or another header; or pandas cannot aggregate.
+            or ``None``; ``totals`` or ``debug`` is not a bool; there are more columns than
+            ``max_columns``; a generated header equals an ``index`` column or another header;
+            or pandas cannot aggregate.
 
     Example:
         >>> df = exec_query("SigninLogs | project UserPrincipalName, ResultType, Duration")
@@ -128,6 +130,7 @@ def pivot_dataframe(
             )
         if not isinstance(totals, bool):
             raise ConfigurationError(f"totals must be a bool, got {totals!r}.")
+        _check_bool("debug", debug)
         named = idx + cols + (vals or [])
         if len(set(named)) != len(named):
             shared = sorted({n for n in named if named.count(n) > 1})

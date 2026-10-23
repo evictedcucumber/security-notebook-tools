@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest import mock
 
 import pandas as pd
@@ -140,6 +140,33 @@ def test_adx_missing_config(adx, monkeypatch):
         snt.exec_query("T", target="adx")
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"kql": 5}, "kql must be a string"),
+        ({"kql": None}, "kql must be a string"),
+        ({"kql": "  \n"}, "blank"),
+        ({"timeout": "60"}, "timeout"),
+        ({"timeout": 1.5}, "timeout"),
+        ({"timeout": True}, "timeout"),
+        ({"timeout": float("nan")}, "timeout"),
+        ({"timeout": -1}, "timeout"),
+        ({"cache": 1}, "cache must be a bool"),
+        ({"debug": "yes"}, "debug must be a bool"),
+        ({"timespan": [datetime(2026, 1, 1), datetime(2026, 1, 2)]}, "timespan"),
+        ({"timespan": timedelta(0)}, "timespan"),
+        ({"timespan": (datetime(2026, 1, 1),)}, "timespan"),
+        ({"timespan": "1d"}, "timespan"),
+    ],
+)
+def test_exec_query_validation(sentinel, kwargs, match):
+    cls, _ = sentinel
+    args = {"kql": "T", **kwargs}
+    with pytest.raises(ConfigurationError, match=match):
+        snt.exec_query(**args)
+    cls.return_value.query_tables.assert_not_called()
+
+
 def test_invalid_arguments(adx):
     with pytest.raises(ConfigurationError, match="timespan"):
         snt.exec_query("T", timedelta(days=1), target="adx")
@@ -177,7 +204,6 @@ def test_invalid_config_values(sentinel, adx, monkeypatch):
 
 # --- exec_batch_query ---------------------------------------------------------------------------
 
-from datetime import UTC, datetime  # noqa: E402
 
 from security_notebook_tools._exceptions import QueryError  # noqa: E402
 
@@ -335,6 +361,13 @@ def test_batch_adx_rejects_management_command(adx):
         ({"interval": timedelta(0)}, "interval"),
         ({"interval": timedelta(days=-1)}, "interval"),
         ({"timeout": 0}, "timeout"),
+        ({"timeout": 1.5}, "timeout"),
+        ({"timeout": True}, "timeout"),
+        ({"interval": 86400}, "interval must be a timedelta"),
+        ({"end": "2026-01-02"}, "end must be"),
+        ({"end": date(2026, 1, 2)}, "end must be"),
+        ({"cache": 0}, "cache must be a bool"),
+        ({"debug": None}, "debug must be a bool"),
         ({"target": "other"}, "Unknown target"),
         ({"end": D0}, "before end"),
         ({"end": D0 - timedelta(days=1)}, "before end"),
@@ -345,6 +378,23 @@ def test_batch_validation(sentinel, kwargs, match):
     kwargs = {"end": D0 + timedelta(days=1), **kwargs}
     with pytest.raises(ConfigurationError, match=match):
         snt.exec_batch_query(FILTER, D0, **kwargs)
+    cls.return_value.query_tables.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("args", "match"),
+    [
+        ((5, D0), "kql must be a string"),
+        (("  ", D0), "blank"),
+        ((FILTER, "2026-01-01"), "start must be"),
+        ((FILTER, date(2026, 1, 1)), "start must be"),
+        ((FILTER, None), "start must be"),
+    ],
+)
+def test_batch_argument_types(sentinel, args, match):
+    cls, _ = sentinel
+    with pytest.raises(ConfigurationError, match=match):
+        snt.exec_batch_query(*args)
     cls.return_value.query_tables.assert_not_called()
 
 

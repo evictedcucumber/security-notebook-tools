@@ -1,8 +1,14 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from security_notebook_tools._timerange import DEFAULT_TIMESPAN, has_time_filter, resolve_timespan
+from security_notebook_tools._exceptions import ConfigurationError
+from security_notebook_tools._timerange import (
+    DEFAULT_TIMESPAN,
+    has_time_filter,
+    resolve_timespan,
+    validate_timespan,
+)
 
 
 @pytest.mark.parametrize(
@@ -56,3 +62,48 @@ def test_param_and_filter_warns(caplog):
     span = timedelta(days=30)
     assert resolve_timespan("T | where TimeGenerated > ago(7d)", span) == span
     assert "narrower range wins" in caplog.text
+
+
+A = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "good",
+    [
+        None,
+        timedelta(hours=1),
+        (A, A + timedelta(days=1)),
+        (A, timedelta(days=1)),
+        (datetime(2026, 1, 1), A + timedelta(days=1)),  # naive start, aware end
+        (A, datetime(2026, 1, 2)),  # aware start, naive end
+        (datetime(2026, 1, 1), datetime(2026, 1, 2)),
+    ],
+)
+def test_validate_timespan_accepts(good):
+    assert validate_timespan(good) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        timedelta(0),
+        timedelta(days=-1),
+        [A, A + timedelta(days=1)],
+        "1d",
+        86400,
+        (A,),
+        (A, A, A),
+        (date(2026, 1, 1), date(2026, 1, 2)),
+        (date(2026, 1, 1), timedelta(days=1)),
+        (A, date(2026, 1, 2)),
+        (A, timedelta(0)),
+        (A, timedelta(days=-1)),
+        (A, A),
+        (A, A - timedelta(days=1)),
+        (datetime(2026, 1, 2), A),  # naive start after aware end
+        (A, "later"),
+    ],
+)
+def test_validate_timespan_rejects(bad):
+    with pytest.raises(ConfigurationError, match="timespan"):
+        validate_timespan(bad)
