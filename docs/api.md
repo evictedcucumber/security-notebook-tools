@@ -39,10 +39,10 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 
 | Name | Description |
 | --- | --- |
-| `kql` | The KQL query. With `target="adx"`, text starting with `.` (after leading whitespace) is run as a management command, but only `.show` commands (such as `.show tables`, case-insensitive) are allowed; any other command raises `ConfigurationError` without contacting the service. Every ADX request is sent read-only (`request_readonly`), and ADX text using `cluster()`, `external_table()`, `externaldata` or a data-reading `evaluate` plugin (`sql_request`, `http_request`, `python`, `r` ...) is rejected, as is text with an unterminated string, control characters or non-ASCII characters outside strings and comments. With `target="sentinel"` it must pass the cost guard. |
-| `timespan` | Sentinel only. A `timedelta` (the period ending now), a `(start, end)` tuple of datetimes, or a `(start, timedelta)` tuple. Passing it with `target="adx"` raises `ConfigurationError`; filter on time in the KQL instead. |
+| `kql` | The KQL query, a non-blank string. With `target="adx"`, text starting with `.` (after leading whitespace) is run as a management command, but only `.show` commands (such as `.show tables`, case-insensitive) are allowed; any other command raises `ConfigurationError` without contacting the service. Every ADX request is sent read-only (`request_readonly`), and ADX text using `cluster()`, `external_table()`, `externaldata` or a data-reading `evaluate` plugin (`sql_request`, `http_request`, `python`, `r` ...) is rejected, as is text with an unterminated string, control characters or non-ASCII characters outside strings and comments. With `target="sentinel"` it must pass the cost guard. |
+| `timespan` | Sentinel only. A `timedelta` (the period ending now), a `(start, end)` tuple of datetimes, or a `(start, timedelta)` tuple (positive length; a naive datetime is taken to be UTC). Passing it with `target="adx"` raises `ConfigurationError`; filter on time in the KQL instead. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
-| `timeout` | Server-side timeout in seconds (default 300); must be positive. Applies to both targets. |
+| `timeout` | Server-side timeout in seconds (default 300); must be a positive `int`. Applies to both targets. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (clients, credentials, table policy, the query itself). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
@@ -221,7 +221,9 @@ and `SystemExit` are never wrapped.
 
 ### Raises
 
-- `ConfigurationError` (also a `ValueError`): `timeout` is not positive, `target` is unknown,
+- `ConfigurationError` (also a `ValueError`): `kql` is not a string or is blank, `timeout` is not a positive
+  integer, `cache` or `debug` is not a bool, `target` is unknown, `timespan` is not a positive
+  `timedelta` or a `(start, end)` / `(start, timedelta)` tuple of datetimes with a positive length,
   `timespan` is combined with `target="adx"`, a required environment variable is unset or invalid,
   `SENTINEL_WORKSPACE_ID` and the workspace named by `SENTINEL_SUBSCRIPTION_ID`,
   `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME` differ, an ADX
@@ -311,12 +313,12 @@ after the first window, so a typo fails before the other windows run.
 
 | Name | Description |
 | --- | --- |
-| `kql` | The KQL query. Do not define `BatchStart` or `BatchEnd` yourself. It must filter with `>= BatchStart` and `< BatchEnd` (see above), and with `target="adx"` it may not start with `.` (management commands). |
-| `start` | Start of the period, or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
-| `end` | End of the period (exclusive); defaults to now in UTC. Naive datetimes are taken to be UTC. |
-| `interval` | Window length (default 1 day); must be positive. |
+| `kql` | The KQL query, a non-blank string. Do not define `BatchStart` or `BatchEnd` yourself. It must filter with `>= BatchStart` and `< BatchEnd` (see above), and with `target="adx"` it may not start with `.` (management commands). |
+| `start` | A `datetime` (start of the period), or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
+| `end` | A `datetime` (end of the period, exclusive) or `None`; defaults to now in UTC. Naive datetimes are taken to be UTC. |
+| `interval` | Window length, a `timedelta` (default 1 day); must be positive. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
-| `timeout` | Server-side timeout in seconds for each window (default 300); must be positive. |
+| `timeout` | Server-side timeout in seconds for each window (default 300); must be a positive `int`. |
 | `max_workers` | Windows to run at once (default 1: one after another); an integer from 1 to 5. The cap is the Log Analytics limit of 5 concurrent queries per user; more only queue on the server, and the wait counts against `timeout`. ADX's concurrency limit is shared by everyone using the cluster, so a high value can throttle other users. |
 | `merge_on` | Column name or names to group the merged rows by. Give it together with `agg_column`; non-empty, no overlap with `agg_column`. |
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
@@ -338,7 +340,9 @@ results, adding columns that only later windows have.
 
 ### Raises
 
-* `ConfigurationError`: `interval` or `timeout` is not positive, `max_workers` is not an integer
+* `ConfigurationError`: `kql` is not a string or is blank, `start` is not a datetime or
+  timedelta, `end` is not a datetime or `None`, `interval` is not a positive `timedelta`,
+  `timeout` is not a positive integer, `cache` or `debug` is not a bool, `max_workers` is not an integer
   from 1 to 5, `start` is not before `end`,
   `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
   `< BatchEnd`, compares them in another form or defines them (checked before any query),
@@ -413,8 +417,8 @@ grouped, and a `real` shown in exponent form (`1e+20`) is left as it is.
 | `max_rows` | Show at most this many rows (default 1000), with a caption giving the total. `None` shows every row. Rendering very large tables can make a notebook slow. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
-`max_rows` and `debug` are keyword-only. `ValueError` is raised if `max_rows` is not a positive
-integer or `None`.
+`max_rows` and `debug` are keyword-only. `ValueError` is raised if `df` is not a DataFrame, `debug` is not a bool, or `max_rows` is not a
+positive integer or `None`.
 
 ```python
 from security_notebook_tools import exec_query, format_dataframe
@@ -476,7 +480,7 @@ totals stand out. `df` is not modified, and a `df` with no rows gives just the `
 (`ConfigurationError`) if a name is empty, repeated, used in more than one of `index`, `columns` and
 `values` or missing from `df` (the message lists the available columns); if `agg_func` or
 `fill_value` is given without `values`; if `agg_func` is not a non-empty string or a callable; if
-`max_columns` is not a positive integer or `None`, or the pivot would exceed it; if headers
+`max_columns` is not a positive integer or `None`, or the pivot would exceed it; if `totals` or `debug` is not a bool; if headers
 collide; or if pandas cannot aggregate.
 
 ```python

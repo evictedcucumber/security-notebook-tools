@@ -281,7 +281,8 @@ def format_dataframe(
         expression in a cell; chain further ``Styler`` methods on it if you like.
 
     Raises:
-        ValueError: ``max_rows`` is not a positive integer or ``None``.
+        ValueError: ``df`` is not a DataFrame, ``debug`` is not a bool, or ``max_rows`` is not a
+            positive integer or ``None``.
 
     Example:
         >>> from security_notebook_tools import exec_query, format_dataframe
@@ -299,6 +300,10 @@ def format_dataframe(
         columns=shape[1] if shape else None,
         max_rows=max_rows,
     ) as call:
+        if not isinstance(df, pd.DataFrame):
+            raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
+        if not isinstance(debug, bool):
+            raise ValueError(f"debug must be a bool, got {debug!r}.")
         if max_rows is not None and (
             isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
         ):

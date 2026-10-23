@@ -10,6 +10,15 @@
   (`1 000 000 000.00000`). The fraction is not grouped, and a `real` in exponent form (`1e+20`)
   is left as it is.
 
+- Argument validation is stricter and happens before anything is sent (all `ConfigurationError`,
+  except `format_dataframe`, which raises `ValueError`): `timeout` must be a positive `int` (a
+  float, string or bool is rejected); `cache` and `debug` must be bool; `kql` must be a non-blank
+  string; `exec_query`'s `timespan` must be a positive `timedelta` or a `(start, end)` /
+  `(start, timedelta)` tuple of datetimes with a positive length; `exec_batch_query`'s `start`
+  must be a datetime or timedelta, `end` a datetime or `None` and `interval` a `timedelta`;
+  `format_dataframe`'s `df` must be a DataFrame. These used to fail deep in pandas or the SDK
+  (reported as an unexpected `QueryError`) or were silently accepted.
+
 ### Added
 
 - `debug=False` keyword-only argument on `exec_query`, `exec_batch_query`, `format_dataframe` and

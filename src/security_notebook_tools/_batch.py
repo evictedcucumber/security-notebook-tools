@@ -31,7 +31,16 @@ from ._log import (
     mark_failure_logged,
     redact_exception_text,
 )
-from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel
+from ._query import (
+    DEFAULT_TIMEOUT,
+    Target,
+    _check_bool,
+    _check_kql,
+    _check_timeout,
+    _query_adx,
+    _query_sentinel,
+)
+from ._timerange import validate_window_args
 
 logger = logging.getLogger("security_notebook_tools.batch")
 
@@ -482,17 +491,17 @@ def exec_batch_query(
     ``"sum"``, then divide in pandas. Null keys are kept as their own group, as in KQL.
 
     Args:
-        kql: The KQL query. It must not begin with ``.`` on ADX (management commands cannot be
-            windowed). Do not define ``BatchStart`` or ``BatchEnd`` yourself.
+        kql: The KQL query, a non-blank string. It must not begin with ``.`` on ADX (management
+            commands cannot be windowed). Do not define ``BatchStart`` or ``BatchEnd`` yourself.
             It must filter on the window as described above.
-        start: The start of the period, or a ``timedelta`` meaning that long before ``end``.
-            A naive datetime is taken to be UTC.
+        start: A ``datetime`` (the start of the period), or a ``timedelta`` meaning that long
+            before ``end``. A naive datetime is taken to be UTC.
         end: The end of the period (exclusive); defaults to now in UTC. A naive datetime is
             taken to be UTC.
         interval: The length of each window (default 1 day); must be positive.
         target: ``"sentinel"`` (default) or ``"adx"``.
-        timeout: Server-side timeout in seconds for each window (default 300); must be
-            positive.
+        timeout: Server-side timeout in seconds for each window (default 300); must be a
+            positive ``int``.
         max_workers: How many windows run at once (default 1: one after another); an integer
             from 1 to 5. The cap is the Log Analytics limit of 5 concurrent queries per user;
             further queries only queue on the server, and the wait counts against ``timeout``.
@@ -528,7 +537,10 @@ def exec_batch_query(
         ``mean``, ``median``, ``std`` and ``var``, and has no entry otherwise.
 
     Raises:
-        ConfigurationError: ``interval`` or ``timeout`` is not positive, ``max_workers`` is not an
+        ConfigurationError: ``kql`` is not a string or is blank, ``start`` is not a datetime or
+            timedelta, ``end`` is not a datetime or ``None``, ``interval`` is not a positive
+            ``timedelta``, ``timeout`` is not a positive integer, ``cache`` or ``debug`` is not
+            a bool, ``max_workers`` is not an
             integer from 1 to 5, ``start`` is not before ``end``, ``target`` is unknown, the ADX
             KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
             ``< BatchEnd`` (checked before any query, on both targets), defines ``BatchStart`` or
@@ -573,12 +585,13 @@ def exec_batch_query(
         kql=fingerprint(kql),
     ) as call:
         now = datetime.now(UTC)
+        _check_kql(kql)
+        validate_window_args(start, end, interval)
         if interval <= timedelta(0):
             raise ConfigurationError(f"interval must be positive, got {interval}.")
-        if timeout <= 0:
-            raise ConfigurationError(
-                f"timeout must be a positive number of seconds, got {timeout}."
-            )
+        _check_timeout(timeout)
+        _check_bool("cache", cache)
+        _check_bool("debug", debug)
         if (
             isinstance(max_workers, bool)
             or not isinstance(max_workers, int)
