@@ -11,7 +11,8 @@
   recursively, until a half would be shorter than `min_interval`; then the batch fails and the
   error names the smallest window tried. Each split is logged at WARNING. The result has the
   same shape as an unsplit run. `min_interval` must be positive and not longer than `interval`
-  (`ConfigurationError` otherwise).
+  (`ConfigurationError` otherwise). With `cache=True` a window that timed out is remembered
+  until `clear_cache()`, so a re-run splits it at once instead of waiting for another timeout.
 
 - Sentinel queries and `exec_batch_query` now warn (a `UserWarning` plus a WARNING log line, no
   KQL text) when the time range starts more than a day before the Analytics retention

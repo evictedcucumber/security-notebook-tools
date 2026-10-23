@@ -317,7 +317,10 @@ names the smallest window tried. Each split is logged at WARNING (window bounds,
 ran, the new size), never the KQL. The halves' rows are concatenated in time order, so the result
 has the same shape as an unsplit run and goes through `merge_on`/`agg_column` unchanged. Use it
 for a few heavy windows (old data is slower to scan) without shrinking `interval` for all of them.
-Without `min_interval` a window that times out fails the batch.
+With `cache=True` a window that timed out is remembered (keyed like the result cache, so
+by query text, bounds and `timeout`) until `clear_cache()`, and a re-run splits it at once
+instead of waiting for another timeout; the halves come from the result cache. `cache=False`
+tries every window whole again. Without `min_interval` a window that times out fails the batch.
 
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
 BatchEnd = datetime("...");` added in front of your KQL. The window is half-open, so the KQL must

@@ -34,7 +34,16 @@ from ._log import (
     mark_failure_logged,
     redact_exception_text,
 )
-from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel, _warn_retention
+from ._query import (
+    DEFAULT_TIMEOUT,
+    Target,
+    _query_adx,
+    _query_sentinel,
+    _warn_retention,
+    remember_timed_out,
+    timed_out_before,
+    window_key,
+)
 
 logger = logging.getLogger("security_notebook_tools.batch")
 
@@ -81,13 +90,15 @@ class _Stopped(Exception):
 class _WindowTimeout(QueryTimeoutError):
     """A window's query timed out (the service said so, or the connection was cut off late).
 
-    ``elapsed`` is how long the last attempt ran, in seconds.
+    ``elapsed`` is how long the last attempt ran, in seconds; ``detail`` says in a few words what
+    happened (without advice), for the message of a window that cannot be split further.
     """
 
-    def __init__(self, message: str, elapsed: float) -> None:
-        """Store how long the attempt ran alongside the message."""
+    def __init__(self, message: str, elapsed: float, detail: str = "") -> None:
+        """Store how long the attempt ran, and what happened, alongside the message."""
         super().__init__(message)
         self.elapsed = elapsed
+        self.detail = detail or f"the query timed out after {elapsed:.0f} s"
 
 
 def _utc(value: datetime) -> datetime:
@@ -102,6 +113,11 @@ def _literal(value: datetime) -> str:
     by the KQL tokenizer behind the cost guard (ambiguous number literal).
     """
     return f'datetime("{value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}")'
+
+
+def _prefix(bounds: tuple[datetime, datetime]) -> str:
+    """The ``let`` statements that define ``BatchStart`` and ``BatchEnd`` for a window."""
+    return f"let BatchStart = {_literal(bounds[0])}; let BatchEnd = {_literal(bounds[1])};\n"
 
 
 def _windows(
@@ -242,7 +258,7 @@ def _attempt_window(
     """
     w_start, w_end = bounds
     name = f"Batch window {label} ({w_start} to {w_end})"
-    prefix = f"let BatchStart = {_literal(w_start)}; let BatchEnd = {_literal(w_end)};\n"
+    prefix = _prefix(bounds)
     retries = 0
     while True:
         attempt_start = _clock()
@@ -273,6 +289,7 @@ def _attempt_window(
                     "dropped by the network, so it is not retried. Use a smaller `interval`, set "
                     f"`min_interval` to split such windows, or raise `timeout`: {exc}",
                     elapsed,
+                    f"the connection was reset or timed out after {elapsed:.0f} s",
                 ) from exc
             if isinstance(exc, QueryTimeoutError):
                 logger.warning(
@@ -346,19 +363,44 @@ def _run_or_split(
     retries), and are split again the same way, until a half would be shorter than
     ``min_interval``. Their frames are merged like the windows of a batch.
 
+    With ``cache`` on, a window that times out is remembered (see ``remember_timed_out`` in
+    :mod:`._query`; ``clear_cache()`` forgets it), and a later run with ``min_interval`` splits
+    it at once instead of waiting for another timeout; the halves come from the result cache.
+
     Raises:
         QueryTimeoutError: The window timed out and cannot be split further (or splitting is
             off: ``min_interval`` is None).
         QueryError: A window failed for another reason.
         _Stopped: ``stop`` was set before a half started or while waiting to retry.
     """
-    try:
-        return _attempt_window(label, bounds, kql, target, timeout, cache, stop)
-    except _WindowTimeout as exc:
-        if min_interval is None:
-            raise
-        timed_out = exc
     w_start, w_end = bounds
+    key = None
+    if cache:
+        # The result cache keys on the same things: a window that timed out is not stored there.
+        key = window_key(target, _prefix(bounds) + kql, bounds, timeout)
+    earlier = timed_out_before(key) if key is not None and min_interval is not None else None
+    if earlier is not None:
+        logger.info(
+            "Batch %s timed out after %.0f s in an earlier run; splitting it without trying it "
+            "whole (clear_cache() or cache=False tries it whole again)",
+            label,
+            earlier,
+        )
+        timed_out = _WindowTimeout(
+            f"Batch window {label} ({w_start} to {w_end}) timed out in an earlier run",
+            earlier,
+            f"it timed out after {earlier:.0f} s in an earlier run; clear_cache() or cache=False "
+            "tries it whole again",
+        )
+    else:
+        try:
+            return _attempt_window(label, bounds, kql, target, timeout, cache, stop)
+        except _WindowTimeout as exc:
+            if key is not None:
+                remember_timed_out(key, exc.elapsed)
+            if min_interval is None:
+                raise
+            timed_out = exc
     size = w_end - w_start
     half = size / 2
     if half < min_interval:
@@ -373,10 +415,10 @@ def _run_or_split(
             min_interval,
         )
         raise QueryTimeoutError(
-            f"Batch window {label} ({w_start} to {w_end}) timed out and was not split further: "
-            f"the smallest window tried was {size} (half of it is shorter than "
-            f"min_interval={min_interval}). Raise `timeout`, or lower `min_interval` or the "
-            f"query's cost: {timed_out}"
+            f"Batch window {label} ({w_start} to {w_end}) timed out ({timed_out.detail}) and was "
+            f"not split further: the smallest window tried was {size} (half of it is shorter "
+            f"than min_interval={min_interval}). Use a smaller `min_interval` or raise "
+            "`timeout`; the original error is chained."
         ) from timed_out
     middle = w_start + half
     logger.warning(
@@ -608,7 +650,10 @@ def exec_batch_query(
     With ``min_interval`` a window that times out is not failed but split in two and each half
     run as a window of its own, again and again down to ``min_interval``; use it when a few
     windows (typically over old data, which is slower to scan) are too heavy for ``timeout``.
-    Cached windows are reused, and the halves are cached like any window.
+    Cached windows are reused, and the halves are cached like any window. With ``cache=True`` a
+    window that timed out is also remembered (until ``clear_cache()``), so re-running the batch
+    splits it at once instead of waiting for another timeout; ``cache=False`` tries every
+    window whole again.
 
     Window bounds reach the query in two ways:
 
@@ -654,8 +699,10 @@ def exec_batch_query(
             ``BatchStart``/``BatchEnd`` and API time range; a half that times out is cut again,
             and so on, until a half would be shorter than ``min_interval``, where the batch
             fails and the error names the smallest window tried. Must be positive and not longer
-            than ``interval``. Every split is logged at WARNING. The result is the same as
-            without splitting, as the halves are concatenated in time order.
+            than ``interval``. Every split is logged at WARNING. With ``cache=True`` a window
+            that timed out is remembered until ``clear_cache()``, so a re-run splits it at once.
+            The result is the same as without splitting, as the halves are concatenated in time
+            order.
         target: ``"sentinel"`` (default) or ``"adx"``.
         timeout: Server-side timeout in seconds for each window (default 300); must be
             positive.

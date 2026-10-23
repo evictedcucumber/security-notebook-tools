@@ -1303,7 +1303,11 @@ def test_batch_min_interval_stops_at_the_minimum_and_names_the_smallest_window(s
     message = str(ei.value)
     assert "smallest window tried was 1 day, 0:00:00" in message
     assert "min_interval=1 day, 0:00:00" in message
-    assert "GatewayTimeout" in message
+    assert "Use a smaller `min_interval` or raise `timeout`" in message
+    assert "set `min_interval`" not in message  # the inner hint would contradict the user
+    assert "use a smaller `interval`" not in message
+    inner = ei.value.__cause__.__cause__  # _WindowTimeout, then the service's error
+    assert "GatewayTimeout" in str(inner)
     assert isinstance(ei.value, QueryError)
     # 4 days -> 2 days -> 1 day; the first half failed, so the second was never tried
     assert [span[1] - span[0] for span, _ in seen] == [timedelta(days=d) for d in (4, 2, 1)]
@@ -1428,7 +1432,7 @@ def test_batch_min_interval_a_half_is_retried_when_throttled(sentinel, backoff):
     assert backoff[0] == [1.0]
 
 
-def test_batch_min_interval_stop_is_honoured_between_halves():
+def test_batch_min_interval_stop_is_honoured_between_halves(sentinel):
     stop = threading.Event()
     seen = []
 
@@ -1527,10 +1531,103 @@ def test_batch_min_interval_halves_are_cached_like_windows(sentinel):
     cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1))
     args = (FILTER, D0, _days(2))
     kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
-    snt.exec_batch_query(*args, **kwargs)
+    df = snt.exec_batch_query(*args, **kwargs)
     assert cls.return_value.query_tables.call_count == 3  # timed out, then two halves
-    snt.exec_batch_query(*args, **kwargs)
-    assert cls.return_value.query_tables.call_count == 4  # only the timed out window reruns
+    again = snt.exec_batch_query(*args, **kwargs)
+    # The window that timed out is remembered: it is not tried whole (and not waited for) again.
+    assert cls.return_value.query_tables.call_count == 3
+    pd.testing.assert_frame_equal(again, df)
+
+
+def test_batch_a_rerun_goes_straight_to_the_halves_of_a_timed_out_window(sentinel, caplog):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
+    with pytest.raises(QueryTimeoutError):  # no min_interval: the timeout is only remembered
+        snt.exec_batch_query(FILTER, D0, _days(2), interval=timedelta(days=2))
+    assert [span for span, _ in seen] == [(D0, _days(2))]
+    seen.clear()
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    df = snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    assert [span for span, _ in seen] == [(D0, _days(1)), (_days(1), _days(2))]
+    assert df["h"].tolist() == list(range(48))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("in an earlier run; splitting it without trying it whole" in m for m in messages)
+    assert any("splitting it into two windows" in m for m in messages)
+
+
+def test_batch_timed_out_windows_are_only_remembered_for_the_same_query_and_timeout(sentinel):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    seen.clear()
+    snt.exec_batch_query(FILTER, D0, _days(2), timeout=200, **kwargs)  # other timeout
+    assert (D0, _days(2)) in [span for span, _ in seen]
+    seen.clear()
+    snt.exec_batch_query(FILTER + " | take 5", D0, _days(2), **kwargs)  # other query
+    assert (D0, _days(2)) in [span for span, _ in seen]
+    seen.clear()
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    assert (D0, _days(2)) not in [span for span, _ in seen]
+
+
+def test_batch_cache_false_neither_remembers_nor_consults_timed_out_windows(sentinel):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
+    snt.exec_batch_query(FILTER, D0, _days(2), cache=False, **kwargs)
+    seen.clear()
+    snt.exec_batch_query(FILTER, D0, _days(2), cache=False, **kwargs)
+    assert (D0, _days(2)) in [span for span, _ in seen]  # tried whole again
+    seen.clear()
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)  # cache=True: nothing was remembered
+    assert (D0, _days(2)) in [span for span, _ in seen]
+
+
+def test_clear_cache_forgets_timed_out_windows(sentinel):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    snt.clear_cache()
+    seen.clear()
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    assert (D0, _days(2)) in [span for span, _ in seen]
+
+
+def test_batch_remembered_timeout_at_the_minimum_fails_without_a_request(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(0))
+    kwargs = {"min_interval": timedelta(days=1)}
+    with pytest.raises(QueryTimeoutError, match="smallest window tried was 1 day"):
+        snt.exec_batch_query(FILTER, D0, _days(1), **kwargs)
+    cls.return_value.query_tables.reset_mock()
+    with pytest.raises(QueryTimeoutError, match="timed out after .* s in an earlier run"):
+        snt.exec_batch_query(FILTER, D0, _days(1), **kwargs)
+    cls.return_value.query_tables.assert_not_called()
+
+
+def test_batch_adx_timed_out_windows_are_remembered_too(adx):
+    cls, _ = adx
+    calls = []
+
+    def query(kql, database, properties=None):
+        calls.append(kql)
+        if 'BatchStart = datetime("2026-01-01' in kql and 'BatchEnd = datetime("2026-01-03' in kql:
+            raise QueryTimeoutError("ADX query failed: Request_Timeout")
+        return [pd.DataFrame({"a": [len(calls)]})]
+
+    cls.return_value.query_tables.side_effect = query
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1), "target": "adx"}
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    assert len(calls) == 3  # whole (timed out), then the two halves
+    snt.exec_batch_query(FILTER, D0, _days(2), **kwargs)
+    assert len(calls) == 3  # the halves come from the result cache, the whole is not retried
 
 
 @pytest.mark.parametrize(

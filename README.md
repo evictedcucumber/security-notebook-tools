@@ -196,7 +196,9 @@ answer within `timeout` plus 30 seconds on Sentinel, or a connection reset after
 of `timeout`) into two
 halves, again and again, until a half would be shorter than `min_interval`; then the batch fails
 and the error names the smallest window tried. The result is the same as without splitting. It
-must be positive and not longer than `interval`; by default a timed-out window fails the batch.
+must be positive and not longer than `interval`; by default a timed-out window fails the batch. A re-run (with `cache=True`) splits a window that
+timed out before at once, instead of waiting for another timeout; `clear_cache()` or
+`cache=False` tries it whole again.
 
 ```python
 df = exec_batch_query(

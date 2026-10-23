@@ -129,6 +129,46 @@ def _adx_tables(
     return tuple(client.query_tables(kql, database, properties=props))
 
 
+# Windows of a batch that timed out, so a re-run goes straight to splitting them instead of
+# waiting a full timeout again. Keyed like the result cache (target, connection, exact query text
+# with the window's let-prefix, API time range, timeout); the value is how long the attempt ran.
+# Oldest entries are dropped past this size. Cleared by clear_cache().
+TIMED_OUT_SIZE = 512
+_timed_out: dict[tuple, float] = {}
+_timed_out_lock = threading.Lock()
+
+
+def window_key(target: Target, kql: str, timespan: Timespan | None, timeout: int) -> tuple:
+    """The identity of a batch window's query, as the result cache sees it (reads the env)."""
+    if target == "sentinel":
+        return (
+            "sentinel",
+            resolve_workspace_id(),
+            resolve_workspace_resource_id(),
+            resolve_tenant_id(),
+            kql,
+            timespan,
+            timeout,
+        )
+    database = validate_database(require(None, DATABASE_VAR, "database"))
+    return ("adx", resolve_cluster_uri(), resolve_tenant_id(), database, kql, timeout)
+
+
+def remember_timed_out(key: tuple, elapsed: float) -> None:
+    """Note that the window with this :func:`window_key` timed out after ``elapsed`` seconds."""
+    with _timed_out_lock:
+        _timed_out.pop(key, None)
+        _timed_out[key] = elapsed
+        while len(_timed_out) > TIMED_OUT_SIZE:
+            del _timed_out[next(iter(_timed_out))]
+
+
+def timed_out_before(key: tuple) -> float | None:
+    """Seconds the window ran before it timed out in an earlier run, or None if unknown."""
+    with _timed_out_lock:
+        return _timed_out.get(key)
+
+
 def _copies(tables: tuple[pd.DataFrame, ...] | list[pd.DataFrame]) -> list[pd.DataFrame]:
     """Return copies (attrs included) so callers cannot change a cached frame."""
     copies = []
@@ -209,7 +249,8 @@ def clear_cache() -> None:
     """Forget cached query results, and the cached clients, credentials and table plans.
 
     The next query fetches fresh data, creates new clients and credentials, and re-reads the
-    Sentinel table plans.
+    Sentinel table plans. It also forgets which batch windows timed out (see ``min_interval`` of
+    ``exec_batch_query``), so they are tried whole again.
 
     Example:
         >>> from security_notebook_tools import clear_cache
@@ -221,8 +262,11 @@ def clear_cache() -> None:
     _clear_clients()
     clear_credential_cache()
     clear_policy_cache()
+    with _timed_out_lock:
+        _timed_out.clear()
     logger.info(
-        "clear_cache: dropped %d stored result(s), the clients, credentials and table plans",
+        "clear_cache: dropped %d stored result(s), the clients, credentials, table plans and "
+        "the memory of timed-out batch windows",
         results,
     )
 
