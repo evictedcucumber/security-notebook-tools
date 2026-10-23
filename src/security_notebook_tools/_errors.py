@@ -255,7 +255,7 @@ def unexpected(logger: logging.Logger, operation: str, exc: BaseException) -> Qu
     Call it from an ``except Exception`` block and ``raise unexpected(...) from exc``. The log
     record carries ``exc_info`` and the message tells the reader to report it; the returned
     error names the operation and the original type and message, and the original is chained,
-    so the traceback is available even when logging is not configured.
+    so the traceback is also in the cell and in ``notebooks.log``.
 
     Args:
         logger: The module's logger.

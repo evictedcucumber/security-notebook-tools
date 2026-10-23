@@ -11,16 +11,13 @@ from typing import Any
 from azure.identity import AzureCliCredential
 
 from ._config import resolve_tenant_id
-from ._log import verbose_logging
 
 logger = logging.getLogger("security_notebook_tools.auth")
 
 _cache: dict[str | None, AzureCliCredential] = {}
 
 
-def get_credential(
-    tenant_id: str | None = None, *, verbose: bool = False, **kwargs: Any
-) -> AzureCliCredential:
+def get_credential(tenant_id: str | None = None, **kwargs: Any) -> AzureCliCredential:
     """Return a cached ``AzureCliCredential`` (run ``az login`` first).
 
     ``tenant_id`` defaults to ``$AZURE_TENANT_ID``; if neither is set, the CLI's current tenant
@@ -29,7 +26,6 @@ def get_credential(
 
     Args:
         tenant_id: Tenant to authenticate against. Defaults to ``$AZURE_TENANT_ID``.
-        verbose: If true, print this call's logs to the cell output.
         **kwargs: Passed to the ``AzureCliCredential`` constructor (only used on first
             creation for that tenant).
 
@@ -39,16 +35,15 @@ def get_credential(
     Raises:
         ConfigurationError: The tenant is not a GUID or domain name.
     """
-    with verbose_logging(verbose):
-        tenant_id = resolve_tenant_id(tenant_id)
-        tenant_desc = tenant_id or "CLI default tenant"
-        if tenant_id not in _cache:
-            logger.info("Creating AzureCliCredential (%s)", tenant_desc)
-            tenant_kw = {"tenant_id": tenant_id} if tenant_id else {}
-            _cache[tenant_id] = AzureCliCredential(**tenant_kw, **kwargs)
-        else:
-            logger.debug("Reusing cached AzureCliCredential (%s)", tenant_desc)
-        return _cache[tenant_id]
+    tenant_id = resolve_tenant_id(tenant_id)
+    tenant_desc = tenant_id or "CLI default tenant"
+    if tenant_id not in _cache:
+        logger.info("Creating AzureCliCredential (%s)", tenant_desc)
+        tenant_kw = {"tenant_id": tenant_id} if tenant_id else {}
+        _cache[tenant_id] = AzureCliCredential(**tenant_kw, **kwargs)
+    else:
+        logger.debug("Reusing cached AzureCliCredential (%s)", tenant_desc)
+    return _cache[tenant_id]
 
 
 def clear_credential_cache() -> None:

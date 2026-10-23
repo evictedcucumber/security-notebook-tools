@@ -68,7 +68,6 @@ def test_defaults(shell):
                 "target": "sentinel",
                 "timeout": DEFAULT_TIMEOUT,
                 "cache": True,
-                "verbose": False,
             },
         )
     ]
@@ -109,12 +108,11 @@ def test_timespan_call_expression(shell):
 
 
 def test_options_forwarded(shell):
-    run(shell, "--target adx --timeout 60 -v", "T")
+    run(shell, "--target adx --timeout 60", "T")
     assert shell.calls[0][2] == {
         "target": "adx",
         "timeout": 60,
         "cache": True,
-        "verbose": True,
     }
 
 

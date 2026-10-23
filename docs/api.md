@@ -7,8 +7,6 @@ from security_notebook_tools import (
     exec_query,
     format_dataframe,
     pivot_dataframe,
-    enable_logging,
-    disable_logging,
     clear_cache,
 )
 import security_notebook_tools
@@ -28,7 +26,6 @@ exec_query(
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
     cache: bool = True,
-    verbose: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -46,9 +43,8 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds (default 300); must be positive. Applies to both targets. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
-| `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
-`target`, `timeout`, `cache` and `verbose` are keyword-only.
+`target`, `timeout` and `cache` are keyword-only.
 
 ### Environment variables
 
@@ -217,10 +213,8 @@ Known failures are raised as `QueryError` (or a subclass) with a message that ex
 
 An error nobody anticipated is logged at ERROR with its traceback to the `security_notebook_tools`
 logger, and raised as a `QueryError` that names the operation and chains the original exception
-(its traceback shows in the notebook). It is not retried. Nothing is printed unless logging is
-set up, so to keep the log attach a handler, for example
-`logging.getLogger("security_notebook_tools").addHandler(logging.FileHandler("snt.log"))`, or call
-`enable_logging()`. Configuration and cost guard errors (`ConfigurationError`), `KeyboardInterrupt`
+(its traceback shows in the notebook). It is not retried. The log record is appended to
+`notebooks.log` (see [Logging](#logging)). Configuration and cost guard errors (`ConfigurationError`), `KeyboardInterrupt`
 and `SystemExit` are never wrapped.
 
 ### Raises
@@ -271,7 +265,6 @@ exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable = "sum",
     cache: bool = True,
-    verbose: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -326,7 +319,6 @@ after the first window, so a typo fails before the other windows run.
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
 | `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
-| `verbose` | If true, print this call's logs (INFO and above) to the cell output. |
 
 ### Returns
 
@@ -516,7 +508,6 @@ the package does not import IPython; it is only needed when the extension is loa
 | `--target` | `sentinel` (default) or `adx`. |
 | `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
 | `--no-cache` | Same as `cache=False`: skip the [result cache](#caching) for this cell. |
-| `-v`, `--verbose` | Same as `verbose=True`. |
 
 The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, a positional
 argument or a timespan expression that fails to evaluate raises `UsageError` before any query runs.
@@ -526,34 +517,6 @@ All other validation and errors come from `exec_query` unchanged.
 %%kql --timespan 1d12h
 SigninLogs | take 100
 ```
-
-## enable_logging
-
-```python
-enable_logging(level: int | str = logging.INFO) -> None
-```
-
-Print package logs to the current cell's output for the rest of the session, formatted as
-`HH:MM:SS LEVEL logger: message`. Calling it again only changes the level.
-
-| Name | Description |
-| --- | --- |
-| `level` | Minimum level, as a `logging` constant or a name such as `"DEBUG"`. Default `logging.INFO`. |
-
-```python
-from security_notebook_tools import enable_logging
-
-enable_logging("DEBUG")
-```
-
-## disable_logging
-
-```python
-disable_logging() -> None
-```
-
-Stop printing package logs to the notebook (undo `enable_logging`). Resets the package
-logger's level to `NOTSET`. Handlers you attached yourself are left alone.
 
 ## clear_cache
 
@@ -603,8 +566,22 @@ df = exec_query("SigninLogs | take 100", cache=False)  # runs again
 
 ## Logging
 
-All logs go through the standard `logging` module. Nothing is printed by default (a
-`NullHandler` is attached to the package logger).
+Every log record at INFO and above is appended to `notebooks.log` in your project root. Nothing
+is printed to the notebook cell; errors that cannot be recovered from still reach the cell as
+exceptions. The project root is the first directory, walking up from the current working
+directory, that contains `.git` or `pyproject.toml` (the working directory itself if there is
+none). The path is resolved on every record, so `os.chdir` is respected, and the file is created
+when the first record is written. Add `notebooks.log` to your `.gitignore`.
+
+Each line is an RFC 3339 UTC timestamp with milliseconds, the level, the logger name and the
+message; tracebacks follow on the next lines:
+
+```
+2026-10-23T14:03:12.345Z INFO security_notebook_tools.sentinel: Running Sentinel query ...
+```
+
+If the file cannot be opened or written, the record is dropped silently; logging never breaks a
+query. The records come from these loggers:
 
 | Logger | Emits |
 | --- | --- |
@@ -614,15 +591,6 @@ All logs go through the standard `logging` module. Nothing is printed by default
 | `security_notebook_tools.auth` | Credential creation |
 | `security_notebook_tools.timerange` | Time range decisions ("set in query", default, both applied) |
 | `security_notebook_tools.tablepolicy` | Cost guard: table plan lookups, cache use, rejected queries |
-
-Ways to see the logs:
-
-- `exec_query(..., verbose=True)`: that call only, INFO and above.
-- `enable_logging()` / `disable_logging()`: the whole session.
-- Your own configuration, e.g. `logging.getLogger("security_notebook_tools").setLevel("DEBUG")`
-  with your own handler.
-
-If logs are already being printed (via `enable_logging`), `verbose=True` does not duplicate them.
 
 ## `__version__`
 

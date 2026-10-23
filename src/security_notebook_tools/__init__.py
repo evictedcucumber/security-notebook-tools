@@ -24,18 +24,19 @@ Public API:
 * ``format_dataframe``: display a result with values formatted by their KQL type.
 * ``pivot_dataframe``: pivot a result into one row per key and one column per value of another.
 * ``clear_cache``: forget cached query results (and clients, credentials and table plans).
-* ``enable_logging``, ``disable_logging``: show the package's logs in the notebook.
 
 In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cell magic that
 runs the cell body as KQL through ``exec_query`` and displays it with ``format_dataframe``
 (see ``help(load_ipython_extension)``).
+
+Logging: every record at INFO and above is appended to ``notebooks.log`` in the project root
+(see ``security_notebook_tools._log``); nothing is printed to the cell. Gitignore the file.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
 from ._batch import exec_batch_query
 from ._format import format_dataframe
-from ._log import disable_logging, enable_logging
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
@@ -43,8 +44,6 @@ __version__ = "2.0.0"
 
 __all__ = [
     "clear_cache",
-    "disable_logging",
-    "enable_logging",
     "exec_batch_query",
     "exec_query",
     "format_dataframe",

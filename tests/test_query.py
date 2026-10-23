@@ -10,8 +10,6 @@ from security_notebook_tools._exceptions import ConfigurationError
 
 PUBLIC = {
     "clear_cache",
-    "disable_logging",
-    "enable_logging",
     "exec_batch_query",
     "exec_query",
     "format_dataframe",
@@ -149,20 +147,6 @@ def test_invalid_arguments(adx):
         snt.exec_query("T", timeout=0)
     with pytest.raises(ConfigurationError, match="target"):
         snt.exec_query("T", target="splunk")
-
-
-def test_verbose(sentinel, capsys):
-    cls, _ = sentinel
-
-    def fake_query_tables(*args, **kwargs):
-        logging.getLogger("security_notebook_tools.sentinel").info("ran")
-        return []
-
-    cls.return_value.query_tables.side_effect = fake_query_tables
-    assert snt.exec_query("T", verbose=True).empty
-    assert "ran" in capsys.readouterr().out
-    snt.exec_query("T")
-    assert capsys.readouterr().out == ""
 
 
 def test_adx_blocked_command_does_not_reach_service(monkeypatch):

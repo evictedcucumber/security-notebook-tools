@@ -45,7 +45,7 @@ from ._exceptions import (
 )
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
-from ._log import shorten, verbose_logging
+from ._log import shorten
 
 logger = logging.getLogger("security_notebook_tools.adx")
 
@@ -81,8 +81,6 @@ class ADXClient:
         cluster_uri: str | None = None,
         database: str | None = None,
         credential: AzureCliCredential | None = None,
-        *,
-        verbose: bool = False,
     ) -> None:
         """Create a client.
 
@@ -91,27 +89,24 @@ class ADXClient:
             database: Default database. Defaults to ``$ADX_DATABASE``; may be left unset if
                 every call passes a database.
             credential: Credential to use. Defaults to :func:`get_credential`.
-            verbose: Default for this client's methods; each method can override it.
 
         Raises:
             ConfigurationError: No cluster URI was given or set, or the cluster URI or
                 database name is invalid.
         """
-        self.verbose = verbose
-        with verbose_logging(verbose):
-            self.cluster_uri = resolve_cluster_uri(cluster_uri)
-            self.database = resolve_database(database)
-            with unexpected_errors(logger, "ADX client setup"):
-                self.credential = credential or get_credential()
-                kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
-                    self.cluster_uri, self.credential
-                )
-                self._client = KustoClient(kcsb)
-            logger.info(
-                "ADX client ready for %s (default database: %s)",
-                self.cluster_uri,
-                self.database or "none",
+        self.cluster_uri = resolve_cluster_uri(cluster_uri)
+        self.database = resolve_database(database)
+        with unexpected_errors(logger, "ADX client setup"):
+            self.credential = credential or get_credential()
+            kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
+                self.cluster_uri, self.credential
             )
+            self._client = KustoClient(kcsb)
+        logger.info(
+            "ADX client ready for %s (default database: %s)",
+            self.cluster_uri,
+            self.database or "none",
+        )
 
     def _db(self, database: str | None) -> str:
         """Resolve the database: argument, then client default, then ``$ADX_DATABASE``."""
@@ -217,7 +212,6 @@ class ADXClient:
         database: str | None = None,
         *,
         properties: Properties = None,
-        verbose: bool | None = None,
     ) -> list[pd.DataFrame]:
         """Run ``kql`` and return all primary result tables as DataFrames.
 
@@ -225,7 +219,6 @@ class ADXClient:
             kql: The KQL query.
             database: Database to run against. Defaults to the client's database.
             properties: Request options, as a dict or ``ClientRequestProperties``.
-            verbose: Override the client's ``verbose`` setting for this call.
 
         Raises:
             ConfigurationError: No database is available or it is invalid, or the KQL uses
@@ -240,8 +233,7 @@ class ADXClient:
             QueryThrottledError: The service throttled the request (HTTP 429 or a throttling
                 error). It is a ``QueryError``.
         """
-        with verbose_logging(self.verbose if verbose is None else verbose):
-            return self._execute("query", kql, database, properties)
+        return self._execute("query", kql, database, properties)
 
     def query(
         self,
@@ -249,13 +241,12 @@ class ADXClient:
         database: str | None = None,
         *,
         properties: Properties = None,
-        verbose: bool | None = None,
     ) -> pd.DataFrame:
         """Run ``kql`` and return the first primary result table (empty DataFrame if none).
 
         Takes the same arguments and raises the same errors as :meth:`query_tables`.
         """
-        tables = self.query_tables(kql, database, properties=properties, verbose=verbose)
+        tables = self.query_tables(kql, database, properties=properties)
         return tables[0] if tables else pd.DataFrame()
 
     def show(
@@ -264,7 +255,6 @@ class ADXClient:
         database: str | None = None,
         *,
         properties: Properties = None,
-        verbose: bool | None = None,
     ) -> pd.DataFrame:
         """Run a ``.show`` management command (e.g. ``".show tables"``), return its first table.
 
@@ -272,6 +262,5 @@ class ADXClient:
 
         Takes the same arguments and raises the same errors as :meth:`query_tables`.
         """
-        with verbose_logging(self.verbose if verbose is None else verbose):
-            tables = self._execute("command", command, database, properties)
+        tables = self._execute("command", command, database, properties)
         return tables[0] if tables else pd.DataFrame()

@@ -1,101 +1,105 @@
-"""Package logging and the ``verbose=True`` switch for notebook output.
+"""Always-on file logging for the package.
 
-All modules log to children of the ``security_notebook_tools`` logger. By default nothing is
-printed (a ``NullHandler`` is attached); configure ``logging`` yourself, call
-:func:`enable_logging` once per session, or pass ``verbose=True`` to a function to send its
-logs to the current cell's output.
+All modules log to children of the ``security_notebook_tools`` logger. Every record at INFO and
+above is appended to ``notebooks.log`` in the project root and nothing is printed to the notebook
+cell. The project root is the first directory, walking up from the current working directory,
+that contains ``.git`` or ``pyproject.toml``; if there is none, the working directory itself.
+The path is resolved on every record, so ``os.chdir`` in a notebook is respected, and the file is
+only created when the first record is written. Add ``notebooks.log`` to ``.gitignore``.
+
+Each line is ``<UTC RFC 3339 timestamp> <LEVEL> <logger>: <message>``, for example::
+
+    2026-10-23T14:03:12.345Z INFO security_notebook_tools.query: Running ...
+
+Failures to open or write the file are ignored so logging never breaks a query.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
+import time
+from pathlib import Path
+from typing import IO
 
 PACKAGE_LOGGER = "security_notebook_tools"
-LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-DATE_FORMAT = "%H:%M:%S"
+LOG_FILE_NAME = "notebooks.log"
+LOG_FORMAT = "%(asctime)s.%(msecs)03dZ %(levelname)s %(name)s: %(message)s"
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
+_ROOT_MARKERS = (".git", "pyproject.toml")
 
-logger = logging.getLogger(PACKAGE_LOGGER)
-logger.addHandler(logging.NullHandler())
+
+def project_root(start: Path | None = None) -> Path:
+    """Find the project root for ``start`` (default: the current working directory).
+
+    Args:
+        start: Directory to start from.
+
+    Returns:
+        The nearest ancestor (or ``start`` itself) containing ``.git`` or ``pyproject.toml``,
+        or ``start`` if there is none.
+    """
+    start = (start or Path.cwd()).resolve()
+    for directory in (start, *start.parents):
+        if any((directory / marker).exists() for marker in _ROOT_MARKERS):
+            return directory
+    return start
 
 
-class _NotebookHandler(logging.StreamHandler):
-    """Stream handler that writes to the current ``sys.stdout`` (Jupyter swaps it per cell)."""
+def log_file_path() -> Path:
+    """Return the path of ``notebooks.log`` in the current project root."""
+    return project_root() / LOG_FILE_NAME
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
+
+class _UtcFormatter(logging.Formatter):
+    """Formatter that renders timestamps in UTC."""
+
+    converter = time.gmtime
+
+
+class _ProjectFileHandler(logging.Handler):
+    """Append records to ``notebooks.log``, opening it lazily and following path changes."""
+
+    def __init__(self, level: int = logging.INFO) -> None:
+        super().__init__(level)
+        self.setFormatter(_UtcFormatter(LOG_FORMAT, DATE_FORMAT))
+        self._stream: IO[str] | None = None
+        self._path: Path | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.stream = sys.stdout
-        super().emit(record)
+        """Append one formatted record, silently dropping it if the file is unusable."""
+        try:
+            path = log_file_path()
+            if self._stream is None or path != self._path:
+                self._close_stream()
+                self._stream = path.open("a", encoding="utf-8")
+                self._path = path
+            self._stream.write(self.format(record) + "\n")
+            self._stream.flush()
+        except Exception:
+            self._close_stream()
+
+    def _close_stream(self) -> None:
+        stream, self._stream, self._path = self._stream, None, None
+        if stream is not None:
+            with contextlib.suppress(Exception):
+                stream.close()
+
+    def close(self) -> None:
+        """Close the open file, if any."""
+        self._close_stream()
+        super().close()
 
 
-def _has_notebook_handler() -> bool:
-    """True if a notebook handler is already attached to the package logger."""
-    return any(isinstance(h, _NotebookHandler) for h in logger.handlers)
+logger = logging.getLogger(PACKAGE_LOGGER)
+logger.setLevel(logging.INFO)
+file_handler = _ProjectFileHandler()
+logger.addHandler(file_handler)
 
 
-def enable_logging(level: int | str = logging.INFO) -> None:
-    """Print package logs to the notebook for the rest of the session.
-
-    Logs go to the current cell's output, formatted as ``HH:MM:SS LEVEL logger: message``.
-    Calling it again only changes the level. Undo with :func:`disable_logging`.
-
-    Args:
-        level: Minimum level to show, as a ``logging`` constant or name such as ``"DEBUG"``.
-            Defaults to ``logging.INFO``.
-
-    Example:
-        >>> from security_notebook_tools import enable_logging, disable_logging
-        >>> enable_logging("DEBUG")
-        >>> disable_logging()
-    """
-    if not _has_notebook_handler():
-        logger.addHandler(_NotebookHandler())
-    logger.setLevel(level)
-
-
-def disable_logging() -> None:
-    """Stop printing package logs to the notebook (undo :func:`enable_logging`).
-
-    Also resets the package logger's level to ``NOTSET``. Handlers you attached yourself are
-    left alone.
-    """
-    for h in [h for h in logger.handlers if isinstance(h, _NotebookHandler)]:
-        logger.removeHandler(h)
-    logger.setLevel(logging.NOTSET)
-
-
-@contextmanager
-def verbose_logging(enabled: bool = True, level: int = logging.INFO) -> Iterator[None]:
-    """While active, print package logs at ``level`` and above to the notebook cell.
-
-    A no-op when ``enabled`` is false or logs are already being printed (nested calls,
-    or :func:`enable_logging` was used), so messages are never duplicated.
-
-    Args:
-        enabled: Whether to print logs at all.
-        level: Minimum level to show while active.
-
-    Yields:
-        None.
-    """
-    if not enabled or _has_notebook_handler():
-        yield
-        return
-    handler = _NotebookHandler()
-    previous_level = logger.level
-    logger.addHandler(handler)
-    if logger.getEffectiveLevel() > level:
-        logger.setLevel(level)
-    try:
-        yield
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
+def close_log_file() -> None:
+    """Close the log file's stream; it is reopened on the next record."""
+    file_handler._close_stream()
 
 
 def shorten(text: str, max_len: int = 200) -> str:

@@ -73,7 +73,6 @@ class KqlMagics(Magics):
         action="store_true",
         help="Run the query even if an identical result is cached.",
     )
-    @argument("-v", "--verbose", action="store_true", help="Log the query and timing.")
     @cell_magic
     def kql(self, line: str, cell: str) -> Styler:
         """Run the cell body as KQL with exec_query and display the result.
@@ -92,6 +91,5 @@ class KqlMagics(Magics):
             target=args.target,
             timeout=args.timeout,
             cache=not args.no_cache,
-            verbose=args.verbose,
         )
         return format_dataframe(df)

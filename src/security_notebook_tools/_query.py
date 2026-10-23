@@ -30,7 +30,6 @@ from ._config import (
 )
 from ._errors import unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
-from ._log import verbose_logging
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
 from ._timerange import Timespan, resolve_timespan
@@ -192,7 +191,6 @@ def exec_query(
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
     cache: bool = True,
-    verbose: bool = False,
 ) -> pd.DataFrame:
     """Run KQL against Microsoft Sentinel (default) or Azure Data Explorer (ADX).
 
@@ -291,7 +289,6 @@ def exec_query(
         cache: If true (default), return a cached result for an identical earlier query and
             keep this one for later. Pass false to always run the query (the result is not
             stored and does not replace a cached one). See Caching above.
-        verbose: If true, print this call's logs (INFO and above) to the cell output.
 
     Returns:
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
@@ -331,15 +328,14 @@ def exec_query(
     """
     if timeout <= 0:
         raise ConfigurationError(f"timeout must be a positive number of seconds, got {timeout}.")
-    with verbose_logging(verbose):
-        if target == "sentinel":
-            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
-        elif target == "adx":
-            if timespan is not None:
-                raise ConfigurationError(
-                    "timespan only applies to Sentinel; filter on time in the KQL for ADX."
-                )
-            tables = _query_adx(kql, timeout, cache=cache)
-        else:
-            raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
+    if target == "sentinel":
+        tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
+    elif target == "adx":
+        if timespan is not None:
+            raise ConfigurationError(
+                "timespan only applies to Sentinel; filter on time in the KQL for ADX."
+            )
+        tables = _query_adx(kql, timeout, cache=cache)
+    else:
+        raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
     return tables[0] if tables else pd.DataFrame()

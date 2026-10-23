@@ -1,7 +1,17 @@
 import pytest
 
 from security_notebook_tools import _config as config
-from security_notebook_tools import _query
+from security_notebook_tools import _log, _query
+
+
+@pytest.fixture(autouse=True)
+def _log_file(tmp_path, monkeypatch):
+    """Send the package's log file to a temp dir so tests never write into the repo."""
+    path = tmp_path / "logs" / _log.LOG_FILE_NAME
+    path.parent.mkdir()
+    monkeypatch.setattr(_log, "log_file_path", lambda: path)
+    yield path
+    _log.close_log_file()
 
 
 @pytest.fixture(autouse=True)

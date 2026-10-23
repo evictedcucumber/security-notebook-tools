@@ -23,7 +23,6 @@ from ._exceptions import (
 )
 from ._format import KQL_TYPES_ATTR
 from ._kql import Token, tokenize
-from ._log import verbose_logging
 from ._query import DEFAULT_TIMEOUT, Target, _query_adx, _query_sentinel
 
 logger = logging.getLogger("security_notebook_tools.batch")
@@ -397,7 +396,6 @@ def exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable[..., Any] = _DEFAULT_AGG,
     cache: bool = True,
-    verbose: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
 
@@ -478,7 +476,6 @@ def exec_batch_query(
             ``agg_column`` is an error.
         cache: If true (default), each window may be served from, and kept in, the in-memory
             result cache. Pass false to run every window.
-        verbose: If true, print this call's logs (INFO and above) to the cell output.
 
     Returns:
         The window results concatenated in window order with a fresh index. Windows with no
@@ -576,33 +573,32 @@ def exec_batch_query(
         partial(_run_window, index, total, bounds, kql, target, timeout, cache, stop)
         for index, bounds in enumerate(windows, start=1)
     ]
-    with verbose_logging(verbose):
+    logger.info(
+        "%d windows of %s from %s to %s (max_workers=%d)",
+        total,
+        interval,
+        start_utc,
+        end_utc,
+        max_workers,
+    )
+    results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
+    if keys and len(results[0].columns):
+        _check_columns(results[0], keys + cols)  # before the remaining windows run
+    if max_workers > 1 and total > 2:
+        results += _run_parallel(jobs[1:], max_workers, stop)
+    else:
+        results += [job() for job in jobs[1:]]
+    merged = _merge(results)
+    logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
+    if keys and len(merged.columns):
+        rows = len(merged)
+        merged = _aggregate(merged, keys, cols, agg_func)
         logger.info(
-            "%d windows of %s from %s to %s (max_workers=%d)",
-            total,
-            interval,
-            start_utc,
-            end_utc,
-            max_workers,
+            "Re-aggregated %d rows into %d by %s (%s of %s)",
+            rows,
+            len(merged),
+            keys,
+            agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
+            cols,
         )
-        results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
-        if keys and len(results[0].columns):
-            _check_columns(results[0], keys + cols)  # before the remaining windows run
-        if max_workers > 1 and total > 2:
-            results += _run_parallel(jobs[1:], max_workers, stop)
-        else:
-            results += [job() for job in jobs[1:]]
-        merged = _merge(results)
-        logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
-        if keys and len(merged.columns):
-            rows = len(merged)
-            merged = _aggregate(merged, keys, cols, agg_func)
-            logger.info(
-                "Re-aggregated %d rows into %d by %s (%s of %s)",
-                rows,
-                len(merged),
-                keys,
-                agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
-                cols,
-            )
     return merged

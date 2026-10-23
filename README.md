@@ -53,8 +53,6 @@ from security_notebook_tools import (
     exec_batch_query,
     format_dataframe,
     pivot_dataframe,
-    enable_logging,
-    disable_logging,
     clear_cache,
 )
 ```
@@ -119,7 +117,7 @@ df = exec_query("Events | take 100", target="adx")
 df = exec_query(".show tables", target="adx")  # only .show commands are allowed
 ```
 
-`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True, verbose=False)` returns the
+`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
 columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
@@ -281,18 +279,15 @@ The full rules are in [docs/api.md](docs/api.md).
 
 ## Logging
 
-Everything logs through the standard `logging` module under the `security_notebook_tools`
-logger (children: `sentinel`, `adx`, `auth`, `timerange`, `tablepolicy`). Nothing is printed by default.
+Every log record at INFO and above from the `security_notebook_tools` logger (children:
+`sentinel`, `adx`, `auth`, `timerange`, `tablepolicy`) is appended to `notebooks.log` in your
+project root (the nearest directory above the working directory with `.git` or `pyproject.toml`,
+else the working directory). Nothing is printed to the notebook cell. Add `notebooks.log` to your
+`.gitignore`.
 
-- `exec_query(..., verbose=True)` prints that call's logs (INFO and above) in the cell output.
-- `enable_logging()` (optionally `enable_logging("DEBUG")`) does so for the whole session;
-  `disable_logging()` undoes it.
-- Or configure `logging.getLogger("security_notebook_tools")` yourself.
-
-```python
-df = exec_query("SigninLogs | take 10", timedelta(days=1), verbose=True)
-# 14:02:11 INFO security_notebook_tools.sentinel: Running Sentinel query (timespan=1 day, 0:00:00): SigninLogs | take 10
-# 14:02:12 INFO security_notebook_tools.sentinel: Sentinel query returned 1 table(s), rows=[10] in 0.84s
+```text
+2026-10-23T14:02:11.402Z INFO security_notebook_tools.sentinel: Running Sentinel query (timespan=1 day, 0:00:00): SigninLogs | take 10
+2026-10-23T14:02:12.247Z INFO security_notebook_tools.sentinel: Sentinel query returned 1 table(s), rows=[10] in 0.84s
 ```
 
 ## Security
@@ -472,8 +467,7 @@ The exception classes are not part of the public API; read the message. Messages
   connection; `exec_batch_query` retries it.
 - `... no Azure credential available ...`: install the Azure CLI and run `az login`.
 - `Unexpected X during ...`: an error the package does not handle yet. It is logged at ERROR
-  with its traceback to the `security_notebook_tools` logger (call `enable_logging()` or attach
-  a handler such as `logging.FileHandler` to see or keep it), and the original exception is
+  with its traceback to `notebooks.log` in the project root, and the original exception is
   chained. Please report it.
 - `Sentinel query returned partial results: ...`: a warning, not an error.
 

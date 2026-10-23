@@ -4,6 +4,13 @@
 
 ### Breaking
 
+- Logging is now always on and goes to a file. Every record at INFO and above from the
+  `security_notebook_tools` logger is appended to `notebooks.log` in the project root (the nearest
+  directory above the working directory with `.git` or `pyproject.toml`, else the working
+  directory), one line each: `2026-10-23T14:03:12.345Z INFO security_notebook_tools.query: ...`.
+  Nothing is printed to the notebook cell any more. `enable_logging`, `disable_logging`, the
+  `verbose` parameter of every function and client method, and the `%%kql -v` flag are removed.
+  Add `notebooks.log` to your `.gitignore`.
 - `SENTINEL_WORKSPACE_RESOURCE_ID` is removed, with no fallback. Set three plain values instead,
   all required for `target="sentinel"`: `SENTINEL_SUBSCRIPTION_ID` (GUID),
   `SENTINEL_RESOURCE_GROUP` and `SENTINEL_WORKSPACE_NAME`. The package assembles the ARM

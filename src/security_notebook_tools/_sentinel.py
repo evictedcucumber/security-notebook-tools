@@ -47,7 +47,7 @@ from ._exceptions import (
     QueryTransientError,
 )
 from ._format import KQL_TYPES_ATTR
-from ._log import shorten, verbose_logging
+from ._log import shorten
 from ._tablepolicy import check_sentinel_query, get_policy
 from ._timerange import Timespan
 
@@ -81,7 +81,6 @@ class SentinelClient:
         *,
         resource_id: str | None = None,
         tenant_id: str | None = None,
-        verbose: bool = False,
     ) -> None:
         """Create a client.
 
@@ -94,21 +93,18 @@ class SentinelClient:
                 ``$SENTINEL_WORKSPACE_NAME``.
             tenant_id: Tenant, used for the credential and the policy cache. Defaults to
                 ``$AZURE_TENANT_ID``.
-            verbose: Default for this client's methods; each method can override it.
 
         Raises:
             ConfigurationError: No workspace ID or resource ID was given or set, or one is
                 malformed.
         """
-        self.verbose = verbose
-        with verbose_logging(verbose):
-            self.workspace_id = resolve_workspace_id(workspace_id)
-            self.resource_id = resolve_workspace_resource_id(resource_id)
-            self.tenant_id = resolve_tenant_id(tenant_id)
-            with unexpected_errors(logger, "Sentinel client setup"):
-                self.credential = credential or get_credential(self.tenant_id)
-                self._client = LogsQueryClient(self.credential)
-            logger.info("Sentinel client ready for workspace %s", self.workspace_id)
+        self.workspace_id = resolve_workspace_id(workspace_id)
+        self.resource_id = resolve_workspace_resource_id(resource_id)
+        self.tenant_id = resolve_tenant_id(tenant_id)
+        with unexpected_errors(logger, "Sentinel client setup"):
+            self.credential = credential or get_credential(self.tenant_id)
+            self._client = LogsQueryClient(self.credential)
+        logger.info("Sentinel client ready for workspace %s", self.workspace_id)
 
     def _run(
         self, kql: str, timespan: Timespan | None, server_timeout: int | None
@@ -170,7 +166,6 @@ class SentinelClient:
         *,
         raise_on_partial: bool = False,
         server_timeout: int | None = None,
-        verbose: bool | None = None,
     ) -> list[pd.DataFrame]:
         """Run ``kql`` and return every result table as a DataFrame.
 
@@ -183,7 +178,6 @@ class SentinelClient:
                 ``None`` (no time restriction beyond the query itself).
             raise_on_partial: Raise instead of warning when the result is partial.
             server_timeout: Server-side timeout in seconds.
-            verbose: Override the client's ``verbose`` setting for this call.
 
         Returns:
             One DataFrame per result table.
@@ -207,43 +201,38 @@ class SentinelClient:
                 ``QueryTransientError``.
             PartialResultError: The result was partial and ``raise_on_partial`` is set.
         """
-        with verbose_logging(self.verbose if verbose is None else verbose):
-            policy = get_policy(
-                self.resource_id, self.workspace_id, self.credential, self.tenant_id
-            )
-            check_sentinel_query(kql, policy)
-            logger.info("Running Sentinel query (timespan=%s): %s", timespan, shorten(kql))
-            start = time.perf_counter()
-            with unexpected_errors(logger, "Sentinel query"):
-                result = self._run(kql, timespan, server_timeout)
+        policy = get_policy(self.resource_id, self.workspace_id, self.credential, self.tenant_id)
+        check_sentinel_query(kql, policy)
+        logger.info("Running Sentinel query (timespan=%s): %s", timespan, shorten(kql))
+        start = time.perf_counter()
+        with unexpected_errors(logger, "Sentinel query"):
+            result = self._run(kql, timespan, server_timeout)
 
-            if result.status == LogsQueryStatus.SUCCESS:
-                tables = result.tables
-            elif result.status == LogsQueryStatus.PARTIAL:
-                err = result.partial_error
-                hint = describe_codes([c for c in [getattr(err, "code", None)] if c])
-                msg = f"Sentinel query returned partial results: {err}"
-                if hint:
-                    msg += f" ({hint})"
-                logger.warning(msg)
-                if raise_on_partial:
-                    raise PartialResultError(
-                        msg, partial_error=err, partial_data=result.partial_data
-                    )
-                warnings.warn(msg, stacklevel=2)
-                tables = result.partial_data
-            else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
-                raise QueryError(f"Sentinel query failed: {getattr(result, 'error', result)}")
+        if result.status == LogsQueryStatus.SUCCESS:
+            tables = result.tables
+        elif result.status == LogsQueryStatus.PARTIAL:
+            err = result.partial_error
+            hint = describe_codes([c for c in [getattr(err, "code", None)] if c])
+            msg = f"Sentinel query returned partial results: {err}"
+            if hint:
+                msg += f" ({hint})"
+            logger.warning(msg)
+            if raise_on_partial:
+                raise PartialResultError(msg, partial_error=err, partial_data=result.partial_data)
+            warnings.warn(msg, stacklevel=2)
+            tables = result.partial_data
+        else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
+            raise QueryError(f"Sentinel query failed: {getattr(result, 'error', result)}")
 
-            with unexpected_errors(logger, "converting the Sentinel result to a DataFrame"):
-                dfs = [_table_to_df(t) for t in tables]
-            logger.info(
-                "Sentinel query returned %d table(s), rows=%s in %.2fs",
-                len(dfs),
-                [len(df) for df in dfs],
-                time.perf_counter() - start,
-            )
-            return dfs
+        with unexpected_errors(logger, "converting the Sentinel result to a DataFrame"):
+            dfs = [_table_to_df(t) for t in tables]
+        logger.info(
+            "Sentinel query returned %d table(s), rows=%s in %.2fs",
+            len(dfs),
+            [len(df) for df in dfs],
+            time.perf_counter() - start,
+        )
+        return dfs
 
     def query(
         self,
@@ -252,7 +241,6 @@ class SentinelClient:
         *,
         raise_on_partial: bool = False,
         server_timeout: int | None = None,
-        verbose: bool | None = None,
     ) -> pd.DataFrame:
         """Run ``kql`` and return the first result table (empty DataFrame if none).
 
@@ -263,6 +251,5 @@ class SentinelClient:
             timespan,
             raise_on_partial=raise_on_partial,
             server_timeout=server_timeout,
-            verbose=verbose,
         )
         return tables[0] if tables else pd.DataFrame()

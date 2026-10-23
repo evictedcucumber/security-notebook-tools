@@ -138,7 +138,7 @@ df.head()
 A query that reads a non-Analytics table (or uses `search`, `union *`, saved functions and so on)
 raises an error naming the reason and is not sent.
 
-Add `verbose=True` or call `enable_logging()` to see what is being run.
+What is being run is logged to `notebooks.log` in the project root. Add that file to `.gitignore`.
 
 ## Workspace settings (`.vscode/settings.json`)
 
