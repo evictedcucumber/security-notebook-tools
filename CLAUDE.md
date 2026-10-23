@@ -61,6 +61,29 @@ Flakes only see git-tracked files; `git add` new files before relying on `nix de
 ## Keeping docs in sync
 
 When the public API changes, update in the same change: `README.md`, `docs/api.md`,
-the `__init__.py` module docstring, and `CHANGELOG.md`. The version lives in two places,
-`pyproject.toml` and `src/security_notebook_tools/__init__.py` (`__version__`); change both.
-Do not commit unless asked.
+the `__init__.py` module docstring, and `CHANGELOG.md`. Do not commit unless asked.
+
+## Versioning
+
+Semantic Versioning, judged against the public API (`__all__`, function signatures, raised
+exception types, `%%kql` flags, environment variables, `notebooks.log` location and format):
+
+- MAJOR: anything that can break an existing notebook: a removed or renamed function, argument,
+  flag or environment variable, a changed default or return shape, a newly raised error, or the
+  cost guard rejecting queries it used to allow.
+- MINOR: backward-compatible additions (a new function, a keyword argument with a default, a new
+  flag).
+- PATCH: bug fixes and internal, logging or docs changes that keep the documented behaviour.
+
+Each change adds its entry under `## Unreleased` at the top of `CHANGELOG.md` (sections, in
+order: Breaking, Added, Changed, Fixed, Security, Docs) and leaves the version alone. A release
+renames `Unreleased` to `## X.Y.Z - YYYY-MM-DD`, picking the bump from the highest-ranked change
+it contains (one bump per release, not per change), and updates every copy of the version in
+the same commit (`chore(release): bump version to X.Y.Z`):
+
+- `pyproject.toml` (`version`) and `uv.lock` (run `nix develop -c uv lock`)
+- `src/security_notebook_tools/__init__.py` (`__version__`)
+- `README.md` and `docs/notebook-setup.md` (install pin `@vX.Y.Z`)
+- `docs/api.md` (`__version__` examples) and the `Version` line in this file
+
+Bump only when asked to cut a release. Breaking commits use `!` and a `BREAKING CHANGE:` footer.
