@@ -1193,3 +1193,399 @@ def test_batch_timeout_error_is_not_retried_and_names_the_window(sentinel, backo
     assert isinstance(ei.value, QueryError)
     assert cls.return_value.query_tables.call_count == 2
     assert backoff[0] == []
+
+
+# --- exec_batch_query: min_interval splits windows that time out -------------------------------
+
+HOUR = timedelta(hours=1)
+
+
+def _hourly_rows(timespan):
+    """The hours (since D0) that start inside the window, so any split has the same rows."""
+    start, end = timespan
+    first = -(-(start - D0) // HOUR)  # ceiling
+    last = -(-(end - D0) // HOUR)
+    df = pd.DataFrame({"h": list(range(first, last))})
+    df.attrs["kql_types"] = {"h": "long"}
+    return df
+
+
+def _slow_over(limit, seen=None):
+    """A query_tables fake: a window longer than ``limit`` times out, the rest returns rows."""
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        if seen is not None:
+            seen.append((timespan, kql))
+        if timespan[1] - timespan[0] > limit:
+            raise QueryTimeoutError("Sentinel query failed: GatewayTimeout (ADX query timed out)")
+        return [_hourly_rows(timespan)]
+
+    return query
+
+
+def _unsplit(cls, days, **kwargs):
+    """The reference result: the same rows from a service that never times out."""
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=999))
+    return snt.exec_batch_query(FILTER, D0, _days(days), cache=False, **kwargs)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_batch_min_interval_splits_a_timed_out_window_and_matches_the_unsplit_result(
+    sentinel, workers
+):
+    cls, _ = sentinel
+    expected = _unsplit(cls, 8, interval=timedelta(days=4), max_workers=workers)
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    df = snt.exec_batch_query(
+        FILTER,
+        D0,
+        _days(8),
+        interval=timedelta(days=4),
+        min_interval=timedelta(hours=6),
+        max_workers=workers,
+        cache=False,
+    )
+    pd.testing.assert_frame_equal(df, expected)
+    assert df["h"].tolist() == list(range(8 * 24))
+    assert df.attrs["kql_types"] == {"h": "long"}
+    assert list(df.index) == list(range(8 * 24))
+    spans = sorted((span[1] - span[0] for span, _ in seen), reverse=True)
+    assert spans[0] == timedelta(days=4)
+    assert spans[-1] == timedelta(days=1)
+    assert len(seen) == 2 * (1 + 2 + 4)  # two 4-day windows, each tried as 4d, 2d, 2d, 1d x 4
+
+
+def test_batch_min_interval_halves_run_in_time_order_with_their_own_bounds(sentinel):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1), seen)
+    snt.exec_batch_query(
+        FILTER, D0, _days(2), interval=timedelta(days=2), min_interval=timedelta(hours=12)
+    )
+    assert [span for span, _ in seen] == [
+        (D0, _days(2)),  # times out
+        (D0, _days(1)),  # first half
+        (_days(1), _days(2)),  # second half
+    ]
+    for (start, end), kql in seen:
+        assert kql.startswith(
+            f'let BatchStart = datetime("{start:%Y-%m-%dT%H:%M:%S.%fZ}"); '
+            f'let BatchEnd = datetime("{end:%Y-%m-%dT%H:%M:%S.%fZ}");\n'
+        )
+        assert kql.endswith(FILTER)
+
+
+def test_batch_min_interval_uneven_window_splits_at_the_middle_without_a_gap(sentinel):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(hours=5), seen)
+    end = D0 + timedelta(hours=9)  # the last window is clipped to 9 h
+    df = snt.exec_batch_query(
+        FILTER, D0, end, interval=timedelta(hours=9), min_interval=timedelta(hours=1), cache=False
+    )
+    assert df["h"].tolist() == list(range(9))
+    spans = [span for span, _ in seen]
+    assert spans[0] == (D0, end)
+    assert spans[1][1] == spans[2][0]  # the halves share the middle: no gap, no overlap
+    assert spans[1][0] == D0
+    assert spans[2][1] == end
+
+
+def test_batch_min_interval_stops_at_the_minimum_and_names_the_smallest_window(sentinel, caplog):
+    cls, _ = sentinel
+    seen = []
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(0), seen)
+    caplog.set_level(logging.WARNING, logger="security_notebook_tools")
+    with pytest.raises(QueryTimeoutError, match=r"window 1/1\.1\.1 \(2026-01-01") as ei:
+        snt.exec_batch_query(
+            FILTER, D0, _days(4), interval=timedelta(days=4), min_interval=timedelta(days=1)
+        )
+    message = str(ei.value)
+    assert "smallest window tried was 1 day, 0:00:00" in message
+    assert "min_interval=1 day, 0:00:00" in message
+    assert "GatewayTimeout" in message
+    assert isinstance(ei.value, QueryError)
+    # 4 days -> 2 days -> 1 day; the first half failed, so the second was never tried
+    assert [span[1] - span[0] for span, _ in seen] == [timedelta(days=d) for d in (4, 2, 1)]
+    assert [m for m in (r.getMessage() for r in caplog.records) if "cannot be split" in m]
+
+
+def test_batch_min_interval_equal_to_interval_never_splits(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(0))
+    with pytest.raises(QueryTimeoutError, match="smallest window tried was 1 day"):
+        snt.exec_batch_query(FILTER, D0, _days(2), min_interval=timedelta(days=1))
+    assert cls.return_value.query_tables.call_count == 1
+
+
+def test_batch_without_min_interval_a_timeout_fails_the_batch_as_before(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(0))
+    with pytest.raises(QueryTimeoutError, match=r"window 1/2 \(2026-01-01.*GatewayTimeout") as ei:
+        snt.exec_batch_query(FILTER, D0, _days(2))
+    assert "smallest window" not in str(ei.value)
+    assert cls.return_value.query_tables.call_count == 1
+
+
+def test_batch_min_interval_logs_each_split_without_kql(sentinel, caplog):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1))
+    caplog.set_level(logging.INFO, logger="security_notebook_tools")
+    snt.exec_batch_query(
+        FILTER, D0, _days(4), interval=timedelta(days=4), min_interval=timedelta(days=1)
+    )
+    splits = [r for r in caplog.records if "splitting it into two" in r.getMessage()]
+    assert [r.levelno for r in splits] == [logging.WARNING] * 3  # 4d, then each 2d half
+    first = splits[0].getMessage()
+    assert "Batch 1/1 (2026-01-01 00:00:00+00:00 to 2026-01-05 00:00:00+00:00)" in first
+    assert "timed out after" in first
+    assert "two windows of 2 days, 0:00:00" in first
+    assert "Batch 1/1.1 " in splits[1].getMessage()
+    assert "Batch 1/1.2 " in splits[2].getMessage()
+    assert not any("TimeGenerated" in r.getMessage() for r in caplog.records)
+    assert not any("BatchStart" in r.getMessage() for r in caplog.records)
+
+
+def test_batch_min_interval_late_connection_reset_splits_too(sentinel, backoff, clock):
+    cls, _ = sentinel
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        if timespan[1] - timespan[0] > timedelta(days=1):
+            clock.now += 270
+            raise _reset()
+        return [_hourly_rows(timespan)]
+
+    cls.return_value.query_tables.side_effect = query
+    df = snt.exec_batch_query(
+        FILTER, D0, _days(2), interval=timedelta(days=2), min_interval=timedelta(days=1)
+    )
+    assert df["h"].tolist() == list(range(48))
+    assert backoff[0] == []  # the late reset was not retried, it was split
+
+
+def test_batch_min_interval_early_reset_is_retried_not_split(sentinel, backoff, clock):
+    cls, _ = sentinel
+    seen = []
+    ok = [_hourly_rows((D0, _days(1)))]
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        seen.append(timespan)
+        if len(seen) == 1:
+            clock.now += 3
+            raise _reset()
+        return ok
+
+    cls.return_value.query_tables.side_effect = query
+    snt.exec_batch_query(FILTER, D0, _days(1), min_interval=timedelta(hours=1))
+    assert seen == [(D0, _days(1)), (D0, _days(1))]  # same window again after the backoff
+    assert backoff[0] == [1.0]
+
+
+def test_batch_min_interval_other_errors_are_not_split(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = QueryError("syntax error")
+    with pytest.raises(QueryError, match="syntax error") as ei:
+        snt.exec_batch_query(FILTER, D0, _days(2), min_interval=timedelta(hours=1))
+    assert not isinstance(ei.value, QueryTimeoutError)
+    assert cls.return_value.query_tables.call_count == 1
+
+
+def test_batch_min_interval_error_in_a_half_names_that_half(sentinel):
+    cls, _ = sentinel
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        if timespan[1] - timespan[0] > timedelta(days=1):
+            raise QueryTimeoutError("slow")
+        if timespan[0] >= _days(1):
+            raise QueryError("boom")
+        return [_hourly_rows(timespan)]
+
+    cls.return_value.query_tables.side_effect = query
+    with pytest.raises(QueryError, match=r"window 1/1\.2 \(2026-01-02.*boom") as ei:
+        snt.exec_batch_query(
+            FILTER, D0, _days(2), interval=timedelta(days=2), min_interval=timedelta(hours=6)
+        )
+    assert not isinstance(ei.value, QueryTimeoutError)
+
+
+def test_batch_min_interval_a_half_is_retried_when_throttled(sentinel, backoff):
+    cls, _ = sentinel
+    calls = []
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        calls.append(timespan)
+        if timespan[1] - timespan[0] > timedelta(days=1):
+            raise QueryTimeoutError("slow")
+        if timespan[0] == _days(1) and calls.count(timespan) == 1:
+            raise QueryThrottledError("429")
+        return [_hourly_rows(timespan)]
+
+    cls.return_value.query_tables.side_effect = query
+    df = snt.exec_batch_query(
+        FILTER, D0, _days(2), interval=timedelta(days=2), min_interval=timedelta(days=1)
+    )
+    assert df["h"].tolist() == list(range(48))
+    assert backoff[0] == [1.0]
+
+
+def test_batch_min_interval_stop_is_honoured_between_halves():
+    stop = threading.Event()
+    seen = []
+
+    def attempt(label, bounds, *args):
+        seen.append(label)
+        if label == "1/1":
+            raise _batch._WindowTimeout("slow", 100.0)
+        stop.set()  # another window failed while the first half ran
+        return pd.DataFrame({"h": [1]})
+
+    with (
+        mock.patch.object(_batch, "_attempt_window", side_effect=attempt),
+        pytest.raises(_batch._Stopped),
+    ):
+        _batch._run_window(
+            1,
+            1,
+            (D0, _days(2)),
+            FILTER,
+            "sentinel",
+            300,
+            True,
+            stop,
+            min_interval=timedelta(hours=1),
+        )
+    assert seen == ["1/1", "1/1.1"]  # the second half never started
+
+
+def test_batch_min_interval_stop_set_before_the_first_half(sentinel):
+    stop = threading.Event()
+    stop.set()
+    with (
+        mock.patch.object(_batch, "_attempt_window", side_effect=_batch._WindowTimeout("x", 1.0)),
+        pytest.raises(_batch._Stopped),
+    ):
+        _batch._run_window(
+            1, 1, (D0, _days(2)), FILTER, "sentinel", 300, True, stop, timedelta(hours=1)
+        )
+
+
+def test_batch_min_interval_parallel_failure_of_one_window_stops_the_others(sentinel):
+    cls, _ = sentinel
+
+    def query(kql, timespan, server_timeout=None, raise_on_partial=False):
+        if timespan[0] == D0 and timespan[1] - timespan[0] > timedelta(days=1):
+            return [_hourly_rows(timespan)]
+        if timespan[1] - timespan[0] > timedelta(days=1):
+            raise QueryTimeoutError("slow")
+        if timespan[0] == _days(2):
+            raise QueryError("boom")
+        return [_hourly_rows(timespan)]
+
+    cls.return_value.query_tables.side_effect = query
+    with pytest.raises(QueryError, match="boom"):
+        snt.exec_batch_query(
+            FILTER,
+            D0,
+            _days(8),
+            interval=timedelta(days=2),
+            min_interval=timedelta(days=1),
+            max_workers=3,
+        )
+
+
+def test_batch_min_interval_halves_with_no_rows_and_mixed_types(sentinel):
+    cls, _ = sentinel
+    first = pd.DataFrame({"a": [1]})
+    first.attrs["kql_types"] = {"a": "long"}
+    second = pd.DataFrame({"a": [2], "b": ["x"]})
+    second.attrs["kql_types"] = {"a": "long", "b": "string"}
+    cls.return_value.query_tables.side_effect = [
+        QueryTimeoutError("slow"),
+        [pd.DataFrame()],
+        [second],
+        [first],
+    ]
+    df = snt.exec_batch_query(
+        FILTER, D0, _days(2), interval=timedelta(days=2), min_interval=timedelta(days=1)
+    )
+    assert df["a"].tolist() == [2]
+    assert df.attrs["kql_types"] == {"a": "long", "b": "string"}
+    # all windows empty: still the first (empty) frame, as for an unsplit batch
+    cls.return_value.query_tables.side_effect = [QueryTimeoutError("slow"), [], []]
+    assert snt.exec_batch_query(
+        FILTER,
+        D0,
+        _days(2),
+        interval=timedelta(days=2),
+        min_interval=timedelta(days=1),
+        cache=False,
+    ).empty
+
+
+def test_batch_min_interval_halves_are_cached_like_windows(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.side_effect = _slow_over(timedelta(days=1))
+    args = (FILTER, D0, _days(2))
+    kwargs = {"interval": timedelta(days=2), "min_interval": timedelta(days=1)}
+    snt.exec_batch_query(*args, **kwargs)
+    assert cls.return_value.query_tables.call_count == 3  # timed out, then two halves
+    snt.exec_batch_query(*args, **kwargs)
+    assert cls.return_value.query_tables.call_count == 4  # only the timed out window reruns
+
+
+@pytest.mark.parametrize(
+    ("min_interval", "match"),
+    [
+        (timedelta(0), "min_interval must be a positive"),
+        (timedelta(hours=-1), "min_interval must be a positive"),
+        (3600, "min_interval must be a positive"),
+        ("1h", "min_interval must be a positive"),
+        (timedelta(days=2), r"min_interval .* must not be longer than interval"),
+    ],
+)
+def test_batch_min_interval_validation(sentinel, min_interval, match):
+    cls, _ = sentinel
+    with pytest.raises(ConfigurationError, match=match):
+        snt.exec_batch_query(
+            FILTER, D0, _days(3), interval=timedelta(days=1), min_interval=min_interval
+        )
+    cls.return_value.query_tables.assert_not_called()
+
+
+def test_batch_min_interval_equal_to_interval_is_valid(sentinel):
+    snt.exec_batch_query(
+        FILTER, D0, _days(1), interval=timedelta(days=1), min_interval=timedelta(days=1)
+    )
+
+
+def test_batch_min_interval_is_keyword_only_and_defaults_to_none():
+    import inspect
+
+    param = inspect.signature(snt.exec_batch_query).parameters["min_interval"]
+    assert param.default is None
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_batch_min_interval_works_for_adx_late_resets(adx, backoff, clock):
+    # ADX raises no QueryTimeoutError itself, but a late reset is a timeout there too.
+    cls, _ = adx
+    calls = []
+
+    def query(kql, database, properties=None):
+        calls.append(kql)
+        if len(calls) == 1:
+            clock.now += 280
+            raise _reset("ADX query failed: could not reach the service")
+        return [pd.DataFrame({"a": [len(calls)]})]
+
+    cls.return_value.query_tables.side_effect = query
+    df = snt.exec_batch_query(
+        FILTER,
+        D0,
+        _days(2),
+        interval=timedelta(days=2),
+        min_interval=timedelta(days=1),
+        target="adx",
+    )
+    assert df["a"].tolist() == [2, 3]

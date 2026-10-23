@@ -211,9 +211,8 @@ def _reason(exc: QueryError) -> str:
     return redact_exception_text(str(exc).split("\n")[0], 120)
 
 
-def _run_window(
-    index: int,
-    total: int,
+def _attempt_window(
+    label: str,
     bounds: tuple[datetime, datetime],
     kql: str,
     target: Target,
@@ -223,16 +222,25 @@ def _run_window(
 ) -> pd.DataFrame:
     """Run one window, retrying transient failures; wrap a failure with the window's name.
 
+    Args:
+        label: The window's name in messages: ``"3/18"``, or ``"3/18.2"`` for the second half
+            of window 3 after a split.
+        bounds: The window, half-open.
+        kql: The user's KQL, without the ``let`` prefix.
+        target: ``"sentinel"`` or ``"adx"``.
+        timeout: Server-side timeout in seconds.
+        cache: Whether the result cache may serve and keep the window.
+        stop: Set when the batch is failing; ends the wait before a retry.
+
     Raises:
-        QueryTimeoutError: The query timed out (HTTP 504/408, the client deadline), or the
+        _WindowTimeout: The query timed out (HTTP 504/408, the client deadline), or the
             connection was reset or timed out after the attempt ran for at least
-            ``_LATE_RESET_FRACTION`` of ``timeout``. Not retried.
+            ``_LATE_RESET_FRACTION`` of ``timeout``. A ``QueryTimeoutError``; not retried.
         QueryError: The window failed, or still failed transiently after ``_MAX_RETRIES``
             retries (the message then says it was retried).
         _Stopped: ``stop`` was set while waiting to retry.
     """
     w_start, w_end = bounds
-    label = f"{index}/{total}"
     name = f"Batch window {label} ({w_start} to {w_end})"
     prefix = f"let BatchStart = {_literal(w_start)}; let BatchEnd = {_literal(w_end)};\n"
     retries = 0
@@ -317,6 +325,101 @@ def _run_window(
     df = tables[0] if tables else pd.DataFrame()
     logger.info("Batch %s: %s → %s, rows=%d", label, w_start, w_end, len(df))
     return df
+
+
+def _run_or_split(
+    label: str,
+    bounds: tuple[datetime, datetime],
+    kql: str,
+    target: Target,
+    timeout: int,
+    cache: bool,
+    stop: threading.Event,
+    min_interval: timedelta | None,
+) -> pd.DataFrame:
+    """Run a window; if it times out and ``min_interval`` is set, run its two halves instead.
+
+    The halves ``[start, middle)`` and ``[middle, end)`` run one after another, oldest first,
+    each as a window of its own (own ``BatchStart``/``BatchEnd`` and API time range, own
+    retries), and are split again the same way, until a half would be shorter than
+    ``min_interval``. Their frames are merged like the windows of a batch.
+
+    Raises:
+        QueryTimeoutError: The window timed out and cannot be split further (or splitting is
+            off: ``min_interval`` is None).
+        QueryError: A window failed for another reason.
+        _Stopped: ``stop`` was set before a half started or while waiting to retry.
+    """
+    try:
+        return _attempt_window(label, bounds, kql, target, timeout, cache, stop)
+    except _WindowTimeout as exc:
+        if min_interval is None:
+            raise
+        timed_out = exc
+    w_start, w_end = bounds
+    size = w_end - w_start
+    half = size / 2
+    if half < min_interval:
+        logger.warning(
+            "Batch %s (%s to %s) timed out after %.0f s and cannot be split further: half of "
+            "%s is shorter than min_interval %s",
+            label,
+            w_start,
+            w_end,
+            timed_out.elapsed,
+            size,
+            min_interval,
+        )
+        raise QueryTimeoutError(
+            f"Batch window {label} ({w_start} to {w_end}) timed out and was not split further: "
+            f"the smallest window tried was {size} (half of it is shorter than "
+            f"min_interval={min_interval}). Raise `timeout`, or lower `min_interval` or the "
+            f"query's cost: {timed_out}"
+        ) from timed_out
+    middle = w_start + half
+    logger.warning(
+        "Batch %s (%s to %s) timed out after %.0f s; splitting it into two windows of %s",
+        label,
+        w_start,
+        w_end,
+        timed_out.elapsed,
+        half,
+    )
+    parts = []
+    for number, part in enumerate(((w_start, middle), (middle, w_end)), start=1):
+        if stop.is_set():
+            logger.warning(
+                "Batch %s.%d is not run: another window failed and the batch is stopping",
+                label,
+                number,
+            )
+            raise _Stopped from timed_out
+        parts.append(
+            _run_or_split(
+                f"{label}.{number}", part, kql, target, timeout, cache, stop, min_interval
+            )
+        )
+    return _merge(parts)
+
+
+def _run_window(
+    index: int,
+    total: int,
+    bounds: tuple[datetime, datetime],
+    kql: str,
+    target: Target,
+    timeout: int,
+    cache: bool,
+    stop: threading.Event,
+    min_interval: timedelta | None = None,
+) -> pd.DataFrame:
+    """Run window ``index`` of ``total``: retry transient failures, split on a timeout.
+
+    See :func:`_attempt_window` and :func:`_run_or_split` for the details and the exceptions.
+    """
+    return _run_or_split(
+        f"{index}/{total}", bounds, kql, target, timeout, cache, stop, min_interval
+    )
 
 
 def _run_parallel(
@@ -458,6 +561,7 @@ def exec_batch_query(
     end: datetime | None = None,
     *,
     interval: timedelta = timedelta(days=1),
+    min_interval: timedelta | None = None,
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
     max_workers: int = 1,
@@ -499,6 +603,11 @@ def exec_batch_query(
     window. An error nobody anticipated is logged at ERROR with its traceback, wrapped in a
     ``QueryError`` that names the window, and not retried.
 
+    With ``min_interval`` a window that times out is not failed but split in two and each half
+    run as a window of its own, again and again down to ``min_interval``; use it when a few
+    windows (typically over old data, which is slower to scan) are too heavy for ``timeout``.
+    Cached windows are reused, and the halves are cached like any window.
+
     Window bounds reach the query in two ways:
 
     * ``BatchStart`` and ``BatchEnd`` are defined as ``datetime`` values by ``let`` statements
@@ -534,6 +643,16 @@ def exec_batch_query(
         end: The end of the period (exclusive); defaults to now in UTC. A naive datetime is
             taken to be UTC.
         interval: The length of each window (default 1 day); must be positive.
+        min_interval: Split a window that times out instead of failing. ``None`` (default)
+            keeps the behaviour: a window that times out fails the batch. With a value, a window
+            that fails with a timeout (HTTP 504/408, no answer within ``timeout`` plus 30
+            seconds on Sentinel, or a connection reset after it ran for half of ``timeout``) is
+            cut into two halves that run one after another, oldest first, each with its own
+            ``BatchStart``/``BatchEnd`` and API time range; a half that times out is cut again,
+            and so on, until a half would be shorter than ``min_interval``, where the batch
+            fails and the error names the smallest window tried. Must be positive and not longer
+            than ``interval``. Every split is logged at WARNING. The result is the same as
+            without splitting, as the halves are concatenated in time order.
         target: ``"sentinel"`` (default) or ``"adx"``.
         timeout: Server-side timeout in seconds for each window (default 300); must be
             positive.
@@ -572,7 +691,8 @@ def exec_batch_query(
         ``mean``, ``median``, ``std`` and ``var``, and has no entry otherwise.
 
     Raises:
-        ConfigurationError: ``interval`` or ``timeout`` is not positive, ``max_workers`` is not an
+        ConfigurationError: ``interval`` or ``timeout`` is not positive, ``min_interval`` is not
+            a positive ``timedelta`` or is longer than ``interval``, ``max_workers`` is not an
             integer from 1 to 5, ``start`` is not before ``end``, ``target`` is unknown, the ADX
             KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
             ``< BatchEnd`` (checked before any query, on both targets), defines ``BatchStart`` or
@@ -587,7 +707,7 @@ def exec_batch_query(
             its retries fails this way too, and the message says it was retried. A window that
             timed out (HTTP 504/408, no answer within ``timeout`` plus 30 seconds, or a
             connection reset after it ran for half of ``timeout``) fails with its subclass
-            ``QueryTimeoutError`` and is not retried.
+            ``QueryTimeoutError`` and is not retried (see ``min_interval``).
 
     Example:
         >>> from datetime import datetime, timedelta
@@ -605,12 +725,17 @@ def exec_batch_query(
         ...     datetime(2026, 1, 1), datetime(2026, 2, 1),
         ...     interval=timedelta(hours=6), max_workers=3,
         ... )
+        >>> df = exec_batch_query(  # windows that time out are halved, down to 1 hour
+        ...     "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd",
+        ...     timedelta(days=90), interval=timedelta(days=5), min_interval=timedelta(hours=1),
+        ... )
     """
     with public_call(
         logger,
         "exec_batch_query",
         target=target,
         interval=interval,
+        min_interval=min_interval,
         timeout=timeout,
         max_workers=max_workers,
         cache=cache,
@@ -622,6 +747,15 @@ def exec_batch_query(
         now = datetime.now(UTC)
         if interval <= timedelta(0):
             raise ConfigurationError(f"interval must be positive, got {interval}.")
+        if min_interval is not None:
+            if not isinstance(min_interval, timedelta) or min_interval <= timedelta(0):
+                raise ConfigurationError(
+                    f"min_interval must be a positive timedelta or None, got {min_interval!r}."
+                )
+            if min_interval > interval:
+                raise ConfigurationError(
+                    f"min_interval ({min_interval}) must not be longer than interval ({interval})."
+                )
         if timeout <= 0:
             raise ConfigurationError(
                 f"timeout must be a positive number of seconds, got {timeout}."
@@ -669,7 +803,9 @@ def exec_batch_query(
 
         stop = threading.Event()
         jobs = [
-            partial(_run_window, index, total, bounds, kql, target, timeout, cache, stop)
+            partial(
+                _run_window, index, total, bounds, kql, target, timeout, cache, stop, min_interval
+            )
             for index, bounds in enumerate(windows, start=1)
         ]
         logger.info(

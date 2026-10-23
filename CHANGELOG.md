@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `min_interval` keyword-only argument on `exec_batch_query` (default `None`: unchanged, a
+  window that times out fails the batch). With a `timedelta`, a window that times out (HTTP
+  504/408, no answer within `timeout` plus 30 seconds, or a connection reset after the window ran
+  for half of `timeout`) is split into two halves that run in time order as windows of their own,
+  recursively, until a half would be shorter than `min_interval`; then the batch fails and the
+  error names the smallest window tried. Each split is logged at WARNING. The result has the
+  same shape as an unsplit run. `min_interval` must be positive and not longer than `interval`
+  (`ConfigurationError` otherwise).
+
 ### Fixed
 
 - A Sentinel request now has a total deadline of `timeout` plus 30 seconds. Before, only the

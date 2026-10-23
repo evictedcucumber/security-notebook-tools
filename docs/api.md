@@ -264,6 +264,7 @@ exec_batch_query(
     end: datetime | None = None,
     *,
     interval: timedelta = timedelta(days=1),
+    min_interval: timedelta | None = None,
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
     max_workers: int = 1,
@@ -295,6 +296,17 @@ too slow, not dropped by the network, so it counts as a timeout and is not retri
 error says how long the window ran and suggests a smaller `interval` or a larger `timeout`. A
 timed-out window fails with a `QueryTimeoutError` (a `QueryError`).
 
+With `min_interval` a window that times out (HTTP 504/408, no answer within `timeout` plus 30
+seconds on Sentinel, or a connection reset after it ran for half of `timeout`) is not failed but
+split into two halves that run one after another, oldest first, each as a window of its own with
+its own `BatchStart`, `BatchEnd` and API time range. A half that times out is split again, until
+a half would be shorter than `min_interval`; then the batch fails with a `QueryTimeoutError` that
+names the smallest window tried. Each split is logged at WARNING (window bounds, how long it
+ran, the new size), never the KQL. The halves' rows are concatenated in time order, so the result
+has the same shape as an unsplit run and goes through `merge_on`/`agg_column` unchanged. Use it
+for a few heavy windows (old data is slower to scan) without shrinking `interval` for all of them.
+Without `min_interval` a window that times out fails the batch.
+
 Each window's bounds are defined for the query by `let BatchStart = datetime("..."); let
 BatchEnd = datetime("...");` added in front of your KQL. The window is half-open, so the KQL must
 filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd` (any column or expression
@@ -323,6 +335,7 @@ after the first window, so a typo fails before the other windows run.
 | `start` | Start of the period, or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
 | `end` | End of the period (exclusive); defaults to now in UTC. Naive datetimes are taken to be UTC. |
 | `interval` | Window length (default 1 day); must be positive. |
+| `min_interval` | `None` (default): a window that times out fails the batch. A `timedelta`: split a window that times out into two halves, recursively, until a half would be shorter than this; then fail, naming the smallest window tried. Must be positive and not longer than `interval`. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds for each window (default 300); must be positive. |
 | `max_workers` | Windows to run at once (default 1: one after another); an integer from 1 to 5. The cap is the Log Analytics limit of 5 concurrent queries per user; more only queue on the server, and the wait counts against `timeout`. ADX's concurrency limit is shared by everyone using the cluster, so a high value can throttle other users. |
@@ -346,8 +359,8 @@ results, adding columns that only later windows have.
 
 ### Raises
 
-* `ConfigurationError`: `interval` or `timeout` is not positive, `max_workers` is not an integer
-  from 1 to 5, `start` is not before `end`,
+* `ConfigurationError`: `interval` or `timeout` is not positive, `min_interval` is not a positive
+  `timedelta` or is longer than `interval`, `max_workers` is not an integer from 1 to 5, `start` is not before `end`,
   `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
   `< BatchEnd`, compares them in another form or defines them (checked before any query),
   `merge_on`/`agg_column` are not given together, empty, not column names, repeated or
@@ -358,7 +371,8 @@ results, adding columns that only later windows have.
   which the message says); the message names the window (number, total, bounds) and the original
   error is chained. A window that timed out (HTTP 504/408, no answer within `timeout` plus 30
   seconds, or a connection reset after the window ran for half of `timeout`) fails with the
-  subclass `QueryTimeoutError`, without retries.
+  subclass `QueryTimeoutError`, without retries (unless `min_interval` splits it; the final error
+  then names the smallest window tried).
 
 ### Examples
 
@@ -370,6 +384,9 @@ kql = "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchE
 df = exec_batch_query(kql, timedelta(days=30))  # last 30 days, one query per day
 df = exec_batch_query(kql, datetime(2026, 1, 1), datetime(2026, 2, 1), interval=timedelta(hours=6))
 df = exec_batch_query(kql, timedelta(days=30), max_workers=3)  # up to 3 days at once
+df = exec_batch_query(  # halve windows that time out, down to 1 hour
+    kql, timedelta(days=90), interval=timedelta(days=5), min_interval=timedelta(hours=1)
+)
 kql = (
     "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
     " | summarize n = count() by UserPrincipalName"

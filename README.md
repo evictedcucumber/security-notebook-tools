@@ -188,6 +188,19 @@ suggests a smaller `interval` or a larger `timeout`.
 df = exec_batch_query(kql, timedelta(days=30), max_workers=3)
 ```
 
+Some windows can be too heavy for the server timeout (typically over data older than about 30
+days). Pass `min_interval` to split a window that times out (HTTP 504, no answer within
+`timeout` plus 30 seconds, or a connection reset after it ran for half of `timeout`) into two
+halves, again and again, until a half would be shorter than `min_interval`; then the batch fails
+and the error names the smallest window tried. The result is the same as without splitting. It
+must be positive and not longer than `interval`; by default a timed-out window fails the batch.
+
+```python
+df = exec_batch_query(
+    kql, timedelta(days=90), interval=timedelta(days=5), min_interval=timedelta(hours=1)
+)
+```
+
 ### Caching
 
 Results are cached in memory by default (up to 32 distinct queries, least recently used dropped
