@@ -40,7 +40,7 @@ from ._format import format_dataframe
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 __all__ = [
     "clear_cache",
