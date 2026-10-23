@@ -218,9 +218,9 @@
   non-blank without control characters.
 - README gains a Security section; install docs recommend pinning to a full commit SHA.
 
-## 1.0.0
+## 1.0.0 - 2026-10-22
 
-### Removed (breaking)
+### Breaking
 
 - The pandas formatting helpers and their `verbose` option: `drop_empty_columns`,
   `parse_json_columns`, `expand_column`, `truncate_strings`, `format_timestamps`,
@@ -242,7 +242,7 @@
 - `docs/api.md` (API reference) and `docs/notebook-setup.md` (Jupyter and VS Code setup).
 - Workspace config in `.vscode/` and an `.env.example` listing the connection variables.
 
-## 0.1.0
+## 0.1.0 - 2026-10-20
 
 Initial release.
 
