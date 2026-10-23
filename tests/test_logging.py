@@ -386,9 +386,7 @@ def test_format_dataframe_logs_entry_and_summary(caplog):
     ("kwargs", "error"),
     [
         ({"max_rows": 0}, ValueError),
-        ({"column_styles": {"zzz": "readable_numbers"}}, ValueError),
-        ({"column_styles": {"a": "nope"}}, ValueError),
-        ({"column_styles": ["a"]}, TypeError),
+        ({"max_rows": -1}, ValueError),
     ],
 )
 def test_format_dataframe_rejections_are_one_warning(caplog, kwargs, error):

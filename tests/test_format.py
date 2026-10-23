@@ -23,7 +23,7 @@ def _cells(df, **kwargs):
 @pytest.mark.parametrize(
     ("values", "kql_type", "expected"),
     [
-        ([1, -5, 10**15], "long", ["1", "-5", str(10**15)]),
+        ([1, -5, 10**15], "long", ["1", "-5", "1 000 000 000 000 000"]),
         ([1.0, 2.0, float("nan")], "long", ["1", "2", ""]),
         ([1.0, 3.0], "int", ["1", "3"]),
         ([1.5, 1e-05, 100.0], "real", ["1.5", "1e-05", "100.0"]),
@@ -363,70 +363,31 @@ def test_malformed_pivot_totals_ignored(meta):
         (["1000000000.00000", "-12345.5"], "decimal", ["1 000 000 000.00000", "-12 345.5"]),
     ],
 )
-def test_readable_numbers(values, kql_type, expected):
-    df = _typed(values, kql_type)
-    assert _cells(df, column_styles={"c": "readable_numbers"}) == expected
+def test_numbers_grouped(values, kql_type, expected):
+    assert _cells(_typed(values, kql_type)) == expected
 
 
-def test_readable_numbers_only_on_named_columns():
-    df = pd.DataFrame({"a": [1000000], "b": [1000000]})
-    assert _cells(df, column_styles={"a": "readable_numbers"}) == ["1 000 000", "1000000"]
-
-
-def test_readable_numbers_on_inferred_numeric_column():
-    df = pd.DataFrame({"n": [1000.5, 20000.25]})
-    assert _cells(df, column_styles={"n": "readable_numbers"}) == ["1 000.5", "20 000.25"]
-
-
-def test_readable_numbers_keeps_right_alignment():
-    df = _typed([1000], "long")
-    html = format_dataframe(df, column_styles={"c": "readable_numbers"}).to_html()
-    assert "text-align: right" in html
+def test_inferred_numeric_columns_grouped():
+    df = pd.DataFrame({"i": [1000000, 5], "f": [1000.5, 20000.25]})
+    assert _cells(df) == ["1 000 000", "1 000.5", "5", "20 000.25"]
 
 
 @pytest.mark.parametrize(
-    ("values", "kql_type"),
+    ("values", "kql_type", "expected"),
     [
-        (["1000"], "string"),
-        ([True], "bool"),
-        ([{"a": 1}], "dynamic"),
-        (pd.to_datetime(["2024-01-01"], utc=True), "datetime"),
-        (pd.to_timedelta(["1s"]), "timespan"),
+        (["1000000"], "string", ["1000000"]),
+        ([{"a": 1000000}], "dynamic", ["{&quot;a&quot;: 1000000}"]),
     ],
 )
-def test_readable_numbers_rejects_non_numeric_types(values, kql_type):
-    with pytest.raises(TypeError, match="readable_numbers"):
-        format_dataframe(_typed(values, kql_type), column_styles={"c": "readable_numbers"})
+def test_non_numeric_columns_not_grouped(values, kql_type, expected):
+    assert _cells(_typed(values, kql_type)) == expected
 
 
-def test_readable_numbers_rejects_inferred_string_column():
-    df = pd.DataFrame({"s": ["1000", "2000"]})
-    with pytest.raises(TypeError, match="'s'"):
-        format_dataframe(df, column_styles={"s": "readable_numbers"})
-
-
-@pytest.mark.parametrize("style", ["bogus", "READABLE_NUMBERS", "", None, 1])
-def test_unknown_style_rejected(style):
-    with pytest.raises(ValueError, match="valid styles"):
-        format_dataframe(_typed([1], "long"), column_styles={"c": style})
-
-
-def test_column_styles_unknown_column_rejected():
-    with pytest.raises(ValueError, match="'missing'"):
-        format_dataframe(_typed([1], "long"), column_styles={"missing": "readable_numbers"})
-
-
-@pytest.mark.parametrize("bad", [["c"], "readable_numbers", [("c", "readable_numbers")]])
-def test_column_styles_must_be_mapping(bad):
-    with pytest.raises(TypeError, match="mapping"):
-        format_dataframe(_typed([1], "long"), column_styles=bad)
-
-
-def test_column_styles_none_or_empty_changes_nothing():
-    df = _typed([1000000], "long")
-    assert _cells(df, column_styles=None) == _cells(df, column_styles={}) == ["1000000"]
-
-
-def test_readable_numbers_output_is_escaped():
+def test_grouped_numbers_output_is_escaped():
     df = _typed(["<b>1000</b>"], "decimal")
-    assert _cells(df, column_styles={"c": "readable_numbers"}) == ["&lt;b&gt;1000&lt;/b&gt;"]
+    assert _cells(df) == ["&lt;b&gt;1000&lt;/b&gt;"]
+
+
+def test_column_styles_removed():
+    with pytest.raises(TypeError, match="column_styles"):
+        format_dataframe(_typed([1], "long"), column_styles={"c": "readable_numbers"})

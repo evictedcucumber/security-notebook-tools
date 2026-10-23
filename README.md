@@ -24,7 +24,7 @@ Into a uv-managed project:
 uv add git+https://github.com/evictedcucumber/security-notebook-tools
 
 # A specific release
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v3.0.0
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v4.0.0
 
 # A full commit SHA (recommended for sensitive environments, see Security)
 uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
@@ -245,15 +245,12 @@ SigninLogs | take 100
 
 `format_dataframe(df)` returns a styled table for a notebook cell. Values are shown the way
 Kusto returns them (by KQL type), nulls are blank, and it shows at most 1000 rows unless you
-pass `max_rows=None`. `column_styles={"Bytes": "readable_numbers"}` groups the digits of a
-numeric column with spaces (`1 000 000 000.00000`); a style on a column of the wrong type raises
-`TypeError`.
+pass `max_rows=None`. Numbers have their digits grouped with spaces (`1 000 000 000.00000`).
 
 ```python
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # last expression in the cell renders the table
 format_dataframe(df, max_rows=None)  # every row
-format_dataframe(df, column_styles={"Bytes": "readable_numbers"})  # 1 000 000 000
 ```
 
 The full rules are in [docs/api.md](docs/api.md).
