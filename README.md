@@ -166,7 +166,9 @@ Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; 
 `x >= BatchStart and x < BatchEnd` (half-open, so boundary rows aren't counted twice). This is
 checked on both targets before any query is sent; other comparisons of the two names (`>`, `<=`,
 `==`, `between` ...) are rejected. On Sentinel each window is also sent as the API time range. The
-cost guard applies to every window, and the first failing window stops the batch. See
+cost guard applies to every window: as the windows differ only in their bounds, it checks the
+query and reads the table plans once per batch, not once per window. The first failing window
+stops the batch. See
 [docs/api.md](docs/api.md).
 
 Aggregations (`summarize`, `count`, `dcount` ...) run per window and are not combined unless you

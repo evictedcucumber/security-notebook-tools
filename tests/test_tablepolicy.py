@@ -913,3 +913,88 @@ def test_retention_notice_grace_of_a_day():
     assert "gone" not in message
     message, _ = tp.retention_notice("Syslog", policy, NOW - timedelta(days=367), NOW)
     assert "gone" in message
+
+
+# --- one check per batch -------------------------------------------------------------------------
+
+
+def _window(kql, day=1):
+    from security_notebook_tools._batch import _prefix
+
+    start = datetime(2026, 1, day, tzinfo=UTC)
+    return _prefix((start, start + timedelta(days=1))) + kql
+
+
+def _head():
+    from security_notebook_tools._batch import _PREFIX_RE
+
+    return _PREFIX_RE
+
+
+BATCH_KQL = "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+IDS = (RID, WS, None)
+
+
+def test_batch_checked_is_false_outside_a_batch():
+    tp.note_batch_checked(_window(BATCH_KQL), *IDS)  # no scope: nothing recorded
+    assert not tp.batch_checked(_window(BATCH_KQL), *IDS)
+
+
+def test_batch_check_skips_later_windows_only_after_a_pass():
+    with tp.batch_check(BATCH_KQL, _head()):
+        assert not tp.batch_checked(_window(BATCH_KQL, 1), *IDS)
+        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS)
+        assert tp.batch_checked(_window(BATCH_KQL, 2), *IDS)
+        assert tp.batch_checked(_window(BATCH_KQL, 1), RID.upper(), WS.upper(), None)
+    assert not tp.batch_checked(_window(BATCH_KQL, 2), *IDS)  # the scope ended
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        (RID.replace("sentinel-ws", "other-ws"), WS, None),
+        (RID, "33333333-3333-3333-3333-333333333333", None),
+        (RID, WS, "other-tenant"),
+    ],
+)
+def test_batch_check_holds_only_for_the_workspace_it_passed(ids):
+    with tp.batch_check(BATCH_KQL, _head()):
+        tp.note_batch_checked(_window(BATCH_KQL), *IDS)
+        assert not tp.batch_checked(_window(BATCH_KQL, 2), *ids)
+
+
+@pytest.mark.parametrize(
+    "kql",
+    [
+        "Aux_CL | take 1",  # another query entirely
+        BATCH_KQL + " | union Aux_CL",  # the batch's query with more after it
+        "Aux_CL; " + BATCH_KQL,  # ... or before it
+        BATCH_KQL,  # no window prefix
+        "let BatchStart = 1; let BatchEnd = 2;\n" + BATCH_KQL,  # not the generated prefix
+        'let BatchStart = datetime("2026-01-01T00:00:00.000000Z"); Aux_CL; '
+        'let BatchEnd = datetime("2026-01-02T00:00:00.000000Z");\n' + BATCH_KQL,
+        "Aux_CL | take 1;\n" + _window(BATCH_KQL),  # text ahead of the prefix
+        _window(BATCH_KQL).replace("2026-01-01", '2026-01-01") | union (Aux_CL'),
+        _window(BATCH_KQL).replace("2026", "２０２６", 1),  # non-ASCII digits
+        _window(BATCH_KQL).replace(";\n", ";\n\n", 1),
+        _window("", 3) + _window(BATCH_KQL),  # two prefixes
+    ],
+)
+def test_batch_check_does_not_cover_other_text(kql):
+    with tp.batch_check(BATCH_KQL, _head()):
+        tp.note_batch_checked(_window(BATCH_KQL), *IDS)
+        tp.note_batch_checked(kql, *IDS)  # not a window: nothing recorded for it either
+        assert not tp.batch_checked(kql, *IDS)
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        (datetime(1000, 1, 1, tzinfo=UTC), datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)),
+        (datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, 0, 0, 0, 1, tzinfo=UTC)),
+    ],
+)
+def test_generated_prefix_matches_the_batch_head(bounds):
+    from security_notebook_tools._batch import _prefix
+
+    assert _head().fullmatch(_prefix(bounds))

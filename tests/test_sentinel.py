@@ -595,3 +595,62 @@ def test_kql_and_service_text_are_never_logged(client, caplog, _log_file):
     for leak in LEAKS:
         assert leak not in logged
     assert "partial results" in logged
+
+
+# --- cost guard once per batch -------------------------------------------------------------------
+
+
+def _window(kql, day):
+    from datetime import timedelta
+
+    from security_notebook_tools._batch import _prefix
+
+    start = datetime(2026, 1, day, tzinfo=UTC)
+    return _prefix((start, start + timedelta(days=1))) + kql
+
+
+def test_batch_windows_after_the_first_are_not_checked_again(client):
+    from security_notebook_tools._batch import _PREFIX_RE
+    from security_notebook_tools._tablepolicy import batch_check
+
+    kql = "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    with (
+        mock.patch("security_notebook_tools._sentinel.check_sentinel_query") as check,
+        batch_check(kql, _PREFIX_RE),
+    ):
+        for day in (1, 2, 3):
+            client.query(_window(kql, day))
+        client.query("U | take 1")  # not a window of the batch: checked as usual
+    assert client._get_policy.call_count == 2
+    assert [c.args[0] for c in check.call_args_list] == [_window(kql, 1), "U | take 1"]
+    assert client._mock.query_workspace.call_count == 4
+
+
+def test_batch_rejected_window_is_rejected_every_time(client):
+    from security_notebook_tools._batch import _PREFIX_RE
+    from security_notebook_tools._tablepolicy import batch_check
+
+    kql = "Aux_CL | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    with batch_check(kql, _PREFIX_RE):
+        for day in (1, 2):
+            with pytest.raises(ConfigurationError, match="Aux_CL"):
+                client.query(_window(kql, day))
+    assert client._get_policy.call_count == 2
+    client._mock.query_workspace.assert_not_called()
+
+
+def test_batch_policy_failure_is_not_remembered(client):
+    from security_notebook_tools._batch import _PREFIX_RE
+    from security_notebook_tools._tablepolicy import batch_check
+
+    kql = "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    client._mock.query_workspace.return_value = LogsQueryResult(tables=[_table()])
+    client._get_policy.side_effect = [QueryError("Could not verify Sentinel table tiers"), POLICY]
+    with batch_check(kql, _PREFIX_RE):
+        with pytest.raises(QueryError):
+            client.query(_window(kql, 1))
+        client.query(_window(kql, 2))
+        client.query(_window(kql, 3))
+    assert client._get_policy.call_count == 2
+    assert client._mock.query_workspace.call_count == 2

@@ -10,6 +10,11 @@ API cannot refuse them, so this module enforces the rule client-side, before a q
    escape hatches (``search``, ``union *``, ``table()``, ``workspace()``, ``externaldata`` ...)
    appears.
 
+A batch (``exec_batch_query``) sends the same query once per window, differing only in the
+``let`` prefix that defines the window. Inside :func:`batch_check` the guard runs for the first
+window that reaches the service and is skipped for the others, so the table plans are read and
+the query analysed once per batch rather than once per window.
+
 Everything fails closed: if the tiers cannot be verified the query is not sent. This is a
 client-side guard built on a tokenizer, not a KQL parser, so it is a safety net and not a
 guarantee; see the README for the server-side controls that are.
@@ -17,10 +22,14 @@ guarantee; see the README for the server-side controls that are.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
+import re
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -442,6 +451,89 @@ def _tables_read(tokens: list[Token], policy: TablePolicy) -> set[str]:
 def tables_read(kql: str, policy: TablePolicy) -> set[str]:
     """Lower-case names of the workspace tables ``kql`` mentions."""
     return _tables_read(tokenize(kql), policy)
+
+
+# --- One check per batch -----------------------------------------------------------------------
+
+
+@dataclass
+class _BatchCheck:
+    """The query of a running batch and the workspaces it has passed the cost guard for."""
+
+    kql: str
+    head: re.Pattern[str]
+    passed: set[tuple[str, str, str | None]] = field(default_factory=set)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def is_window(self, kql: str) -> bool:
+        """Whether ``kql`` is the batch's query behind a window prefix that ``head`` matches."""
+        cut = len(kql) - len(self.kql)
+        return cut >= 0 and kql[cut:] == self.kql and self.head.fullmatch(kql[:cut]) is not None
+
+
+_batch: contextvars.ContextVar[_BatchCheck | None] = contextvars.ContextVar(
+    "security_notebook_tools_batch_check", default=None
+)
+
+
+@contextlib.contextmanager
+def batch_check(kql: str, head: re.Pattern[str]) -> Iterator[None]:
+    """Run the cost guard once for all the windows of a batch while the block runs.
+
+    A window's query is ``prefix + kql``, where the prefix is text the batch generates and only
+    its literal values change from window to window, so one check decides for every window. The
+    first window sent checks as usual (see :func:`batch_checked`); later ones whose text is
+    ``kql`` behind a prefix that ``head`` matches in full are not checked again. Any other text
+    is checked as usual. Worker threads see the scope if they run in a copy of this context.
+
+    Args:
+        kql: The user's query, without the window prefix.
+        head: Matches exactly the prefixes the batch generates; it must allow nothing that could
+            change what the query reads (only the literal values may vary).
+
+    Yields:
+        None.
+    """
+    token = _batch.set(_BatchCheck(kql, head))
+    try:
+        yield
+    finally:
+        _batch.reset(token)
+
+
+def _batch_key(resource_id: str, workspace_id: str, tenant_id: str | None) -> tuple:
+    """The workspace a batch's check holds for (case-insensitive, like :func:`get_policy`)."""
+    return (resource_id.lower(), workspace_id.lower(), tenant_id)
+
+
+def batch_checked(kql: str, resource_id: str, workspace_id: str, tenant_id: str | None) -> bool:
+    """Whether ``kql`` is a window of the running batch that already passed for this workspace.
+
+    True means the cost guard may be skipped for ``kql``. Outside :func:`batch_check`, or for
+    text that is not one of the batch's windows, it is always false.
+    """
+    scope = _batch.get()
+    if scope is None or not scope.is_window(kql):
+        return False
+    with scope.lock:
+        done = _batch_key(resource_id, workspace_id, tenant_id) in scope.passed
+    if done:
+        logger.debug("Cost guard already passed for this batch's query; window not checked again")
+    return done
+
+
+def note_batch_checked(
+    kql: str, resource_id: str, workspace_id: str, tenant_id: str | None
+) -> None:
+    """Record that ``kql`` passed the cost guard, so the batch's other windows skip it.
+
+    Call it only after :func:`get_policy` and :func:`check_sentinel_query` passed for ``kql``.
+    Does nothing outside :func:`batch_check` or for text that is not one of the batch's windows.
+    """
+    scope = _batch.get()
+    if scope is not None and scope.is_window(kql):
+        with scope.lock:
+            scope.passed.add(_batch_key(resource_id, workspace_id, tenant_id))
 
 
 def retention_notice(

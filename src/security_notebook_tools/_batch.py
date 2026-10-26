@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -47,6 +48,7 @@ from ._query import (
     timed_out_before,
     window_key,
 )
+from ._tablepolicy import batch_check
 from ._timerange import validate_window_args
 
 logger = logging.getLogger("security_notebook_tools.batch")
@@ -122,6 +124,12 @@ def _literal(value: datetime) -> str:
 def _prefix(bounds: tuple[datetime, datetime]) -> str:
     """The ``let`` statements that define ``BatchStart`` and ``BatchEnd`` for a window."""
     return f"let BatchStart = {_literal(bounds[0])}; let BatchEnd = {_literal(bounds[1])};\n"
+
+
+# Exactly the text _prefix produces, for any bounds: only the digits of the literals vary, so
+# the cost guard's verdict on one window holds for every window (see _tablepolicy.batch_check).
+_STAMP = r'datetime\("\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"\)'
+_PREFIX_RE = re.compile(rf"let BatchStart = {_STAMP}; let BatchEnd = {_STAMP};\n", re.ASCII)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -660,7 +668,10 @@ def exec_batch_query(
     ``timedelta`` and ``end`` is not given), the windows are instead cut at multiples of
     ``interval`` from 1970-01-01 UTC (midnight UTC for the default 1 day), so the first window
     is clipped to ``start`` as well and there may be one window more. Each run goes through the
-    same checks as ``exec_query``, so the Sentinel cost guard applies to every window.
+    same checks as ``exec_query``. The Sentinel cost guard applies to every window, but as the
+    windows differ only in ``BatchStart`` and ``BatchEnd`` it checks the query (and reads the
+    table plans) once, for the first window sent, and the table plans it read hold for the
+    whole batch.
 
     Each window is cached separately (see ``exec_query``), so re-running a batch reuses the
     windows that already succeeded: all of them for the same absolute ``start`` and ``end``, and
@@ -910,13 +921,15 @@ def exec_batch_query(
             end_utc,
             max_workers,
         )
-        results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
-        if keys and len(results[0].columns):
-            _check_columns(results[0], keys + cols)  # before the remaining windows run
-        if max_workers > 1 and total > 2:
-            results += _run_parallel(jobs[1:], max_workers, stop)
-        else:
-            results += [job() for job in jobs[1:]]
+        # The cost guard checks the first window sent; the others are the same query.
+        with batch_check(kql, _PREFIX_RE):
+            results = [jobs[0]()]  # alone first: fails once on a bad query or config, warms caches
+            if keys and len(results[0].columns):
+                _check_columns(results[0], keys + cols)  # before the remaining windows run
+            if max_workers > 1 and total > 2:
+                results += _run_parallel(jobs[1:], max_workers, stop)
+            else:
+                results += [job() for job in jobs[1:]]
         merged = _merge(results)
         logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
         if keys and len(merged.columns):

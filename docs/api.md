@@ -102,6 +102,7 @@ runs client-side before the query is sent, in `exec_query` and in the Sentinel c
    (needs `Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read`,
    for example Log Analytics Reader). The workspace's `customerId` must equal
    `SENTINEL_WORKSPACE_ID`. The result is cached for 5 minutes per workspace and tenant.
+   `exec_batch_query` does this, and the analysis below, once per batch rather than per window.
 2. If that fails for any reason the query is not sent (`QueryError`: the tiers could not be
    verified). There is no fallback to "allow".
 3. The KQL is tokenized (comments and string literals are ignored) and rejected if it contains:
@@ -338,7 +339,10 @@ must appear (outside comments and strings), and any other comparison of `BatchSt
 `BatchEnd` (`>`, `<=`, `==`, `!=`, `between`, or the wrong variable) is rejected, as is defining
 either name yourself. Other uses, such as `extend WindowStart = BatchStart`, are fine. On Sentinel
 each window is also sent as the API time range, so the 1-day default and the "set in query" rules
-of `exec_query` do not apply. The Sentinel cost guard applies to every window.
+of `exec_query` do not apply. The Sentinel cost guard applies to every window. The windows differ
+only in `BatchStart` and `BatchEnd`, so it checks the query, and reads the table plans, once for
+the first window sent, and that verdict holds for the rest of the batch (even one that runs longer
+than the 5-minute table-plan cache). A new batch checks again.
 
 Aggregations (`summarize`, `count`, `dcount`, `top` ...) run per window and by default are not
 combined. Pass `merge_on` and `agg_column` (and optionally `agg_func`) to group the merged rows and

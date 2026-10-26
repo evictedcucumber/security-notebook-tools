@@ -64,7 +64,13 @@ from ._log import (
     mask_id,
     redact_exception_text,
 )
-from ._tablepolicy import check_sentinel_query, get_policy, retention_notice
+from ._tablepolicy import (
+    batch_checked,
+    check_sentinel_query,
+    get_policy,
+    note_batch_checked,
+    retention_notice,
+)
 from ._timerange import Timespan, timespan_start
 
 logger = logging.getLogger("security_notebook_tools.sentinel")
@@ -345,7 +351,9 @@ class SentinelClient:
         """Run ``kql`` and return every result table as a DataFrame.
 
         Before anything is sent, the query is checked against the workspace's table plans: it
-        may only read Analytics-plan tables (see :func:`check_sentinel_query`).
+        may only read Analytics-plan tables (see :func:`check_sentinel_query`). Inside a batch
+        (see :func:`batch_check`) only the first window to be sent is checked; the others are
+        the same query with a different window prefix.
 
         Args:
             kql: The KQL query.
@@ -381,8 +389,13 @@ class SentinelClient:
                 ``QueryTransientError``.
             PartialResultError: The result was partial and ``raise_on_partial`` is set.
         """
-        policy = get_policy(self.resource_id, self.workspace_id, self.credential, self.tenant_id)
-        check_sentinel_query(kql, policy)
+        ids = (self.resource_id, self.workspace_id, self.tenant_id)
+        if not batch_checked(kql, *ids):
+            policy = get_policy(
+                self.resource_id, self.workspace_id, self.credential, self.tenant_id
+            )
+            check_sentinel_query(kql, policy)
+            note_batch_checked(kql, *ids)
         logger.info(
             "Running Sentinel query (timespan=%s, kql=%s)",
             describe_timespan(timespan),

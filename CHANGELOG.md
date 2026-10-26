@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `exec_batch_query` on Sentinel runs the cost guard once per batch instead of once per window:
+  the first window sent is checked (table plans read, query analysed) and the other windows,
+  which differ only in `BatchStart` and `BatchEnd`, are not checked again. This removes the
+  per-window table-plan lookups (and their re-reads from Azure Resource Manager when a batch
+  outlives the 5-minute table-plan cache) and the per-window "Cost guard passed" log line. The
+  table plans read at the start of a batch hold until it ends; a new batch reads them again.
+
 ## 6.0.0 - 2026-10-26
 
 ### Breaking

@@ -1911,3 +1911,59 @@ def test_batch_min_interval_splits_adx_server_timeouts(adx):
         target="adx",
     )
     assert df["a"].tolist() == [2, 3]
+
+
+# --- exec_batch_query: the cost guard runs once per batch ---------------------------------------
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_batch_checks_the_cost_guard_once(monkeypatch, workers):
+    from azure.monitor.query import LogsQueryResult, LogsTable
+
+    from security_notebook_tools import _sentinel
+    from security_notebook_tools._tablepolicy import TablePolicy, check_sentinel_query
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    policy = TablePolicy(
+        customer_id="11111111-1111-1111-1111-111111111111", tables={"t": ("T", "Analytics")}
+    )
+    table = LogsTable(name="T", columns=["a"], columns_types=["long"], rows=[[1]])
+    with (
+        mock.patch("security_notebook_tools._query.get_credential"),
+        mock.patch.object(_sentinel, "LogsQueryClient") as sdk,
+        mock.patch.object(_sentinel, "get_policy", return_value=policy) as get,
+        mock.patch.object(_sentinel, "check_sentinel_query", wraps=check_sentinel_query) as check,
+    ):
+        sdk.return_value.query_workspace.return_value = LogsQueryResult(tables=[table])
+        df = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=5), max_workers=workers)
+        assert len(df) == 5
+        assert sdk.return_value.query_workspace.call_count == 5
+        assert check.call_count == 1
+        assert get.call_count == 2  # the retention warning and the first window
+        # A new batch checks again (table plans may have changed in between).
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=5), cache=False)
+        assert check.call_count == 2
+
+
+def test_batch_cost_guard_rejection_still_stops_the_batch(monkeypatch):
+    from security_notebook_tools import _sentinel
+    from security_notebook_tools._tablepolicy import TablePolicy
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    policy = TablePolicy(
+        customer_id="11111111-1111-1111-1111-111111111111", tables={"t": ("T", "Basic")}
+    )
+    with (
+        mock.patch("security_notebook_tools._query.get_credential"),
+        mock.patch.object(_sentinel, "LogsQueryClient") as sdk,
+        mock.patch.object(_sentinel, "get_policy", return_value=policy),
+        pytest.raises(ConfigurationError, match="T"),
+    ):
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=3), max_workers=4)
+    sdk.return_value.query_workspace.assert_not_called()
