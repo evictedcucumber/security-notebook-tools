@@ -6,7 +6,7 @@ Guide for AI agents working in this repository.
 
 `security-notebook-tools` is a Python package (>=3.14) for running KQL against Microsoft
 Sentinel and Azure Data Explorer from Jupyter notebooks and getting pandas DataFrames back.
-Version 5.2.0. MIT licence.
+Version 5.3.0. MIT licence.
 
 ## Layout
 
