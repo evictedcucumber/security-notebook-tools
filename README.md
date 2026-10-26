@@ -214,8 +214,10 @@ Results are cached in memory by default (up to 32 distinct queries, least recent
 first), so repeating a query in a notebook sends no request and costs nothing. A relative range
 (a `timedelta`, including the default last 1 day) is not re-evaluated on a hit, so you get the
 data from when the query first ran. Failures and partial results are not cached, and each call
-gets its own copy. `exec_batch_query` caches each window separately, so re-running it with the
-same absolute `start` and `end` after a failure reuses the windows that succeeded.
+gets its own copy. `exec_batch_query` caches each window separately, so a re-run reuses the
+windows that already succeeded: all of them for the same absolute `start` and `end`, and for a
+range relative to now (`start` a `timedelta`, no `end`) every window but the first and last,
+because those windows are cut on a fixed `interval` grid (midnight UTC for the default 1 day).
 
 ```python
 df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call (`--no-cache` in %%kql)

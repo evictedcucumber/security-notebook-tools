@@ -124,15 +124,25 @@ def _prefix(bounds: tuple[datetime, datetime]) -> str:
     return f"let BatchStart = {_literal(bounds[0])}; let BatchEnd = {_literal(bounds[1])};\n"
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 def _windows(
-    start: datetime, end: datetime, interval: timedelta
+    start: datetime, end: datetime, interval: timedelta, *, aligned: bool = False
 ) -> list[tuple[datetime, datetime]]:
-    """Split ``[start, end)`` into consecutive windows of ``interval``; the last is clipped."""
+    """Split ``[start, end)`` into consecutive windows of ``interval``; the last is clipped.
+
+    With ``aligned`` the boundaries are multiples of ``interval`` from the Unix epoch (UTC)
+    instead of ``start``, so the first window is clipped too and the windows in between are the
+    same whenever the period ends.
+    """
     windows = []
     cursor = start
+    cut = _EPOCH + ((start - _EPOCH) // interval + 1) * interval if aligned else start + interval
     while cursor < end:
-        windows.append((cursor, min(cursor + interval, end)))
-        cursor += interval
+        windows.append((cursor, min(cut, end)))
+        cursor = cut
+        cut += interval
     return windows
 
 
@@ -646,12 +656,15 @@ def exec_batch_query(
     Use it when a query is too big for one run or needs a longer period than one query allows.
     The period from ``start`` to ``end`` is split into windows of ``interval``:
     ``[start, start + interval)``, ``[start + interval, start + 2 * interval)`` and so on, with
-    the last window clipped to ``end``. Each run goes through the same checks as ``exec_query``,
-    so the Sentinel cost guard applies to every window.
+    the last window clipped to ``end``. When the period is relative to now (``start`` is a
+    ``timedelta`` and ``end`` is not given), the windows are instead cut at multiples of
+    ``interval`` from 1970-01-01 UTC (midnight UTC for the default 1 day), so the first window
+    is clipped to ``start`` as well and there may be one window more. Each run goes through the
+    same checks as ``exec_query``, so the Sentinel cost guard applies to every window.
 
-    Each window is cached separately (see ``exec_query``), so re-running a batch with the same
-    absolute ``start`` and ``end`` after a failure re-uses the windows that succeeded. With a
-    relative ``start`` the windows move with "now", so they will not hit the cache.
+    Each window is cached separately (see ``exec_query``), so re-running a batch reuses the
+    windows that already succeeded: all of them for the same absolute ``start`` and ``end``, and
+    for a period relative to now every window except the first and last, which move with now.
 
     By default the windows run one after another, oldest first. With ``max_workers`` above 1 the
     first window still runs alone (so a bad query or configuration fails once, and the client,
@@ -712,7 +725,8 @@ def exec_batch_query(
             commands cannot be windowed). Do not define ``BatchStart`` or ``BatchEnd`` yourself.
             It must filter on the window as described above.
         start: A ``datetime`` (the start of the period), or a ``timedelta`` meaning that long
-            before ``end``. A naive datetime is taken to be UTC.
+            before ``end``. A naive datetime is taken to be UTC. A ``timedelta`` without ``end``
+            aligns the windows to ``interval`` as described above.
         end: The end of the period (exclusive); defaults to now in UTC. A naive datetime is
             taken to be UTC.
         interval: The length of each window (default 1 day); must be positive.
@@ -875,7 +889,9 @@ def exec_batch_query(
             # Once for the whole range, not per window (the windows skip the check).
             _warn_retention(kql, (start_utc, end_utc))
 
-        windows = _windows(start_utc, end_utc, interval)
+        # Relative to now: cut on a fixed grid so re-runs send the same windows and hit the cache.
+        aligned = isinstance(start, timedelta) and end is None
+        windows = _windows(start_utc, end_utc, interval, aligned=aligned)
         total = len(windows)
 
         stop = threading.Event()
@@ -886,9 +902,10 @@ def exec_batch_query(
             for index, bounds in enumerate(windows, start=1)
         ]
         logger.info(
-            "%d windows of %s from %s to %s (max_workers=%d)",
+            "%d windows of %s%s from %s to %s (max_workers=%d)",
             total,
             interval,
+            " (aligned to the interval)" if aligned else "",
             start_utc,
             end_utc,
             max_workers,

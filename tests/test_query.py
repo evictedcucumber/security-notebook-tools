@@ -240,10 +240,50 @@ def test_batch_timedelta_start_and_default_end(sentinel):
     with mock.patch("security_notebook_tools._batch.datetime") as dt:
         dt.now.return_value = fake_now
         snt.exec_batch_query(FILTER, timedelta(hours=5), interval=timedelta(hours=2))
+    # Relative to now: cut on the 2-hour grid from the epoch, first and last windows clipped.
+    assert _sent_windows(cls) == [
+        (datetime(2026, 1, 10, 1, tzinfo=UTC), datetime(2026, 1, 10, 2, tzinfo=UTC)),
+        (datetime(2026, 1, 10, 2, tzinfo=UTC), datetime(2026, 1, 10, 4, tzinfo=UTC)),
+        (datetime(2026, 1, 10, 4, tzinfo=UTC), fake_now),
+    ]
+
+
+def test_batch_timedelta_start_with_end_is_not_aligned(sentinel):
+    cls, _ = sentinel
+    end = datetime(2026, 1, 10, 6, tzinfo=UTC)
+    snt.exec_batch_query(FILTER, timedelta(hours=5), end, interval=timedelta(hours=2))
     assert _sent_windows(cls) == [
         (datetime(2026, 1, 10, 1, tzinfo=UTC), datetime(2026, 1, 10, 3, tzinfo=UTC)),
         (datetime(2026, 1, 10, 3, tzinfo=UTC), datetime(2026, 1, 10, 5, tzinfo=UTC)),
-        (datetime(2026, 1, 10, 5, tzinfo=UTC), fake_now),
+        (datetime(2026, 1, 10, 5, tzinfo=UTC), end),
+    ]
+
+
+def test_batch_relative_rerun_reuses_all_but_the_edge_windows(sentinel):
+    cls, _ = sentinel
+    with mock.patch("security_notebook_tools._batch.datetime") as dt:
+        dt.now.return_value = datetime(2026, 1, 10, 6, 15, 30, 123456, tzinfo=UTC)
+        snt.exec_batch_query(FILTER, timedelta(days=30))
+        assert _sdk_calls(cls) == 31  # 29 whole days plus the clipped first and last
+        dt.now.return_value = datetime(2026, 1, 10, 6, 47, 2, 654321, tzinfo=UTC)
+        snt.exec_batch_query(FILTER, timedelta(days=30))
+    assert _sdk_calls(cls) == 33  # only the first and last windows ran again
+    windows = _sent_windows(cls)
+    assert windows[1] == (datetime(2025, 12, 12, tzinfo=UTC), datetime(2025, 12, 13, tzinfo=UTC))
+    assert windows[-1] == (
+        datetime(2026, 1, 10, tzinfo=UTC),
+        datetime(2026, 1, 10, 6, 47, 2, 654321, tzinfo=UTC),
+    )
+
+
+def test_batch_relative_start_on_the_grid_has_no_sliver_window(sentinel):
+    cls, _ = sentinel
+    with mock.patch("security_notebook_tools._batch.datetime") as dt:
+        dt.now.return_value = datetime(2026, 1, 3, tzinfo=UTC)
+        snt.exec_batch_query(FILTER, timedelta(days=2))
+    assert _sent_windows(cls) == [
+        (D0, datetime(2026, 1, 2, tzinfo=UTC)),
+        (datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 1, 3, tzinfo=UTC)),
     ]
 
 

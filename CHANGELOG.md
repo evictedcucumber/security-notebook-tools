@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- `exec_batch_query` with a period relative to now (`start` a `timedelta`, no `end`) now cuts
+  its windows at multiples of `interval` from 1970-01-01 UTC (midnight UTC for the default
+  1 day) instead of at `start`, so the first window is clipped as well as the last and there
+  may be one window more. The period covered is unchanged. A per-window `summarize` without
+  `merge_on` can therefore return one more row, and `BatchStart`/`BatchEnd` values differ.
+  Absolute periods, and a `timedelta` `start` with an explicit `end`, are cut as before.
+
+### Fixed
+
+- Re-running `exec_batch_query` with a relative period (such as
+  `exec_batch_query(kql, timedelta(days=30))`) no longer misses the result cache for every
+  window: the windows used to be anchored to the exact current time, so their bounds changed on
+  every run. Now only the first and last windows run again; the rest come from the cache, and
+  windows remembered as timed out are split straight away on a re-run too.
+
 ## 5.3.0 - 2026-10-26
 
 ### Added

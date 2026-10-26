@@ -293,7 +293,10 @@ exec_batch_query(
 
 Run the same KQL once per consecutive time window and merge the results. The period is split
 into `[start, start + interval)`, `[start + interval, start + 2 * interval)` ... with the last
-window clipped to `end`. By default windows run sequentially, oldest first. With `max_workers`
+window clipped to `end`. When the period is relative to now (`start` is a `timedelta` and `end`
+is not given), the windows are cut at multiples of `interval` from 1970-01-01 UTC instead
+(midnight UTC for the default 1 day), so the first window is clipped to `start` too and there
+may be one window more; this lets a re-run reuse the cached windows in between. By default windows run sequentially, oldest first. With `max_workers`
 above 1 the first window still runs alone (a bad query or configuration fails once, and the
 client, credential and table-plan caches are warm), then the rest run in parallel on up to
 `max_workers` threads; results are always in window order. The first failure stops the batch:
@@ -660,9 +663,11 @@ used are dropped first.
   cache.
 - **A hit sends no request**, so nothing is billed and the cost guard check is not needed. An
   INFO log line says the result came from the cache.
-- **Batch:** each window is cached separately, so re-running `exec_batch_query` with the same
-  absolute `start` and `end` after a failure reuses the windows that already succeeded. With a
-  relative `start` (a `timedelta`) the windows move with "now" and do not hit.
+- **Batch:** each window is cached separately, so re-running `exec_batch_query` reuses the
+  windows that already succeeded: all of them with the same absolute `start` and `end`, and with
+  a range relative to now (`start` a `timedelta`, no `end`) every window except the first and
+  last, which move with now. Such a range is cut on a fixed `interval` grid so the windows in
+  between stay the same.
 
 Use `cache=False` (or `--no-cache` in `%%kql`) for one fresh call, or `clear_cache()` to drop
 everything. Large results stay in memory until evicted or cleared, so use `cache=False` or call
