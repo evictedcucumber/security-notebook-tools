@@ -22,6 +22,7 @@ Public API:
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
+* ``merge_dataframe``: group a DataFrame (or several) by key columns and aggregate columns.
 * ``pivot_dataframe``: pivot a result into one row per key and one column per value of another.
 * ``clear_cache``: forget cached query results (and clients, credentials and table plans).
 
@@ -33,10 +34,11 @@ Logging: every record at INFO and above from every module is appended to ``noteb
 the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
 above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
 redacted: KQL text, result values, environment variable values, tokens and URL query strings are
-never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``format_dataframe`` and
-``pivot_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``): for that call, and
-everything it calls, the records at DEBUG and above are also printed to the cell's output,
-unredacted (raw KQL, workspace IDs, cluster URIs). DEBUG records are never written to the file.
+never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``format_dataframe``,
+``merge_dataframe`` and ``pivot_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``):
+for that call, and everything it calls, the records at DEBUG and above are also printed to the
+cell's output, unredacted (raw KQL, workspace IDs, cluster URIs). DEBUG records are never
+written to the file.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
@@ -46,6 +48,7 @@ import logging
 from ._batch import exec_batch_query
 from ._format import format_dataframe
 from ._log import describe_exception
+from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 
@@ -56,6 +59,7 @@ __all__ = [
     "exec_batch_query",
     "exec_query",
     "format_dataframe",
+    "merge_dataframe",
     "pivot_dataframe",
 ]
 

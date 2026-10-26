@@ -53,6 +53,7 @@ from security_notebook_tools import (
     exec_batch_query,
     format_dataframe,
     pivot_dataframe,
+    merge_dataframe,
     clear_cache,
 )
 ```
@@ -173,7 +174,8 @@ pass `merge_on` (columns to group by) and `agg_column` (columns to aggregate), w
 (default `"sum"`; any pandas aggregation name or a callable). Null keys are kept as a group. For
 per-window `summarize` output use only functions that re-combine: `sum` of counts or sums, `min` of
 mins, `max` of maxes. A mean of means, or a sum of `dcount`, is wrong; `summarize` the sum and the
-count per window, re-aggregate both with `sum` and divide.
+count per window, re-aggregate both with `sum` and divide. To do the same on DataFrames you
+already have, without querying, use [`merge_dataframe`](#merge).
 
 Windows run one after another by default. `max_workers` (1 to 5) runs them in parallel: the first
 window runs alone to check the query and warm the caches, then the rest run concurrently, with
@@ -294,13 +296,35 @@ format_dataframe(
 
 The full rules are in [docs/api.md](docs/api.md).
 
+### Merge
+
+`merge_dataframe(df, merge_on, agg_column)` groups rows by `merge_on` and aggregates `agg_column`
+with `agg_func` (default `"sum"`), the same step `exec_batch_query` applies to its windows, on data
+you already have. `df` is one DataFrame or a list of them (concatenated in order, as batch windows
+are), so you can combine `exec_query` results over different periods or workspaces. No query is
+run. The result has one row per key, sorted by the keys, with only the `merge_on` and
+`agg_column` columns. Null keys are kept as a group, and the same caveat applies as for batches:
+re-combine aggregates only with functions that compose (`sum`, `min`, `max`).
+
+```python
+from datetime import datetime
+from security_notebook_tools import exec_query, merge_dataframe
+
+kql = "SigninLogs | summarize n = count() by UserPrincipalName"
+jan = exec_query(kql, timespan=(datetime(2026, 1, 1), datetime(2026, 2, 1)))
+mar = exec_query(kql, timespan=(datetime(2026, 3, 1), datetime(2026, 4, 1)))
+merge_dataframe([jan, mar], "UserPrincipalName", "n")  # one row per user
+```
+
+The full rules are in [docs/api.md](docs/api.md).
+
 ## Logging
 
 Every log record at INFO and above from the `security_notebook_tools` logger and its children
 (`auth`, `config`, `sentinel`, `adx`, `timerange`, `tablepolicy`, `query`, `batch`, `format`,
-`pivot`, `magic`) is appended to `notebooks.log` in your project root (the nearest directory above
-the working directory with `.git` or `pyproject.toml`, never looking above your home directory,
-else the working directory). The file is created with permissions 0600 and is not written if it
+`pivot`, `merge`, `magic`) is appended to `notebooks.log` in your project root (the nearest
+directory above the working directory with `.git` or `pyproject.toml`, never looking above your
+home directory, else the working directory). The file is created with permissions 0600 and is not written if it
 is a symbolic link, a hard link or owned by someone else. WARNING and above from the `azure` SDK
 loggers go there too, so Azure SDK warnings now appear only in `notebooks.log`, not in the cell's
 stderr. Nothing is printed to the notebook cell unless you pass `debug=True` (see
@@ -336,9 +360,9 @@ kept) and user names in home directories. Tracebacks list files and lines but no
 ### Debug output in the cell
 
 To see what a call does, pass `debug=True` (`--debug` in `%%kql`) to `exec_query`,
-`exec_batch_query`, `format_dataframe` or `pivot_dataframe`. While that call runs, the package's
-log records at DEBUG and above are also printed to the cell's output, in the same line format as
-the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
+`exec_batch_query`, `format_dataframe`, `pivot_dataframe` or `merge_dataframe`. While that call
+runs, the package's log records at DEBUG and above are also printed to the cell's output, in the
+same line format as the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
 
 ```python
 df = exec_query("SigninLogs | take 100", debug=True)

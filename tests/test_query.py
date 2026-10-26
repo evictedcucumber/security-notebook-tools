@@ -14,6 +14,7 @@ PUBLIC = {
     "exec_batch_query",
     "exec_query",
     "format_dataframe",
+    "merge_dataframe",
     "pivot_dataframe",
 }
 

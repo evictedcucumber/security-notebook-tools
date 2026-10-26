@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `merge_dataframe(df, merge_on, agg_column, agg_func="sum", *, debug=False)`: the
+  `merge_on`/`agg_column`/`agg_func` step of `exec_batch_query` on DataFrames you already have,
+  without running a query. `df` is one DataFrame or a list of them (concatenated like batch
+  windows, for example `exec_query` results over different periods). Logs to the new
+  `security_notebook_tools.merge` logger.
+
 ## 5.2.0 - 2026-10-23
 
 ### Added
