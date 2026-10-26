@@ -147,7 +147,7 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
         if non_empty:
             merged = pd.concat(non_empty, ignore_index=True)
         elif results:
-            merged = results[0]
+            merged = results[0].copy()  # no rows; a copy keeps the caller's attrs untouched
         else:
             merged = pd.DataFrame()
         call["rows"] = len(merged)
@@ -169,14 +169,30 @@ def _names(value: str | Sequence[str], label: str) -> list[str]:
     return items
 
 
-def _check_columns(df: pd.DataFrame, needed: list[str]) -> None:
+def _check_columns(df: pd.DataFrame, needed: list[str], where: str = "the query result") -> None:
     """Raise ``ConfigurationError`` if ``df`` lacks any of the ``needed`` columns."""
     missing = [name for name in needed if name not in df.columns]
     if missing:
         raise ConfigurationError(
-            f"Column(s) {missing} named in merge_on/agg_column are not in the query result; "
+            f"Column(s) {missing} named in merge_on/agg_column are not in {where}; "
             f"available columns: {list(df.columns)}."
         )
+
+
+def _check_agg_args(
+    merge_on: str | Sequence[str], agg_column: str | Sequence[str], agg_func: Any
+) -> tuple[list[str], list[str]]:
+    """Validate ``merge_on``, ``agg_column`` and ``agg_func``; return the key and value names."""
+    keys = _names(merge_on, "merge_on")
+    cols = _names(agg_column, "agg_column")
+    both = [name for name in keys if name in cols]
+    if both:
+        raise ConfigurationError(f"{both} cannot be in both merge_on and agg_column.")
+    if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
+        raise ConfigurationError(
+            f"agg_func must be a function name or a callable, got {agg_func!r}."
+        )
+    return keys, cols
 
 
 def _agg_type(func: str | Callable[..., Any], original: str | None) -> str | None:
@@ -193,12 +209,18 @@ def _agg_type(func: str | Callable[..., Any], original: str | None) -> str | Non
 
 
 def _aggregate(
-    merged: pd.DataFrame, keys: list[str], cols: list[str], func: str | Callable[..., Any]
+    merged: pd.DataFrame,
+    keys: list[str],
+    cols: list[str],
+    func: str | Callable[..., Any],
+    *,
+    log: logging.Logger = logger,
+    where: str = "the query result",
 ) -> pd.DataFrame:
     """Group ``merged`` by ``keys`` and aggregate ``cols`` with ``func``; keep ``kql_types``."""
-    _check_columns(merged, keys + cols)
+    _check_columns(merged, keys + cols, where)
     try:
-        with dependency_call(logger, "pandas groupby aggregation", keys=keys, columns=cols):
+        with dependency_call(log, "pandas groupby aggregation", keys=keys, columns=cols):
             out = merged.groupby(keys, as_index=False, dropna=False, sort=True)[cols].agg(func)
     except Exception as exc:
         name = func if isinstance(func, str) else getattr(func, "__name__", repr(func))
@@ -837,15 +859,7 @@ def exec_batch_query(
             if agg_func is not _DEFAULT_AGG:
                 raise ConfigurationError("agg_func needs merge_on and agg_column.")
         else:
-            keys = _names(merge_on, "merge_on")
-            cols = _names(agg_column, "agg_column")
-            both = [name for name in keys if name in cols]
-            if both:
-                raise ConfigurationError(f"{both} cannot be in both merge_on and agg_column.")
-            if not callable(agg_func) and not (isinstance(agg_func, str) and agg_func):
-                raise ConfigurationError(
-                    f"agg_func must be a function name or a callable, got {agg_func!r}."
-                )
+            keys, cols = _check_agg_args(merge_on, agg_column, agg_func)
         end_utc = _utc(end) if end is not None else now
         start_utc = end_utc - start if isinstance(start, timedelta) else _utc(start)
         if start_utc >= end_utc:
