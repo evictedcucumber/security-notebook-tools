@@ -709,3 +709,42 @@ def test_cell_output_shows_the_notebook_too(shell, capsys):
     with _log.debug_scope(True):
         child.debug("detail")
     assert "DEBUG security_notebook_tools.test [cell.ipynb]: detail" in capsys.readouterr().out
+
+
+def test_open_log_tightens_a_loose_existing_file(tmp_path):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("posix modes")
+    path = tmp_path / "loose.log"
+    path.write_text("old\n")
+    path.chmod(0o644)
+    _log._open_log(path).close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.read_text() == "old\n"
+
+
+def test_file_output_escapes_control_and_bidi_characters(tmp_path, monkeypatch):
+    path = tmp_path / "ctl.log"
+    monkeypatch.setattr(_log, "log_file_path", lambda: path)
+    child.info("esc \x1b]0;pwn\x07 c1 \x9b31m del \x7f bidi ‮ ⁦ tab\tok nul \x00")
+    _log.close_log_file()
+    text = path.read_text()
+    for raw in ("\x1b", "\x07", "\x9b", "\x7f", "‮", "⁦", "\x00"):
+        assert raw not in text
+    for shown in ("\\x1b]0;pwn\\x07", "\\x9b31m", "\\x7f", "\\u202e", "\\u2066", "\\x00"):
+        assert shown in text
+    assert "tab\tok" in text
+    assert text.count("\n") == 1
+
+
+def test_control_characters_in_a_traceback_are_escaped(tmp_path, monkeypatch):
+    path = tmp_path / "tb.log"
+    monkeypatch.setattr(_log, "log_file_path", lambda: path)
+    try:
+        raise RuntimeError("boom \x1b[2J")
+    except RuntimeError:
+        child.exception("failed")
+    _log.close_log_file()
+    assert "\x1b" not in path.read_text()

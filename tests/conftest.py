@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from security_notebook_tools import _config as config
@@ -33,3 +35,16 @@ def _clean_env(monkeypatch, _log_file):
     _log_file.unlink(missing_ok=True)  # clear_cache logs; tests start with no log file
     yield
     _query.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _propagate_package_logs():
+    """Let ``caplog`` (a root-logger handler) see package records, as the package itself does not.
+
+    A test of the real default sets ``propagate = False`` itself (or uses a subprocess).
+    """
+    pkg = logging.getLogger("security_notebook_tools")
+    before = pkg.propagate
+    pkg.propagate = True
+    yield
+    pkg.propagate = before

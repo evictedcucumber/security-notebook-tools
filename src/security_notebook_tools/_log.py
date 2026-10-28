@@ -1,4 +1,4 @@
-"""Always-on, redacted file logging for the package.
+r"""Always-on, redacted file logging for the package.
 
 All modules log to children of the ``security_notebook_tools`` logger (``.auth``, ``.config``,
 ``.sentinel``, ``.adx``, ``.timerange``, ``.tablepolicy``, ``.query``, ``.batch``, ``.format``,
@@ -17,6 +17,14 @@ The same handler is attached to the ``azure`` logger namespace (``azure.core``,
 ``azure.identity``, ``azure.monitor`` ...) but only passes WARNING and above from there, so the
 SDKs' warnings and errors reach the file and their request/response chatter does not. Their
 logger levels are not changed. The Kusto SDK (``azure.kusto``) does not log.
+
+The package logger does not propagate to the root logger (DEBUG records carry unredacted
+detail, so a ``logging.basicConfig`` handler or a log shipper must not receive them). To route
+the package's records elsewhere, attach your own handler to the ``security_notebook_tools``
+logger; it then sees every record, DEBUG included, unredacted. Control characters (ESC and other
+C0/C1 controls, DEL) and bidirectional override characters are written to the file as visible
+escapes such as ``\x1b`` and ``\u202e`` (tab is kept). An existing ``notebooks.log`` with
+group or other permission bits is set to 0600.
 
 Each line is ``<UTC RFC 3339 timestamp> <LEVEL> <logger> [<notebook>]: <message>``, for
 example::
@@ -674,7 +682,7 @@ def _open_log(path: Path) -> IO[str]:
 
     The file is created with mode 0600, symbolic links are not followed, and the opened file
     must be a regular file owned by the current user with a single link (where the platform
-    has those notions).
+    has those notions). An existing file with group or other permission bits is set to 0600.
     """
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -686,6 +694,8 @@ def _open_log(path: Path) -> IO[str]:
         getuid = getattr(os, "getuid", None)
         if getuid is not None and (info.st_uid != getuid() or info.st_nlink != 1):
             raise OSError("not owned by the current user, or hard-linked")
+        if info.st_mode & 0o077 and hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)  # an existing file with a looser mode is tightened
         return os.fdopen(fd, "a", encoding="utf-8")
     except BaseException:
         os.close(fd)
@@ -771,6 +781,19 @@ def notebook_name() -> str | None:
     return None
 
 
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def _escape_controls(text: str) -> str:
+    r"""Replace control and bidi-override characters with visible escapes (``\x1b``, ``\u202e``).
+
+    Tab is kept. Line feeds are handled by the caller, which splits and escapes them.
+    """
+    return _CONTROL_CHARS.sub(
+        lambda m: f"\\x{ord(m[0]):02x}" if ord(m[0]) < 0x100 else f"\\u{ord(m[0]):04x}", text
+    )
+
+
 class _UtcFormatter(logging.Formatter):
     """Formatter that renders timestamps in UTC and adds the notebook name to the line."""
 
@@ -811,7 +834,7 @@ class _RedactingFormatter(_UtcFormatter):
             text = super().format(record)
         finally:
             record.exc_text = cached
-        return "\n".join(redact(line) for line in text.split("\n"))
+        return "\n".join(_escape_controls(redact(line)) for line in text.split("\n"))
 
 
 class _ProjectFileHandler(logging.Handler):
@@ -919,6 +942,8 @@ def _install(*handlers: logging.Handler) -> None:
 
 logger = logging.getLogger(PACKAGE_LOGGER)
 logger.setLevel(logging.DEBUG)  # records exist; the handlers decide who sees which level
+# DEBUG records carry raw KQL and identifiers: never hand them to the root logger's handlers.
+logger.propagate = False
 file_handler = _ProjectFileHandler()
 cell_handler = _CellHandler()
 _install(file_handler, cell_handler)
