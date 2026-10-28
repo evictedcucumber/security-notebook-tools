@@ -245,3 +245,11 @@ def test_renders_through_format_dataframe(df, totals, values):
     html = format_dataframe(out).to_html()
     assert "<table" in html
     assert re.search(r"<td[^>]*>a</td>", html)
+
+
+def test_pivot_keeps_the_partial_flags(df):
+    df.attrs["partial"] = True
+    df.attrs["partial_windows"] = [("s", "e")]
+    out = pivot_dataframe(df, "User", columns="App")
+    assert out.attrs["partial"] is True
+    assert out.attrs["partial_windows"] == [("s", "e")]

@@ -7,6 +7,7 @@ import random
 import re
 import threading
 import time
+import warnings
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ import pandas as pd
 from ._errors import describe_network_error, log_unexpected, public_call
 from ._exceptions import (
     ConfigurationError,
+    PartialResultError,
     QueryConnectionError,
     QueryError,
     QueryThrottledError,
@@ -53,6 +55,8 @@ from ._timerange import validate_window_args
 
 logger = logging.getLogger("security_notebook_tools.batch")
 
+PARTIAL_ATTR = "partial"
+PARTIAL_WINDOWS_ATTR = "partial_windows"
 _BATCH_VARS = ("BatchStart", "BatchEnd")
 _EXPECTED = "filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd`"
 _COMPARISONS = frozenset({"<", ">", "<=", ">=", "==", "!=", "<>", "=~", "!~"})
@@ -171,7 +175,33 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
         call["rows"] = len(merged)
     if types:
         merged.attrs["kql_types"] = types
+    # A frame from exec_query has "partial" only; one from a batch window has both keys.
+    merged.attrs[PARTIAL_ATTR] = any(df.attrs.get(PARTIAL_ATTR) for df in results)
+    if any(PARTIAL_WINDOWS_ATTR in df.attrs for df in results):
+        merged.attrs[PARTIAL_WINDOWS_ATTR] = [
+            w for df in results for w in df.attrs.get(PARTIAL_WINDOWS_ATTR, [])
+        ]
+    else:
+        merged.attrs.pop(PARTIAL_WINDOWS_ATTR, None)
     return merged
+
+
+def _set_partial(df: pd.DataFrame, windows: list[tuple[datetime, datetime]]) -> None:
+    """Record on ``df`` which windows were partial (``partial`` is True if there are any)."""
+    df.attrs[PARTIAL_ATTR] = bool(windows)
+    df.attrs[PARTIAL_WINDOWS_ATTR] = list(windows)
+
+
+def _warn_partial(windows: list[tuple[datetime, datetime]], total: int) -> None:
+    """Warn once that ``windows`` returned partial results, so no repeat is hidden by dedupe."""
+    shown = "; ".join(f"{a:%Y-%m-%d %H:%M:%S} to {b:%Y-%m-%d %H:%M:%S} UTC" for a, b in windows[:5])
+    more = f"; and {len(windows) - 5} more" if len(windows) > 5 else ""
+    warnings.warn(
+        f"Batch query returned partial results for {len(windows)} of {total} windows ({shown}"
+        f"{more}). The result is incomplete and any totals are undercounted; see "
+        'df.attrs["partial_windows"], or pass raise_on_partial=True to fail instead.',
+        stacklevel=3,
+    )
 
 
 def _names(value: str | Sequence[str], label: str) -> list[str]:
@@ -279,6 +309,7 @@ def _attempt_window(
     timeout: int,
     cache: bool,
     stop: threading.Event,
+    raise_on_partial: bool = False,
 ) -> pd.DataFrame:
     """Run one window, retrying transient failures; wrap a failure with the window's name.
 
@@ -291,8 +322,12 @@ def _attempt_window(
         timeout: Server-side timeout in seconds.
         cache: Whether the result cache may serve and keep the window.
         stop: Set when the batch is failing; ends the wait before a retry.
+        raise_on_partial: Fail the window with ``PartialResultError`` (not retried) if Sentinel
+            returns only a partial result; otherwise the partial window is returned, recorded in
+            ``attrs["partial_windows"]``.
 
     Raises:
+        PartialResultError: ``raise_on_partial`` and the window's result was partial.
         _WindowTimeout: The query timed out (HTTP 504/408, the client deadline), or the
             connection was reset or timed out after the attempt ran for at least
             ``_LATE_RESET_FRACTION`` of ``timeout``. A ``QueryTimeoutError``; not retried.
@@ -309,7 +344,13 @@ def _attempt_window(
         try:
             if target == "sentinel":
                 tables = _query_sentinel(
-                    prefix + kql, bounds, timeout, cache=cache, check_retention=False
+                    prefix + kql,
+                    bounds,
+                    timeout,
+                    cache=cache,
+                    check_retention=False,
+                    raise_on_partial=raise_on_partial,
+                    warn_partial=False,
                 )
             else:
                 tables = _query_adx(prefix + kql, timeout, cache=cache)
@@ -343,6 +384,11 @@ def _attempt_window(
                     describe_exception(exc),
                 )
                 raise _WindowTimeout(f"{name} failed: {exc}", elapsed) from exc
+            if isinstance(exc, PartialResultError):
+                logger.warning("Batch %s returned a partial result and is not retried", label)
+                raise PartialResultError(
+                    f"{name} failed: {exc}", exc.partial_error, exc.partial_data
+                ) from exc
             if not isinstance(exc, QueryTransientError):
                 logger.warning(
                     "Batch %s failed and is not retried: %s", label, describe_exception(exc)
@@ -386,6 +432,10 @@ def _attempt_window(
             mark_failure_logged(failure)
             raise failure from exc
     df = tables[0] if tables else pd.DataFrame()
+    is_partial = bool(df.attrs.get(PARTIAL_ATTR))
+    _set_partial(df, [bounds] if is_partial else [])
+    if is_partial:
+        logger.warning("Batch %s: partial result for %s to %s", label, w_start, w_end)
     logger.info("Batch %s: %s → %s, rows=%d", label, w_start, w_end, len(df))
     return df
 
@@ -399,6 +449,7 @@ def _run_or_split(
     cache: bool,
     stop: threading.Event,
     min_interval: timedelta | None,
+    raise_on_partial: bool = False,
 ) -> pd.DataFrame:
     """Run a window; if it times out and ``min_interval`` is set, run its two halves instead.
 
@@ -438,7 +489,9 @@ def _run_or_split(
         )
     else:
         try:
-            return _attempt_window(label, bounds, kql, target, timeout, cache, stop)
+            return _attempt_window(
+                label, bounds, kql, target, timeout, cache, stop, raise_on_partial
+            )
         except _WindowTimeout as exc:
             if key is not None:
                 remember_timed_out(key, exc.elapsed)
@@ -484,7 +537,15 @@ def _run_or_split(
             raise _Stopped from timed_out
         parts.append(
             _run_or_split(
-                f"{label}.{number}", part, kql, target, timeout, cache, stop, min_interval
+                f"{label}.{number}",
+                part,
+                kql,
+                target,
+                timeout,
+                cache,
+                stop,
+                min_interval,
+                raise_on_partial,
             )
         )
     return _merge(parts)
@@ -500,13 +561,22 @@ def _run_window(
     cache: bool,
     stop: threading.Event,
     min_interval: timedelta | None = None,
+    raise_on_partial: bool = False,
 ) -> pd.DataFrame:
     """Run window ``index`` of ``total``: retry transient failures, split on a timeout.
 
     See :func:`_attempt_window` and :func:`_run_or_split` for the details and the exceptions.
     """
     return _run_or_split(
-        f"{index}/{total}", bounds, kql, target, timeout, cache, stop, min_interval
+        f"{index}/{total}",
+        bounds,
+        kql,
+        target,
+        timeout,
+        cache,
+        stop,
+        min_interval,
+        raise_on_partial,
     )
 
 
@@ -657,6 +727,7 @@ def exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable[..., Any] = _DEFAULT_AGG,
     cache: bool = True,
+    raise_on_partial: bool = False,
     debug: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
@@ -771,6 +842,10 @@ def exec_batch_query(
             ``agg_column`` is an error.
         cache: If true (default), each window may be served from, and kept in, the in-memory
             result cache. Pass false to run every window.
+        raise_on_partial: Sentinel only. If true, a window whose result is partial (the service
+            returned some data and an error) fails the batch with ``PartialResultError`` naming
+            the window; it is not retried or split. Default false: the partial data is kept, the
+            frame is marked (see Returns) and one warning summarises the partial windows.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs, including the calls it makes (every window,
             also those run on worker threads). Default false. The lines are printed unredacted
@@ -784,6 +859,14 @@ def exec_batch_query(
         returned. ``df.attrs["kql_types"]`` is taken from the windows' results, adding columns
         that only later windows have.
 
+        ``df.attrs["partial"]`` is always a bool: True if any Sentinel window returned only a
+        partial result, so the rows (and any totals from ``merge_on``/``agg_column``) may be
+        incomplete; False otherwise, including on ADX. ``df.attrs["partial_windows"]`` is the
+        list of ``(start, end)`` datetime tuples (UTC, in time order) of those windows, empty if
+        none; a window that was split after a timeout is listed by its halves. Both are set on
+        the aggregated frame too. After the batch one ``UserWarning`` states how many windows
+        were partial and which (the first five are named).
+
         With ``merge_on`` and ``agg_column``: one row per distinct key sorted by the keys, with
         the ``merge_on`` columns then the ``agg_column`` columns and a fresh index (unless every
         window returned no columns, which is returned as is). ``kql_types`` keeps the key types;
@@ -795,8 +878,8 @@ def exec_batch_query(
         ConfigurationError: ``kql`` is not a string or is blank, ``start`` is not a datetime or
             timedelta, ``end`` is not a datetime or ``None``, ``interval`` is not a positive
             ``timedelta``, ``min_interval`` is not a positive ``timedelta`` or is longer than
-            ``interval``, ``timeout`` is not a positive integer, ``cache`` or ``debug`` is not
-            a bool, ``max_workers`` is not an
+            ``interval``, ``timeout`` is not a positive integer, ``cache``, ``raise_on_partial`` or
+            ``debug`` is not a bool, ``max_workers`` is not an
             integer from 1 to 5, ``start`` is not before ``end``, ``target`` is unknown, the ADX
             KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
             ``< BatchEnd`` (checked before any query, on both targets), defines ``BatchStart`` or
@@ -806,6 +889,9 @@ def exec_batch_query(
             ``agg_column``, a named column is not in the result (checked after the first
             window, before the rest run), or any error ``exec_query`` raises for configuration
             or the cost guard. It is also a ``ValueError``.
+        PartialResultError: Only with ``raise_on_partial=True``, on Sentinel: a window's result
+            was partial. The message names the window; ``partial_error`` and ``partial_data``
+            are those of the window's error. Not retried.
         QueryError: A window failed. The message names the window (number, total and bounds)
             and the original error is chained. A window that still failed transiently after
             its retries fails this way too, and the message says it was retried. A window that
@@ -844,6 +930,7 @@ def exec_batch_query(
         timeout=timeout,
         max_workers=max_workers,
         cache=cache,
+        raise_on_partial=raise_on_partial,
         debug=debug,
         merge_on=merge_on,
         agg_column=agg_column,
@@ -865,6 +952,7 @@ def exec_batch_query(
                 )
         _check_timeout(timeout)
         _check_bool("cache", cache)
+        _check_bool("raise_on_partial", raise_on_partial)
         _check_bool("debug", debug)
         if (
             isinstance(max_workers, bool)
@@ -908,7 +996,17 @@ def exec_batch_query(
         stop = threading.Event()
         jobs = [
             partial(
-                _run_window, index, total, bounds, kql, target, timeout, cache, stop, min_interval
+                _run_window,
+                index,
+                total,
+                bounds,
+                kql,
+                target,
+                timeout,
+                cache,
+                stop,
+                min_interval,
+                raise_on_partial,
             )
             for index, bounds in enumerate(windows, start=1)
         ]
@@ -931,6 +1029,7 @@ def exec_batch_query(
             else:
                 results += [job() for job in jobs[1:]]
         merged = _merge(results)
+        partial_windows = list(merged.attrs[PARTIAL_WINDOWS_ATTR])
         logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
         if keys and len(merged.columns):
             rows = len(merged)
@@ -943,5 +1042,13 @@ def exec_batch_query(
                 agg_func if isinstance(agg_func, str) else getattr(agg_func, "__name__", agg_func),
                 cols,
             )
-        call.update(windows=total, rows=len(merged), columns=len(merged.columns))
+        _set_partial(merged, partial_windows)  # concat and groupby do not carry attrs reliably
+        if partial_windows:
+            _warn_partial(partial_windows, total)
+        call.update(
+            windows=total,
+            partial_windows=len(partial_windows),
+            rows=len(merged),
+            columns=len(merged.columns),
+        )
         return merged

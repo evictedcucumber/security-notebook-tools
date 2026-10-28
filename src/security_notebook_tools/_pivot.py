@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -77,7 +78,8 @@ def pivot_dataframe(
 
     Returns:
         A new DataFrame as described above. If ``df`` has no rows, only the ``index`` columns (and
-        the ``"Total"`` column if requested).
+        the ``"Total"`` column if requested). ``attrs["partial"]`` and ``attrs["partial_windows"]``
+        are copied from ``df`` when it has them, so a pivot of a partial result stays marked.
 
     Raises:
         ConfigurationError: An argument is invalid: a name is empty, repeated, used in more than
@@ -163,7 +165,7 @@ def pivot_dataframe(
                 for value in cell_names:
                     out[total_name(value)] = pd.Series(dtype="int64" if vals is None else "float64")
             pairs = list(zip(total_columns, cell_names, strict=False))
-            result = _finish(out, idx, pairs, old, agg_func, total_columns)
+            result = _finish(out, idx, pairs, old, agg_func, total_columns, df)
             call.update(rows=len(result), columns=len(result.columns))
             return result
 
@@ -256,7 +258,7 @@ def pivot_dataframe(
             first = {n: (_TOTAL if n == idx[0] else None) for n in idx}
             total_row = pd.DataFrame([{**first, **extra}], columns=list(out.columns))
             out = pd.concat([out, total_row], ignore_index=True)
-        result = _finish(out, idx, pairs, old, agg_func, total_columns)
+        result = _finish(out, idx, pairs, old, agg_func, total_columns, df)
         call.update(rows=len(result), columns=len(result.columns))
         return result
 
@@ -275,8 +277,9 @@ def _finish(
     old: dict[str, str],
     agg_func: str | Callable[..., Any],
     total_columns: list[str],
+    source: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Attach ``kql_types`` and ``pivot_totals`` to ``out``.
+    """Attach ``kql_types`` and ``pivot_totals`` to ``out``, and carry over the partial flags.
 
     ``pairs`` maps each cell column to its source value. If ``total_columns`` is non-empty, the
     last row of ``out`` (if it has rows) is the total row.
@@ -288,6 +291,9 @@ def _finish(
             types[name] = kql_type
     if types:
         out.attrs[KQL_TYPES_ATTR] = types
+    for key in ("partial", "partial_windows"):
+        if key in source.attrs:
+            out.attrs[key] = copy.copy(source.attrs[key])
     out.attrs.pop(PIVOT_TOTALS_ATTR, None)  # never inherit a stale one from ``df``
     if total_columns:
         out.attrs[PIVOT_TOTALS_ATTR] = {

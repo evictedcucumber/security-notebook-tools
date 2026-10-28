@@ -7,6 +7,7 @@ are cached in memory per resolved query (see :func:`exec_query`).
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import warnings
@@ -49,10 +50,13 @@ _fetch = threading.local()
 class _PartialResult(Exception):  # noqa: N818 - internal control flow, not an error
     """Raised inside a cached fetch so a partial Sentinel result is returned but not cached."""
 
-    def __init__(self, tables: tuple[pd.DataFrame, ...], message: str) -> None:
+    def __init__(
+        self, tables: tuple[pd.DataFrame, ...], message: str, error: object = None
+    ) -> None:
         super().__init__(message)
         self.tables = tables
         self.message = message
+        self.error = error
 
 
 def _check_kql(kql: object) -> None:
@@ -131,7 +135,7 @@ def _sentinel_tables(
         with dependency_call(logger, "pandas DataFrame conversion", target="sentinel_partial"):
             tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
         logger.info("Partial result is returned but not stored in the result cache")
-        raise _PartialResult(tables, str(exc)) from exc
+        raise _PartialResult(tables, str(exc), exc.partial_error) from exc
 
 
 @lru_cache(maxsize=RESULT_CACHE_SIZE)
@@ -191,17 +195,53 @@ def timed_out_before(key: tuple) -> float | None:
         return _timed_out.get(key)
 
 
+_CONTAINERS = (dict, list, set)
+
+
+def _detach_containers(df: pd.DataFrame) -> None:
+    """Replace dict, list and set cells of object columns of ``df`` by deep copies, in place.
+
+    KQL ``dynamic`` values arrive as Python containers, which ``DataFrame.copy()`` would share
+    with the cached frame. Only object columns are scanned (when ``attrs["kql_types"]`` knows the
+    column, only a ``dynamic`` one), and only container cells are copied.
+    """
+    types = df.attrs.get("kql_types") or {}
+    for position in range(df.shape[1]):
+        kql_type = types.get(df.columns[position])
+        if kql_type is not None and kql_type != "dynamic":
+            continue
+        column = df.iloc[:, position]
+        if column.dtype != object:
+            continue
+        values = column.to_numpy(copy=True)
+        changed = False
+        for i, value in enumerate(values):
+            if isinstance(value, _CONTAINERS):
+                values[i] = copy.deepcopy(value)
+                changed = True
+        if changed:
+            df.isetitem(position, pd.Series(values, index=df.index, dtype=object))
+
+
 def _copies(tables: tuple[pd.DataFrame, ...] | list[pd.DataFrame]) -> list[pd.DataFrame]:
-    """Return copies (attrs included) so callers cannot change a cached frame."""
+    """Return copies (attrs and nested dict/list/set cells too) so callers cannot change a cache."""
     copies = []
     for df in tables:
-        copy = df.copy()
-        copy.attrs = {
+        frame = df.copy()
+        _detach_containers(frame)
+        frame.attrs = {
             key: value.copy() if hasattr(value, "copy") else value
             for key, value in df.attrs.items()
         }
-        copies.append(copy)
+        copies.append(frame)
     return copies
+
+
+def _flag_partial(tables: list[pd.DataFrame], partial: bool) -> list[pd.DataFrame]:
+    """Set ``attrs["partial"]`` on every table and return them."""
+    for df in tables:
+        df.attrs["partial"] = partial
+    return tables
 
 
 def _cached_call(fetch, args: tuple, *, cache: bool) -> list[pd.DataFrame]:
@@ -236,11 +276,16 @@ def _query_sentinel(
     *,
     cache: bool = True,
     check_retention: bool = True,
+    raise_on_partial: bool = False,
+    warn_partial: bool = True,
 ) -> list[pd.DataFrame]:
     """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables.
 
     The retention warning is issued here, before the result cache, so a cached repeat warns too.
-    A batch passes ``check_retention=False`` and warns once for its whole range instead.
+    A batch passes ``check_retention=False`` and warns once for its whole range instead, and
+    ``warn_partial=False`` to summarise partial windows itself. Every returned table has
+    ``attrs["partial"]``. A partial result raises ``PartialResultError`` with ``raise_on_partial``;
+    otherwise it is returned (an empty table stands in if none arrived) and not cached.
     """
     if check_retention:
         _warn_retention(kql, timespan)
@@ -253,10 +298,17 @@ def _query_sentinel(
         timeout,
     )
     try:
-        return _cached_call(_sentinel_tables, args, cache=cache)
+        return _flag_partial(_cached_call(_sentinel_tables, args, cache=cache), False)
     except _PartialResult as partial:
-        warnings.warn(partial.message, stacklevel=2)
-        return _copies(partial.tables)
+        # built fresh for this call and never cached, so no copy is needed
+        tables = list(partial.tables) or [pd.DataFrame()]
+        if raise_on_partial:
+            raise PartialResultError(
+                partial.message, partial.error, _flag_partial(tables, True)
+            ) from partial
+        if warn_partial:
+            warnings.warn(partial.message, stacklevel=2)
+        return _flag_partial(tables, True)
 
 
 def _query_adx(kql: str, timeout: int, *, cache: bool = True) -> list[pd.DataFrame]:
@@ -264,7 +316,8 @@ def _query_adx(kql: str, timeout: int, *, cache: bool = True) -> list[pd.DataFra
     tenant_id = resolve_tenant_id()
     cluster_uri = resolve_cluster_uri()
     database = validate_database(require(None, DATABASE_VAR, "database"))
-    return _cached_call(_adx_tables, (cluster_uri, tenant_id, database, kql, timeout), cache=cache)
+    args = (cluster_uri, tenant_id, database, kql, timeout)
+    return _flag_partial(_cached_call(_adx_tables, args, cache=cache), False)
 
 
 def clear_cache() -> None:
@@ -300,6 +353,7 @@ def exec_query(
     target: Target = "sentinel",
     timeout: int = DEFAULT_TIMEOUT,
     cache: bool = True,
+    raise_on_partial: bool = False,
     debug: bool = False,
 ) -> pd.DataFrame:
     """Run KQL against Microsoft Sentinel (default) or Azure Data Explorer (ADX).
@@ -399,6 +453,9 @@ def exec_query(
         cache: If true (default), return a cached result for an identical earlier query and
             keep this one for later. Pass false to always run the query (the result is not
             stored and does not replace a cached one). See Caching above.
+        raise_on_partial: Sentinel only. If true, a partial result (the service returned some
+            data and an error) raises ``PartialResultError`` instead of being returned with a
+            warning. Default false. Has no effect with ``target="adx"``.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs, including the calls it makes (clients,
             credentials, table policy, the query itself). Default false. The lines are printed
@@ -410,16 +467,20 @@ def exec_query(
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
         tables. Sentinel datetime columns are UTC-aware. ``df.attrs["kql_types"]`` maps each
         column to its KQL type (``"long"``, ``"dynamic"`` ...), which ``format_dataframe`` uses.
-        If Sentinel returns only a partial result, a warning is emitted and the data received is
-        returned. On Sentinel, a ``UserWarning`` is also emitted (on cached repeats too) when the
-        time range starts before the Analytics retention of a table the query reads: the older
-        rows are in long-term retention, which these queries cannot read. Nothing is skipped.
+        ``df.attrs["partial"]`` is always a bool: True if Sentinel returned only a partial result
+        (a warning is emitted and the data received is returned, so the frame may be incomplete),
+        False otherwise, including on ADX. A partial result is never cached. Nested ``dynamic``
+        values (dicts and lists) are copies: changing them does not alter the cached result. On
+        Sentinel, a ``UserWarning`` is also emitted (on cached repeats too) when the time range
+        starts before the Analytics retention of a table the query reads: the older rows are in
+        long-term retention, which these queries cannot read. Nothing is skipped.
 
     Raises:
         ConfigurationError: ``kql`` is not a string or is blank, ``timeout`` is not a positive
-            integer, ``cache`` or ``debug`` is not a bool, ``target`` is unknown, ``timespan``
-            is not one of the accepted forms (a positive ``timedelta``, or a ``(start, end)`` /
-            ``(start, timedelta)`` tuple of datetimes with a positive length), ``timespan``
+            integer, ``cache``, ``raise_on_partial`` or ``debug`` is not a bool, ``target`` is
+            unknown, ``timespan`` is not one of the accepted forms (a positive ``timedelta``, or
+            a ``(start, end)`` / ``(start, timedelta)`` tuple of datetimes with a positive
+            length), ``timespan``
             is combined with ``target="adx"``, a required environment variable is unset or
             invalid (workspace ID not a GUID, workspace resource ID not an
             ``/subscriptions/.../workspaces/<name>`` ID, tenant not a GUID or domain name,
@@ -437,6 +498,10 @@ def exec_query(
             502/503). None of them is exported. An error nobody anticipated is logged at ERROR
             with its traceback (to the ``security_notebook_tools`` logger) and raised as a
             ``QueryError`` that chains the original.
+        PartialResultError: Only with ``raise_on_partial=True``, on Sentinel: the result was
+            partial. A ``QueryError``; ``partial_error`` holds the service error and
+            ``partial_data`` the list of DataFrames received so far (each with
+            ``attrs["partial"]`` True).
 
     Example:
         >>> from datetime import timedelta
@@ -453,16 +518,24 @@ def exec_query(
         target=target,
         timeout=timeout,
         cache=cache,
+        raise_on_partial=raise_on_partial,
         debug=debug,
         kql=fingerprint(kql),
     ) as call:
         _check_kql(kql)
         _check_timeout(timeout)
         _check_bool("cache", cache)
+        _check_bool("raise_on_partial", raise_on_partial)
         _check_bool("debug", debug)
         if target == "sentinel":
             validate_timespan(timespan)
-            tables = _query_sentinel(kql, resolve_timespan(kql, timespan), timeout, cache=cache)
+            tables = _query_sentinel(
+                kql,
+                resolve_timespan(kql, timespan),
+                timeout,
+                cache=cache,
+                raise_on_partial=raise_on_partial,
+            )
         elif target == "adx":
             if timespan is not None:
                 raise ConfigurationError(
@@ -472,5 +545,6 @@ def exec_query(
         else:
             raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
         df = tables[0] if tables else pd.DataFrame()
+        df.attrs.setdefault("partial", False)
         call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
         return df

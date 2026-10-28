@@ -215,7 +215,7 @@ def test_matches_batch_aggregation_semantics(df):
     expected = _aggregate(df, ["User"], ["N"], "sum")
     out = merge_dataframe(df, "User", "N")
     pd.testing.assert_frame_equal(out, expected)
-    assert out.attrs == expected.attrs
+    assert out.attrs == {**expected.attrs, "partial": False}  # merge_dataframe always sets it
 
 
 @pytest.mark.parametrize("bad", [None, "text", 5, {"K": [1]}, [], (), [1], ["x", None]])
@@ -294,3 +294,20 @@ def test_logs_info_line(df, caplog):
     assert any(m.startswith("Merged 5 rows into 2 by ['User']") for m in messages)
     # no row values in the log
     assert not any("Other" in m or "vwxyz" in m for m in messages)
+
+
+def test_merge_carries_the_partial_flag():
+    a = _frame({"K": ["x"], "N": [1]})
+    b = _frame({"K": ["x"], "N": [2]})
+    a.attrs["partial"] = False
+    b.attrs["partial"] = True
+    out = merge_dataframe([a, b], "K", "N")
+    assert out["N"].tolist() == [3]
+    assert out.attrs["partial"] is True
+    assert "partial_windows" not in out.attrs
+    a.attrs["partial"] = False
+    b.attrs["partial"] = False
+    assert merge_dataframe([a, b], "K", "N").attrs["partial"] is False
+    b.attrs["partial"] = True
+    assert merge_dataframe(b, "K", "N").attrs["partial"] is True  # single-frame path
+    assert merge_dataframe(_frame({"K": ["x"], "N": [1]}), "K", "N").attrs["partial"] is False

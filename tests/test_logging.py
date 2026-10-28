@@ -162,7 +162,10 @@ def test_public_call_interrupt_is_a_warning(caplog):
 def test_exec_query_logs_entry_and_result_summary(sentinel, caplog):
     snt.exec_query(SECRET_KQL)
     text = _text(caplog, "query")
-    assert "exec_query: started target=sentinel timeout=300 cache=True kql=hmac:" in text
+    assert (
+        "exec_query: started target=sentinel timeout=300 cache=True raise_on_partial=False "
+        "kql=hmac:"
+    ) in text
     assert "exec_query: finished in " in text
     assert "tables=1 rows=2 columns=2" in text
     assert not _at_least(caplog, logging.WARNING)
@@ -284,7 +287,7 @@ def test_batch_logs_entry_and_summary(sentinel, caplog):
     assert "exec_batch_query: started target=sentinel interval=1 day, 0:00:00" in text
     assert "kql=hmac:" in text
     assert "exec_batch_query: finished in" in text
-    assert "windows=2 rows=4 columns=2" in text
+    assert "windows=2 partial_windows=0 rows=4 columns=2" in text
     assert not _at_least(caplog, logging.WARNING)
 
 
@@ -508,3 +511,41 @@ def test_public_call_survives_fields_that_cannot_be_printed(caplog):
     from security_notebook_tools import _errors
 
     assert getattr(_errors._public, "depth", 0) == 0
+
+
+def test_package_records_do_not_reach_root_handlers_by_default():
+    import subprocess
+    import sys
+
+    code = (
+        "import logging; logging.basicConfig(level=logging.NOTSET);"
+        "import security_notebook_tools as s;"
+        "print(logging.getLogger('security_notebook_tools').propagate);"
+        "l = logging.getLogger('security_notebook_tools.sentinel');"
+        "l.debug('RAW KQL'); l.info('INFO KQL'); l.error('ERR KQL')"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=60
+    )
+    assert done.stdout.strip() == "False"
+    assert "KQL" not in done.stderr
+
+
+def test_root_handler_receives_nothing_when_not_propagating():
+    seen = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    root = logging.getLogger()
+    handler = Collect(logging.NOTSET)
+    root.addHandler(handler)
+    pkg = logging.getLogger("security_notebook_tools")
+    pkg.propagate = False  # the installed default; conftest relaxes it for caplog
+    try:
+        logging.getLogger("security_notebook_tools.sentinel").debug("RAW KQL")
+        logging.getLogger("security_notebook_tools.sentinel").info("INFO")
+    finally:
+        root.removeHandler(handler)
+    assert seen == []

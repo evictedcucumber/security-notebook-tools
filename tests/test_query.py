@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import warnings
 from datetime import UTC, date, datetime, timedelta
@@ -1967,3 +1968,165 @@ def test_batch_cost_guard_rejection_still_stops_the_batch(monkeypatch):
     ):
         snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=3), max_workers=4)
     sdk.return_value.query_workspace.assert_not_called()
+
+
+def _partial_sentinel(monkeypatch):
+    """Patch the SDK so every query_workspace call returns a partial result."""
+    from azure.monitor.query import LogsQueryPartialResult, LogsTable
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    table = LogsTable(name="T", columns=["a"], columns_types=["long"], rows=[[1]])
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch("security_notebook_tools._query.get_credential"))
+    sdk = stack.enter_context(mock.patch("security_notebook_tools._sentinel.LogsQueryClient"))
+    stack.enter_context(mock.patch("security_notebook_tools._sentinel.get_policy"))
+    stack.enter_context(mock.patch("security_notebook_tools._sentinel.check_sentinel_query"))
+    sdk.return_value.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[table], partial_error="boom"
+    )
+    return stack, sdk
+
+
+def test_partial_result_is_marked_in_attrs(monkeypatch):
+    stack, _ = _partial_sentinel(monkeypatch)
+    with stack, pytest.warns(UserWarning, match="partial"):
+        df = snt.exec_query("T")
+    assert df.attrs["partial"] is True
+
+
+def test_complete_results_are_marked_not_partial(sentinel, adx):
+    assert snt.exec_query("T").attrs["partial"] is False
+    assert snt.exec_query("T", target="adx").attrs["partial"] is False
+    cls, _ = sentinel
+    cls.return_value.query_tables.return_value = []
+    assert snt.exec_query("T2").attrs["partial"] is False
+
+
+def test_raise_on_partial_raises_with_data_and_is_not_cached(monkeypatch):
+    from security_notebook_tools._exceptions import PartialResultError
+
+    stack, sdk = _partial_sentinel(monkeypatch)
+    with stack:
+        for _ in range(2):
+            with pytest.raises(PartialResultError, match="partial results: boom") as ei:
+                snt.exec_query("T", raise_on_partial=True)
+            assert ei.value.partial_error == "boom"
+            assert ei.value.partial_data[0].loc[0, "a"] == 1
+        assert sdk.return_value.query_workspace.call_count == 2
+
+
+def test_raise_on_partial_must_be_a_bool(sentinel):
+    with pytest.raises(ConfigurationError, match="raise_on_partial"):
+        snt.exec_query("T", raise_on_partial="yes")
+    with pytest.raises(ConfigurationError, match="raise_on_partial"):
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=1), raise_on_partial=1)
+
+
+def test_batch_partial_windows_are_summarised_and_marked(monkeypatch):
+    stack, sdk = _partial_sentinel(monkeypatch)
+    with stack, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")  # the default filter dedupes repeats
+        df = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=3))
+    assert sdk.return_value.query_workspace.call_count == 3
+    assert df.attrs["partial"] is True
+    assert df.attrs["partial_windows"] == [
+        (D0 + timedelta(days=i), D0 + timedelta(days=i + 1)) for i in range(3)
+    ]
+    summary = [str(w.message) for w in caught if "Batch query returned partial" in str(w.message)]
+    assert len(summary) == 1
+    assert "3 of 3 windows" in summary[0]
+
+
+def test_batch_partial_survives_aggregation(monkeypatch):
+    from azure.monitor.query import LogsQueryPartialResult, LogsTable
+
+    stack, sdk = _partial_sentinel(monkeypatch)
+    table = LogsTable(
+        name="T", columns=["k", "n"], columns_types=["string", "long"], rows=[["x", 2]]
+    )
+    sdk.return_value.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[table], partial_error="boom"
+    )
+    with stack, pytest.warns(UserWarning, match="2 of 2 windows"):
+        df = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2), merge_on="k", agg_column="n")
+    assert df["n"].tolist() == [4]
+    assert df.attrs["partial"] is True
+    assert len(df.attrs["partial_windows"]) == 2
+
+
+def test_batch_complete_is_marked_not_partial(sentinel):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        df = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2))
+    assert df.attrs["partial"] is False
+    assert df.attrs["partial_windows"] == []
+
+
+def test_batch_raise_on_partial_names_the_window_and_does_not_retry(monkeypatch):
+    from security_notebook_tools._exceptions import PartialResultError
+
+    stack, sdk = _partial_sentinel(monkeypatch)
+    with stack, pytest.raises(PartialResultError, match="window 1/2") as ei:
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=2), raise_on_partial=True)
+    assert sdk.return_value.query_workspace.call_count == 1
+    assert ei.value.partial_error == "boom"
+    assert ei.value.partial_data[0].loc[0, "a"] == 1
+
+
+def test_mutating_nested_dynamic_values_does_not_change_the_cache(sentinel):
+    cls, _ = sentinel
+    frame = pd.DataFrame({"Props": [{"x": {"y": 1}}, ["l"], None, "s"], "n": [1, 2, 3, 4]})
+    cls.return_value.query_tables.return_value = [frame]
+    first = snt.exec_query("T")
+    first.loc[0, "Props"]["x"]["y"] = 99
+    first.loc[1, "Props"].append("evil")
+    second = snt.exec_query("T")
+    assert _sdk_calls(cls) == 1  # the second call came from the cache
+    assert second.loc[0, "Props"] == {"x": {"y": 1}}
+    assert second.loc[1, "Props"] == ["l"]
+    assert second.loc[3, "Props"] == "s"
+    assert second.loc[0, "Props"] is not first.loc[0, "Props"]
+    # and the very first result is not the cached object either
+    assert frame.loc[0, "Props"] == {"x": {"y": 1}}
+
+
+def test_batch_nested_dynamic_values_are_protected_on_cache_hits(sentinel):
+    cls, _ = sentinel
+    cls.return_value.query_tables.return_value = [pd.DataFrame({"P": [{"a": 1}]})]
+    first = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=1))
+    first.loc[0, "P"]["a"] = 2
+    second = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=1))
+    assert second.loc[0, "P"] == {"a": 1}
+
+
+def test_partial_result_with_no_tables(sentinel):
+    from security_notebook_tools import _query
+
+    with mock.patch.object(_query, "_cached_call", side_effect=_query._PartialResult((), "boom")):
+        with pytest.warns(UserWarning, match="boom"):
+            df = snt.exec_query("T")
+        assert df.empty
+        assert df.attrs["partial"] is True
+
+
+def test_raise_on_partial_is_ignored_on_adx(adx):
+    assert snt.exec_query("T", target="adx", raise_on_partial=True).attrs["partial"] is False
+
+
+def test_detach_containers_with_a_non_range_index_and_kql_types():
+    from security_notebook_tools._query import _copies
+
+    frame = pd.DataFrame(
+        {"P": [{"a": 1}, {"a": 2}], "S": ["x", "y"], "U": [{"u": 1}, {"u": 2}]},
+        index=[10, 20],
+    )
+    frame.attrs["kql_types"] = {"P": "dynamic", "S": "string"}  # U unknown: still scanned
+    (copy,) = _copies([frame])
+    copy.loc[10, "P"]["a"] = 99
+    copy.loc[20, "U"]["u"] = 99
+    assert frame.loc[10, "P"] == {"a": 1}
+    assert frame.loc[20, "U"] == {"u": 2}
+    assert copy.index.tolist() == [10, 20]

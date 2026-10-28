@@ -8,7 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from ._batch import _DEFAULT_AGG, _aggregate, _check_agg_args, _merge
+from ._batch import (
+    _DEFAULT_AGG,
+    PARTIAL_ATTR,
+    PARTIAL_WINDOWS_ATTR,
+    _aggregate,
+    _check_agg_args,
+    _merge,
+)
 from ._errors import public_call
 from ._exceptions import ConfigurationError
 from ._query import _check_bool
@@ -57,6 +64,9 @@ def merge_dataframe(
             with debug output). See the logging section of the README.
 
     Returns:
+        ``attrs["partial"]`` is True if any input had it True, else False (and
+        ``attrs["partial_windows"]`` is carried over if an input had it).
+
         A new DataFrame with one row per distinct key sorted by the keys, with the ``merge_on``
         columns then the ``agg_column`` columns and a fresh index. If the (concatenated) input
         has no columns at all, an empty copy is returned as is. ``kql_types`` keeps the key
@@ -107,6 +117,10 @@ def merge_dataframe(
             out = merged.copy()
         else:
             out = _aggregate(merged, keys, cols, agg_func, log=logger, where="the DataFrame")
+        # groupby does not carry attrs reliably: restate whether any input was partial
+        out.attrs[PARTIAL_ATTR] = bool(merged.attrs.get(PARTIAL_ATTR))
+        if PARTIAL_WINDOWS_ATTR in merged.attrs:
+            out.attrs[PARTIAL_WINDOWS_ATTR] = list(merged.attrs[PARTIAL_WINDOWS_ATTR])
         logger.info(
             "Merged %d rows into %d by %s (%s of %s)",
             len(merged),
