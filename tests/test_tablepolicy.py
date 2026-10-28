@@ -423,12 +423,46 @@ ALLOWED = [
     'SigninLogs | make-graph a --> b with arg("").Resources on id, SigninLogs on id',
     'SigninLogs | fork (take 1) (join hint.remote=left (arg("").Resources) on id)',
     *[f'arg("").{name} | take 1' for name in ARG_TABLE_NAMES],
+    # a `let` inside a bracket group is visible inside that group only
+    "toscalar(let x = 1; print x)",
+    "SigninLogs | where a in (let k = dynamic([1]); print k)",
+    "(let k = SigninLogs | take 1; k | count)",
+    "let m = materialize(let k = SigninLogs | take 1; k | take 1); m | count",
+    "print a = toscalar(let f = () { print 1 }; print f())",
+    "let U = SigninLogs; (let V = U; V | take 1) | count",
+    # `as` names a result only as the `| as name` operator
+    "SigninLogs | make-graph Src --> Dst | graph-to-table nodes as N | take 1",
+    "SigninLogs | as hint.materialized=true T2 | join (T2 | take 1) on a",
+    # lists after in / has_any whose elements are values, bound names or one tabular expression
+    "SigninLogs | where A in ('a', 'b', 3) and B !in~ (dynamic([1]), 'c') and C has_all ('x', 'y')",
+    "let u = dynamic(['a']); SigninLogs | where A in (u, 'b') | where B has_any (u, 'c')",
+    "SigninLogs | where A in (AuditLogs | project B, C)",
+    "SigninLogs | where A in (toint(B), 2) | where C in (-1, +2)",
+    # a join kind may touch its bracket, a hyphenated operator is one word without spaces
+    "SigninLogs | join kind=inner(AuditLogs) on A",
+    "SigninLogs | project-away A | project-keep B | project-rename C = B | project-reorder C",
+    # a scalar `let` may be named like a keyword; only functions may not
+    "let limit = 10; let top = 5; SigninLogs | take limit | take top",
+    "let f = (limit:int) { SigninLogs | take limit }; f(3)",
 ]
 
 
 @pytest.mark.parametrize("kql", ALLOWED)
 def test_allowed(policy, kql):
     check_sentinel_query(kql, policy)
+
+
+# The spellings of the set operators: in, !in, in~, !in~, has_any, has_all and their negations.
+LIST_OPERATORS = ["in", "!in", "in~", "!in~", "has_any", "has_all", "!has_any", "!has_all"]
+# Every single-word name the analyzer gives a meaning of its own (keywords and operators).
+KEYWORDS = sorted(w for w in tp._RESERVED_WORDS if w.isidentifier())
+_LAMBDA = "(n:int, t:(*)) { t | take n }"
+_KEYWORD_FUNCTION = "named like a KQL keyword"
+
+
+def _kw_fragment(word):
+    # `table()` is refused earlier, as a forbidden construct
+    return "table()" if word == "table" else _KEYWORD_FUNCTION
 
 
 # (query, text the message must contain)
@@ -655,6 +689,144 @@ REJECTED = [
     ('print ```a"``` ; Aux_CL ; print "```"', "Aux_CL"),
     ('SigninLogs | where a == @h"C:\\" ; Aux_CL ; "x"', "unterminated"),
     ("SigninLogs // x\r Aux_CL", "Aux_CL"),
+    # a `let` function named like a keyword must still have its arguments checked, whether it
+    # is called positionally, by name, through `invoke`, or defined through an alias or a view
+    (f"let take = {_LAMBDA}; take(10, _Im_NetworkSession)", _KEYWORD_FUNCTION),
+    (f"let take = {_LAMBDA}; take(t=_Im_NetworkSession, n=10)", _KEYWORD_FUNCTION),
+    (f"let project = {_LAMBDA}; project(_Im_NetworkSession)", _KEYWORD_FUNCTION),
+    *[(f"let {w} = {_LAMBDA}; {w}(10, _Im_NetworkSession)", _kw_fragment(w)) for w in KEYWORDS],
+    *[(f"let {w} = {_LAMBDA}; {w}(t=_Im_NetworkSession, n=10)", _kw_fragment(w)) for w in KEYWORDS],
+    *[
+        (f"let {w} = {_LAMBDA}; SigninLogs | invoke {w}(1, _Im_NetworkSession)", _kw_fragment(w))
+        for w in KEYWORDS
+    ],
+    *[
+        (f"let f = {_LAMBDA}; let {w} = f; {w}(10, _Im_NetworkSession)", _kw_fragment(w))
+        for w in KEYWORDS
+    ],
+    *[
+        (f"let {w} = view {_LAMBDA}; {w}(10, _Im_NetworkSession)", _kw_fragment(w))
+        for w in KEYWORDS
+    ],
+    # a non-function `let` name spelled like a keyword is not the keyword when called
+    ("let take = 5; print x = take(1)", "take()"),
+    ("let f = (take:int) { print x = take(take) }; f(1)", "take()"),
+    # a call of a view or of an alias of a function is not analysed, even for a built-in name
+    (f"let ago = view {_LAMBDA}; print x = ago(10, _Im_NetworkSession)", "view"),
+    (f"let f = {_LAMBDA}; let ago = f; print x = ago(10, _Im_NetworkSession)", "alias"),
+    (f"let f = {_LAMBDA}; let g = f; let ago = g; print x = ago(1, _Im_NetworkSession)", "alias"),
+    # a `let` inside a bracket group does not leak its name or function to the enclosing scope
+    *[
+        (f"(let {name} = print x = 1; print y = 2) | count; {name} | take 10", name)
+        for name in ("_Im_NetworkSession", "Unknown", "MyFuncX")
+    ],
+    (
+        "print a = toscalar(let _Im_Dns = () { print 1 }; print 2);"
+        " _Im_Dns(starttime = ago(1d)) | take 5",
+        "_Im_Dns",
+    ),
+    (
+        "print a = toscalar(let _Im_Dns = () { print 1 }; print 2); print b = _Im_Dns()",
+        "_Im_Dns",
+    ),
+    ("let m = materialize(let U = print 1; print 2); U | take 1", "'U'"),
+    ("SigninLogs | where a in (let U = print 1; print 2); U | take 1", "'U'"),
+    ("SigninLogs | where a in (let U = print 1; print 2) | union U", "'U'"),
+    ("SigninLogs | extend y = Properties[let U = print 1; 2]; U | take 1", "'U'"),
+    ("SigninLogs | extend y = dynamic([let U = print 1; 2]); U | take 1", "'U'"),
+    ("((let U = print 1; print 2)); U | take 1", "'U'"),
+    ("(let U = print 1; print 2) | union (U | take 1)", "'U'"),
+    ("SigninLogs | join (let U = print 1; print 2) on a | join (U) on b", "'let'"),
+    ("let f = () { (let U = print 1; print 2) | count; U | take 1 }; f()", "'U'"),
+    ("(let U = print 1; (let V = print 2; print 3) | count; V | take 1) | count", "'V'"),
+    ("(let U = print 1; print 2) | count; (let U = print 3; print 4) | count; U", "'U'"),
+    ("SigninLogs | where a in (let U = print 1) ; U | take 1", "'U'"),
+    # review round 3: a spaced `project - keep(...)` is a call, not the `project-keep` operator
+    (
+        "let keep = (n:long, t:(*)) { toscalar(t | count) + n };"
+        " print x = 1 | project - keep(1, _Im_NetworkSession)",
+        _KEYWORD_FUNCTION,
+    ),
+    (
+        "let keep = (n:long, t:(*)) { toscalar(t | count) + n };"
+        " print x = 1 | fork (project - keep(1, _Im_NetworkSession))",
+        _KEYWORD_FUNCTION,
+    ),
+    (
+        "let kv = (n:long, t:(*)) { toscalar(t | count) + n };"
+        ' print x = "a" | parse - kv(1, _Im_NetworkSession) with * y',
+        _KEYWORD_FUNCTION,
+    ),
+    (
+        "let away = (n:long, t:(*)) { toscalar(t | count) + n };"
+        " print x = 1 | project - away(_Im_NetworkSession, 1)",
+        _KEYWORD_FUNCTION,
+    ),
+    ("print x = 1 | project - keep(1, _Im_NetworkSession)", "keep()"),
+    ("print x = 1 | project -keep(1, _Im_NetworkSession)", "keep()"),
+    ("print x = 1 | project- keep(1, _Im_NetworkSession)", "keep()"),
+    (
+        "let f = (n:long, t:(*)) { toscalar(t | count) + n };"
+        " print x = 1 | project - f(1, _Im_NetworkSession)",
+        "_Im_NetworkSession",
+    ),
+    (
+        "let f = (n:long, t:(*)) { toscalar(t | count) + n };"
+        " print x = 1 | project/**/-/**/f(1, _Im_NetworkSession)",
+        "_Im_NetworkSession",
+    ),
+    # a value in a list after in / has_any is checked like the first one
+    *[
+        (f'SigninLogs | where UserPrincipalName {op} ("a", _Im_NetworkSession) | take 1', "_Im_Net")
+        for op in LIST_OPERATORS
+    ],
+    *[
+        (f"SigninLogs | where UserPrincipalName {op} (SigninLogs, _Im_NetworkSession)", "_Im_Net")
+        for op in LIST_OPERATORS
+    ],
+    *[
+        (f'SigninLogs | where UserPrincipalName {op} ("a", "b", Unknown)', "Unknown")
+        for op in LIST_OPERATORS
+    ],
+    *[
+        (f'SigninLogs | where UserPrincipalName {op} ("a", Basic_CL)', "Basic_CL")
+        for op in LIST_OPERATORS
+    ],
+    *[
+        (f'SigninLogs | where UserPrincipalName {op} ("a", AuditLogs | take 1)', "ambiguous")
+        for op in LIST_OPERATORS
+    ],
+    ('SigninLogs | where UserPrincipalName !in~ ("a", Unknown)', "Unknown"),
+    ("SigninLogs | where UserPrincipalName in (SigninLogs, _Im_NetworkSession)", "_Im_Net"),
+    # a `let` function wrapped in brackets or aliased is still a function, called under a
+    # built-in name
+    (
+        "let strlen = ((n:int, t:(*)) { toscalar(t | count) + n });"
+        " print x = strlen(10, _Im_NetworkSession)",
+        "strlen()",
+    ),
+    (
+        "let f = (n:int, t:(*)) { toscalar(t | count) + n }; let strlen = (f);"
+        " print x = strlen(1, _Im_NetworkSession)",
+        "strlen()",
+    ),
+    ("let strlen = 5; print x = strlen(1)", "strlen()"),
+    ("let f = (strlen:int) { print x = strlen(1) }; f(1)", "strlen()"),
+    # a parameter value that is called is a call, not a word
+    ("SigninLogs | join kind=keep(SigninLogs, _Im_NetworkSession) on a", "keep()"),
+    ("SigninLogs | join hint.strategy=_Im_NetworkSession() (SigninLogs) on a", "data source"),
+    ("SigninLogs | join kind=inner hint.shufflekey=_Im_NetworkSession(1) (T) on a", "data source"),
+    # `as` binds a name only as the `| as name` operator
+    ("SigninLogs | graph-to-table nodes as _Im_Dns | join (_Im_Dns) on a", "_Im_Dns"),
+    ("SigninLogs | graph-to-table nodes as _Im_Dns | extend y = _Im_Dns()", "_Im_Dns"),
+    (
+        "SigninLogs | parse-kv Col as _Im_Dns with (pair_delimiter=';') | join (_Im_Dns) on a",
+        "_Im_Dns",
+    ),
+    ("SigninLogs | as hint.x=_Im_NetworkSession() t | take 1", "_Im_NetworkSession"),
+    ("SigninLogs | as hint.materialized=_Im_Dns(1) t | join (t) on a", "_Im_Dns"),
+    ("SigninLogs | extend as = 1 | join (Unknown) on a", "Unknown"),
+    ("SigninLogs | where x as Unknown | join (Unknown) on a", "Unknown"),
 ]
 
 
@@ -933,17 +1105,18 @@ def _head():
 
 BATCH_KQL = "T | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
 IDS = (RID, WS, None)
+BARE = TablePolicy(WS)  # a policy that carries no fetch time: the pass dates from now
 
 
 def test_batch_checked_is_false_outside_a_batch():
-    tp.note_batch_checked(_window(BATCH_KQL), *IDS)  # no scope: nothing recorded
+    tp.note_batch_checked(_window(BATCH_KQL), *IDS, BARE)  # no scope: nothing recorded
     assert not tp.batch_checked(_window(BATCH_KQL), *IDS)
 
 
 def test_batch_check_skips_later_windows_only_after_a_pass():
     with tp.batch_check(BATCH_KQL, _head()):
         assert not tp.batch_checked(_window(BATCH_KQL, 1), *IDS)
-        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS)
+        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS, BARE)
         assert tp.batch_checked(_window(BATCH_KQL, 2), *IDS)
         assert tp.batch_checked(_window(BATCH_KQL, 1), RID.upper(), WS.upper(), None)
     assert not tp.batch_checked(_window(BATCH_KQL, 2), *IDS)  # the scope ended
@@ -959,7 +1132,7 @@ def test_batch_check_skips_later_windows_only_after_a_pass():
 )
 def test_batch_check_holds_only_for_the_workspace_it_passed(ids):
     with tp.batch_check(BATCH_KQL, _head()):
-        tp.note_batch_checked(_window(BATCH_KQL), *IDS)
+        tp.note_batch_checked(_window(BATCH_KQL), *IDS, BARE)
         assert not tp.batch_checked(_window(BATCH_KQL, 2), *ids)
 
 
@@ -982,9 +1155,77 @@ def test_batch_check_holds_only_for_the_workspace_it_passed(ids):
 )
 def test_batch_check_does_not_cover_other_text(kql):
     with tp.batch_check(BATCH_KQL, _head()):
-        tp.note_batch_checked(_window(BATCH_KQL), *IDS)
-        tp.note_batch_checked(kql, *IDS)  # not a window: nothing recorded for it either
+        tp.note_batch_checked(_window(BATCH_KQL), *IDS, BARE)
+        tp.note_batch_checked(kql, *IDS, BARE)  # not a window: nothing recorded for it either
         assert not tp.batch_checked(kql, *IDS)
+
+
+def test_batch_pass_lapses_after_the_policy_ttl():
+    clock = [1000.0]
+    with (
+        mock.patch.object(tp.time, "monotonic", lambda: clock[0]),
+        tp.batch_check(BATCH_KQL, _head()),
+    ):
+        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS, BARE)
+        clock[0] += tp.CACHE_TTL_SECONDS - 1
+        assert tp.batch_checked(_window(BATCH_KQL, 2), *IDS)
+        clock[0] += 1  # the pass is now CACHE_TTL_SECONDS old: the full guard runs again
+        assert not tp.batch_checked(_window(BATCH_KQL, 3), *IDS)
+        assert not tp.batch_checked(_window(BATCH_KQL, 4), *IDS)  # and stays unchecked ...
+        tp.note_batch_checked(_window(BATCH_KQL, 3), *IDS, BARE)  # ... until a new pass is recorded
+        assert tp.batch_checked(_window(BATCH_KQL, 4), *IDS)
+        clock[0] += tp.CACHE_TTL_SECONDS
+        assert not tp.batch_checked(_window(BATCH_KQL, 5), *IDS)
+
+
+def test_batch_pass_is_dated_from_the_policy_fetch(arm):
+    clock = [1000.0]
+    with (
+        mock.patch.object(tp.time, "monotonic", lambda: clock[0]),
+        tp.batch_check(BATCH_KQL, _head()),
+    ):
+        policy = tp.get_policy(RID, WS, mock.Mock())  # fetched at t=1000
+        clock[0] += 200  # the guard passes on the cached policy, 200 s old
+        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS, policy)
+        clock[0] += tp.CACHE_TTL_SECONDS - 201
+        assert tp.batch_checked(_window(BATCH_KQL, 2), *IDS)
+        clock[0] += 1  # 300 s after the fetch, not after the pass
+        assert not tp.batch_checked(_window(BATCH_KQL, 3), *IDS)
+
+
+def test_batch_pass_is_dated_from_the_checked_policy_not_the_shared_cache(arm):
+    # A refresh (or clear_cache) between the check and the note must not extend the pass.
+    clock = [1000.0]
+    with (
+        mock.patch.object(tp.time, "monotonic", lambda: clock[0]),
+        tp.batch_check(BATCH_KQL, _head()),
+    ):
+        old = tp.get_policy(RID, WS, mock.Mock())  # the policy the guard ran against, t=1000
+        clock[0] += tp.CACHE_TTL_SECONDS - 10
+        tp.clear_policy_cache()
+        tp.get_policy(RID, WS, mock.Mock())  # another thread refreshed it at t=1290
+        tp.note_batch_checked(_window(BATCH_KQL, 1), *IDS, old)
+        clock[0] += 10  # 300 s after the checked policy was read
+        assert not tp.batch_checked(_window(BATCH_KQL, 2), *IDS)
+
+
+def test_batch_pass_follows_a_table_moved_to_a_billed_plan(arm):
+    clock = [1000.0]
+    kql = BATCH_KQL.replace("T |", "SigninLogs |", 1)
+    with (
+        mock.patch.object(tp.time, "monotonic", lambda: clock[0]),
+        tp.batch_check(kql, _head()),
+    ):
+        policy = tp.get_policy(RID, WS, mock.Mock())
+        check_sentinel_query(_window(kql, 1), policy)
+        tp.note_batch_checked(_window(kql, 1), *IDS, policy)
+        clock[0] += tp.CACHE_TTL_SECONDS  # the table was switched to Basic meanwhile
+        assert not tp.batch_checked(_window(kql, 2), *IDS)
+        moved = [("SigninLogs", "Basic"), *TABLES[1:]]
+        with mock.patch.object(tp, "_get_json", _arm(tables=moved)):
+            fresh = tp.get_policy(RID, WS, mock.Mock())
+        with pytest.raises(ConfigurationError, match="SigninLogs"):
+            check_sentinel_query(_window(kql, 2), fresh)
 
 
 @pytest.mark.parametrize(
@@ -998,3 +1239,28 @@ def test_generated_prefix_matches_the_batch_head(bounds):
     from security_notebook_tools._batch import _prefix
 
     assert _head().fullmatch(_prefix(bounds))
+
+
+HYPHENATED = sorted(
+    (op.split("-")[0], part) for op in tp._OPERATORS if "-" in op for part in op.split("-")[1:]
+)
+
+
+@pytest.mark.parametrize(("first", "suffix"), HYPHENATED)
+def test_spaced_hyphenated_operator_is_a_call_not_the_operator(policy, first, suffix):
+    queries = [
+        f"let {suffix} = (n:long, t:(*)) {{ toscalar(t | count) + n }};"
+        f" print x = 1 | {first} - {suffix}(1, _Im_NetworkSession)"
+    ]
+    if suffix not in tp._PAREN_KEYWORDS:  # `where(` and `distinct(` are keywords, not functions
+        queries += [
+            f"print x = 1 | {first} - {suffix}(1, _Im_NetworkSession)",
+            f"print x = 1 | fork ({first} - {suffix}(1, _Im_NetworkSession))",
+        ]
+    for kql in queries:
+        with pytest.raises(ConfigurationError):
+            check_sentinel_query(kql, policy)
+
+
+def test_every_part_of_a_hyphenated_operator_is_reserved():
+    assert {suffix for _, suffix in HYPHENATED} <= tp._RESERVED_WORDS

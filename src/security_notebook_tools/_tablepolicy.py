@@ -30,7 +30,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -114,6 +114,27 @@ _PAREN_KEYWORDS = frozenset(
         "order", "parse", "scan", "restrict", "datatable", "materialize", "toscalar", "view",
     }
 )  # fmt: skip
+# Every word the analyzer gives a meaning of its own; a `let` function may not take such a name.
+# That includes each part of a hyphenated operator (`keep` of `project-keep`).
+_RESERVED_WORDS = (
+    _PAREN_KEYWORDS
+    | _SOURCE_KEYWORDS
+    | _SKIP_STATEMENTS
+    | _OPERATOR_WORDS
+    | _OPERATORS
+    | _LITERALS
+    | {part for operator in _OPERATORS for part in operator.split("-")}
+)
+# Operators that take a list of values or a tabular expression in "( )": every element of the
+# list is checked as a possible table (`x in ("a", Table)`). `~` and `!` are separate tokens.
+_LIST_OPERATORS = frozenset({"in", "has_any", "has_all"})
+# Values of `kind=` that may be followed by "(" without a space (`join kind=inner(T)`).
+_JOIN_KINDS = frozenset(
+    """
+    inner innerunique leftouter rightouter fullouter leftsemi rightsemi leftanti rightanti
+    leftantisemi rightantisemi outer
+    """.split()  # noqa: SIM905
+)
 # Functions whose parenthesised argument may be a table: its first identifier is checked.
 _TABULAR_ARG_CALLS = frozenset({"materialize", "toscalar", "view"})
 # ``evaluate`` plugins whose first argument is a lookup table.
@@ -136,12 +157,15 @@ class TablePolicy:
         retention: Lower-case table name -> ``(retentionInDays, totalRetentionInDays)``: the days
             kept in Analytics and in total. Either is ``None`` when ARM did not report an integer.
             Used only for a warning; it never takes part in the cost guard.
+        fetched_at: ``time.monotonic()`` when :func:`get_policy` read this policy from ARM, or
+            ``None`` if it was not read by it (tests). Dates a batch's one-time guard pass.
     """
 
     customer_id: str
     tables: dict[str, tuple[str, str]] = field(default_factory=dict)
     functions: dict[str, str] = field(default_factory=dict)
     retention: dict[str, tuple[int | None, int | None]] = field(default_factory=dict)
+    fetched_at: float | None = field(default=None, compare=False)
 
 
 def _days(value: object) -> int | None:
@@ -386,7 +410,9 @@ def get_policy(
                 if not known:
                     mark_failure_logged(failure)
                 raise failure from exc
-            _cache[key] = (time.monotonic(), policy)
+            fetched = time.monotonic()
+            policy = replace(policy, fetched_at=fetched)
+            _cache[key] = (fetched, policy)
     if policy.customer_id.lower() != workspace_id.lower():
         raise ConfigurationError(
             f"$SENTINEL_WORKSPACE_ID ({workspace_id}) does not match the workspace behind "
@@ -415,6 +441,10 @@ def check_sentinel_query(kql: str, policy: TablePolicy) -> None:
       of each statement, the right-hand side of ``let``, ``union`` / ``join`` / ``lookup``
       operands, the first name inside ``(`` or ``{`` when followed by ``|``, ``)`` or ``}``
       (subqueries, ``materialize()``, ``toscalar()``, ``view()``) and ``evaluate`` lookup tables;
+    * a ``let`` function named like a keyword or operator (``let take = (...) { ... }``), and a
+      call of a ``view`` or of an alias of a function;
+    * a name bound by a ``let`` inside ``( )`` or ``[ ]`` and used after the bracket closes, or
+      bound by ``as`` anywhere but the ``| as name`` operator;
     * text that cannot be tokenized with certainty, unbalanced brackets, an empty query, or a
       query with no tabular statement.
 
@@ -462,7 +492,8 @@ class _BatchCheck:
 
     kql: str
     head: re.Pattern[str]
-    passed: set[tuple[str, str, str | None]] = field(default_factory=set)
+    # workspace -> monotonic time its table policy was fetched when the guard last passed
+    passed: dict[tuple[str, str, str | None], float] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def is_window(self, kql: str) -> bool:
@@ -510,30 +541,44 @@ def batch_checked(kql: str, resource_id: str, workspace_id: str, tenant_id: str 
     """Whether ``kql`` is a window of the running batch that already passed for this workspace.
 
     True means the cost guard may be skipped for ``kql``. Outside :func:`batch_check`, or for
-    text that is not one of the batch's windows, it is always false.
+    text that is not one of the batch's windows, it is always false. The pass also lapses once
+    the table policy it was based on is :data:`CACHE_TTL_SECONDS` old, so a table moved to a
+    billed plan during a long batch is noticed: the next window then runs the full guard again.
     """
     scope = _batch.get()
     if scope is None or not scope.is_window(kql):
         return False
+    key = _batch_key(resource_id, workspace_id, tenant_id)
     with scope.lock:
-        done = _batch_key(resource_id, workspace_id, tenant_id) in scope.passed
+        since = scope.passed.get(key)
+        if since is not None and not 0 <= time.monotonic() - since < CACHE_TTL_SECONDS:
+            del scope.passed[key]  # expired (or a clock that went backwards): check again
+            since = None
+    done = since is not None
     if done:
         logger.debug("Cost guard already passed for this batch's query; window not checked again")
     return done
 
 
 def note_batch_checked(
-    kql: str, resource_id: str, workspace_id: str, tenant_id: str | None
+    kql: str, resource_id: str, workspace_id: str, tenant_id: str | None, policy: TablePolicy
 ) -> None:
     """Record that ``kql`` passed the cost guard, so the batch's other windows skip it.
 
-    Call it only after :func:`get_policy` and :func:`check_sentinel_query` passed for ``kql``.
-    Does nothing outside :func:`batch_check` or for text that is not one of the batch's windows.
+    Call it only after :func:`check_sentinel_query` passed for ``kql`` against ``policy``, the
+    value :func:`get_policy` returned for the check. Does nothing outside :func:`batch_check` or
+    for text that is not one of the batch's windows. The pass is dated from when ``policy`` was
+    fetched (``policy.fetched_at``, now if it carries none), not from the shared cache, so a
+    concurrent refresh or ``clear_cache()`` cannot extend it: it never outlives the policy it
+    was checked against by more than :data:`CACHE_TTL_SECONDS` in total.
     """
     scope = _batch.get()
     if scope is not None and scope.is_window(kql):
+        now = time.monotonic()
+        stamp = policy.fetched_at
+        fetched = min(now, stamp) if isinstance(stamp, float) else now
         with scope.lock:
-            scope.passed.add(_batch_key(resource_id, workspace_id, tenant_id))
+            scope.passed[_batch_key(resource_id, workspace_id, tenant_id)] = fetched
 
 
 def retention_notice(
@@ -593,14 +638,17 @@ class _Analyzer:
     def __init__(self, tokens: list[Token], policy: TablePolicy) -> None:
         self.t = tokens
         self.policy = policy
-        # Names bound with `let` or as function parameters, one set per `{ }` body (innermost
-        # last). A name is visible in its own scope and the ones inside it. A function defined
-        # with `let f = (...) { ... }` also adds the marker "f(": only those can be called.
+        # Names bound with `let` or as function parameters, one set per bracket group: `( )` and
+        # `[ ]` groups and `{ }` bodies (innermost last). A name is visible in its own scope and
+        # the ones inside it, so a `let` inside `( )` is not seen after the `)`. A function
+        # defined with `let f = (...) { ... }` also adds the marker "f(": only those can be called.
+        # A name bound to a `view` or to an alias of a function gets "f!" and cannot be called.
         self.scopes: list[set[str]] = [set()]
         self.as_names: list[tuple[int, str]] = []  # (bracket depth, name) from `| as name`
         self.stack: list[tuple[str, str]] = []  # open brackets: (char, kind)
-        # `let` statements awaiting their `;`: (bracket depth, scope, name, defines a function)
-        self.lets: list[tuple[int, int, str, bool]] = []
+        # `let` statements awaiting their `;`: (bracket depth, scope, name, marker). The marker is
+        # "(" for a function, "!" for a view or an alias of a function, "" for anything else.
+        self.lets: list[tuple[int, int, str, str]] = []
         self.noncall: set[int] = set()  # identifiers before "(" that are not function calls
         self.plugins: set[int] = set()  # evaluate plugin names (checked against ALLOWED_PLUGINS)
         self.pattern: set[int] = set()  # "(" of graph-match patterns: not sub-queries
@@ -620,6 +668,7 @@ class _Analyzer:
         return t is not None and t.is_p(*chars)
 
     def is_bound(self, name: str) -> bool:
+        """True if ``name`` is a `let` name, a parameter or an `as` name in scope here."""
         return any(name in scope for scope in self.scopes) or any(
             name == n for _, n in self.as_names
         )
@@ -655,7 +704,7 @@ class _Analyzer:
                 f"cannot be verified, and {_REASON}. Query the underlying Analytics tables "
                 "instead."
             )
-        if t.text in self.scopes_names():
+        if self.is_bound(t.text):
             return
         if entry is not None:  # an Analytics table: table names are case-sensitive
             if entry[0] == t.text:
@@ -671,15 +720,13 @@ class _Analyzer:
             f"bills per GB scanned ({_REASON})."
         )
 
+    def has_marker(self, name: str, marker: str) -> bool:
+        """True if ``name + marker`` is recorded in a scope that is still open."""
+        return any(name + marker in scope for scope in self.scopes)
+
     def is_function(self, name: str) -> bool:
         """True if ``name`` was defined as a function with `let` and is still in scope."""
-        return any(name + "(" in scope for scope in self.scopes)
-
-    def scopes_names(self) -> set[str]:
-        names = {n for _, n in self.as_names}
-        for scope in self.scopes:
-            names |= scope
-        return names
+        return self.has_marker(name, "(")
 
     def forbidden_name(self, t: Token) -> None:
         """Rule (b): a non-Analytics table or function name is rejected wherever it appears."""
@@ -705,16 +752,38 @@ class _Analyzer:
             )
 
     def check_call(self, i: int, t: Token) -> None:
-        """Every ``name(`` must be a built-in KQL function, a keyword or a `let` function."""
-        if i in self.noncall or i in self.plugins or t.is_kw(*_PAREN_KEYWORDS):
-            return
-        if i in self.arg_sources:  # arg("").Table: a source, not a function call
+        """Every ``name(`` must be a built-in KQL function, a keyword or a `let` function.
+
+        A keyword, an operator name or a plugin name followed by "(" is exempt only while nothing
+        in the query binds that name: a `let` name, parameter or `as` name spelled like one is a
+        call, not the keyword. A bound name that is not a function this analysis recognises
+        (`let f = (...) { ... }`) is rejected, even when it is spelled like a built-in function.
+        """
+        bound = self.is_bound(t.text)
+        if not bound and (
+            i in self.noncall
+            or i in self.plugins
+            or t.is_kw(*_PAREN_KEYWORDS)
+            or i in self.arg_sources  # arg("").Table: a source, not a function call
+        ):
             return
         if t.quoted:
             raise _reject(f"a call through the escaped name ['{t.text}'] cannot be analysed.")
+        if self.has_marker(t.text, "!"):
+            raise _reject(
+                f"{t.text}() calls a `view` or an alias of a function, which cannot be analysed "
+                f"(it might read tables whose plan cannot be verified: {_REASON}). Call the "
+                "function defined with `let f = (...) { ... }` directly."
+            )
         if self.is_function(t.text):
             self.check_bare_arguments(i)
             return
+        if bound:
+            raise _reject(
+                f"{t.text}() calls a name bound by `let`, a parameter or `as` that is not a "
+                f"function defined as `let {t.text} = (...) {{ ... }}`, so what it reads cannot "
+                f"be analysed ({_REASON})."
+            )
         if is_builtin_call(t.text):
             return
         raise _reject(
@@ -796,29 +865,30 @@ class _Analyzer:
     def commit_lets(self) -> None:
         """Bind the names of `let` statements that end here (at this bracket depth or deeper)."""
         depth = len(self.stack)
-        for d, scope, name, is_function in self.lets:
+        for d, scope, name, marker in self.lets:
             if d >= depth:
                 self.scopes[scope].add(name)
-                if is_function:
-                    self.scopes[scope].add(name + "(")
+                if marker:
+                    self.scopes[scope].add(name + marker)
         self.lets = [x for x in self.lets if x[0] < depth]
 
     def open_bracket(self, i: int, t: Token) -> None:
         prev = self.tok(i - 1)
         kind = "group"
-        if t.text == "(":
-            if prev is not None and prev.kind == "id" and (i - 1) not in self.noncall:
-                if prev.is_kw("with", "declare"):
-                    kind = "nostmt"
-                elif not (prev.is_kw(*_TABULAR_ARG_CALLS) or prev.is_kw(*_PAREN_KEYWORDS)):
-                    kind = "call"
-        elif t.text == "{":
-            self.scopes.append(set())
-            if prev is not None and prev.is_p(")"):
-                self.bind_params(self.matching_open(i - 1), i - 1)
+        if t.text == "(" and prev is not None and prev.kind == "id" and (i - 1) not in self.noncall:
+            if prev.is_kw("with", "declare"):
+                kind = "nostmt"
+            elif self.is_bound(prev.text) or not prev.is_kw(*_TABULAR_ARG_CALLS, *_PAREN_KEYWORDS):
+                kind = "call"
+        # every group has its own scope, so a `let` inside it is not visible after the closer
+        self.scopes.append(set())
+        if t.text == "{" and prev is not None and prev.is_p(")"):
+            self.bind_params(self.matching_open(i - 1), i - 1)
         self.stack.append((t.text, kind))
         if t.text == "[":
             return
+        if t.text == "(" and self.is_list_operand(i):
+            self.check_list(i)
         first, second = self.tok(i + 1), self.tok(i + 2)
         if i in self.pattern:
             return
@@ -829,6 +899,32 @@ class _Analyzer:
         follows = ("|",) if kind == "call" else ("|", ")", "}")
         if second.is_p(*follows):
             self.check_source(i + 1)
+
+    def is_list_operand(self, i: int) -> bool:
+        """Whether the "(" at ``i`` follows ``in``, ``!in``, ``in~``, ``!in~``, ``has_any`` ..."""
+        j = i - 1
+        if self.p(j, "~"):
+            j -= 1
+        prev = self.tok(j)
+        return prev is not None and prev.kind == "id" and prev.low in _LIST_OPERATORS
+
+    def check_list(self, i: int) -> None:
+        """Check every element of ``x in (a, b, ...)``, not only the first.
+
+        A list that starts with a tabular expression (``in (T | project a, b)``) is one
+        expression and is covered by the bracket rule. Otherwise every element that starts with
+        a name must be let-bound or an Analytics table, and a pipe in any element is rejected.
+        """
+        close = self.match(i)
+        spots = [m for m in self.depth0(i + 1, close) if self.t[m].is_p(",", "|")]
+        if not spots or self.t[spots[0]].is_p("|"):
+            return
+        if any(self.t[m].is_p("|") for m in spots):
+            raise _reject(
+                "a list of values with a tabular expression after the first element is ambiguous "
+                "and cannot be analysed safely."
+            )
+        self.check_bare_arguments(i - 1)
 
     def matching_open(self, close: int) -> int:
         depth = 0
@@ -859,9 +955,8 @@ class _Analyzer:
         self.stack.pop()
         depth = len(self.stack)
         self.as_names = [x for x in self.as_names if x[0] <= depth]
-        if t.text == "}":
-            self.scopes.pop()
-            self.lets = [x for x in self.lets if x[1] < len(self.scopes)]
+        self.scopes.pop()  # the names `let` bound inside the group go with it
+        self.lets = [x for x in self.lets if x[1] < len(self.scopes)]
 
     # -- keywords --
 
@@ -878,9 +973,12 @@ class _Analyzer:
             self.do_evaluate(i)
         elif word == "invoke":
             self.do_invoke(i)
-        elif word == "as":
-            j, values = skip_params(self.t, i + 1)
-            self.noncall |= values
+        elif word == "as" and self.p(i - 1, "|"):
+            # Only the `| as name` operator binds a name. Other `as` (`parse-kv ... as (...)`,
+            # `graph-to-table nodes as N`) names an output column or result, not a table.
+            # The only parameter is `hint.materialized=true`, so its value is never a call and
+            # must not be exempted from the call check (`hint.x=_Im_Dns() t` is rejected).
+            j, _ = skip_params(self.t, i + 1)
             name = self.tok(j)
             if name is not None and name.kind == "id":
                 self.as_names.append((len(self.stack), name.text))
@@ -893,8 +991,21 @@ class _Analyzer:
         t = self.tok(j)
         if t is None:
             raise _reject("a `let` statement has no value.")
-        is_function = t.is_p("(") and self.p(self.match(j) + 1, "{")
-        self.lets.append((len(self.stack), len(self.scopes) - 1, name.text, is_function))
+        marker = ""
+        if t.is_p("(") and self.p(self.match(j) + 1, "{"):
+            marker = "("
+        elif t.is_kw("view") or (
+            t.kind == "id"
+            and not self.p(j + 1, "(")
+            and (self.is_function(t.text) or self.has_marker(t.text, "!"))
+        ):
+            marker = "!"
+        if marker and name.text in _RESERVED_WORDS:
+            raise _reject(
+                f"the function `{name.text}` is named like a KQL keyword or operator, which could "
+                f"hide what its calls read ({_REASON}). Rename the function."
+            )
+        self.lets.append((len(self.stack), len(self.scopes) - 1, name.text, marker))
         if t.kind == "id" and self.p(j + 1, "("):
             return  # a call: checked as one when the main loop reaches it
         if t.is_kw(*_LITERALS):
@@ -904,8 +1015,21 @@ class _Analyzer:
     def operand_params(self, i: int) -> int:
         """Skip ``kind=...`` / ``hint.x=...`` parameters after operator ``i``; return the index."""
         j, values = skip_params(self.t, i + 1)
-        self.noncall |= values
+        self.noncall |= self.plain_values(values)
         return j
+
+    def plain_values(self, values: set[int]) -> set[int]:
+        """The parameter values that are words, not calls.
+
+        A value followed by "(" is the operand's bracket (``kind=inner (T)``) when a space
+        separates them. Without one it is a call (``kind=keep(T, X)``), checked like any other,
+        unless it is a join kind.
+        """
+        return {
+            v
+            for v in values
+            if not self.p(v + 1, "(") or self.t[v + 1].spaced or self.t[v].low in _JOIN_KINDS
+        }
 
     def do_union(self, i: int) -> None:
         j = self.operand_params(i)
@@ -1001,7 +1125,9 @@ class _Analyzer:
             return None
         parts, ends, k = [t.text], [j + 1], j + 1
         while self.p(k, "-") and (n := self.tok(k + 1)) is not None:
-            if n.kind != "id" or n.quoted:
+            # `project-keep` is one operator only without spaces: `project - keep(x)` is a
+            # `project` of a call.
+            if n.kind != "id" or n.quoted or self.t[k].spaced or n.spaced:
                 break
             parts.append(n.text)
             k += 2
@@ -1096,7 +1222,7 @@ class _Analyzer:
             raise _reject("cannot parse `partition`: unexpected text after the sub-query.")
         if self.p(m + 3, ")", "}"):
             raise _reject("cannot parse `partition`: the sub-query is empty.")
-        self.noncall |= values
+        self.noncall |= self.plain_values(values)
         self.noncall.add(m + 1)
         self.check_branch_start(m + 3)
 

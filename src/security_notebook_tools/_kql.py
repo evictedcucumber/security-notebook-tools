@@ -220,6 +220,7 @@ class Token(NamedTuple):
     text: str
     quoted: bool = False  # an identifier written as ['name'] / ["name"]
     raw: str = ""  # for strings: the literal exactly as written, quotes and prefix included
+    spaced: bool = False  # whitespace or a comment came right before this token
 
     @property
     def low(self) -> str:
@@ -295,6 +296,7 @@ def tokenize(kql: str) -> list[Token]:
         )
     raw: list[Token] = []
     previous = ""
+    gap = False
     for kind, text in _scan(kql, strict=True):
         if kind == "ident" and previous == "num":
             raise ConfigurationError(
@@ -303,17 +305,20 @@ def tokenize(kql: str) -> list[Token]:
             )
         previous = kind
         if kind in ("ws", "comment"):
+            gap = True
             continue
         if kind == "ml":
-            raw.append(Token("str", text[3:-3], raw=text))
+            raw.append(Token("str", text[3:-3], raw=text, spaced=gap))
         elif kind == "str":
-            raw.append(Token("str", text[2:-1] if text[0] == "@" else text[1:-1], raw=text))
+            literal = text[2:-1] if text[0] == "@" else text[1:-1]
+            raw.append(Token("str", literal, raw=text, spaced=gap))
         elif kind == "ident":
-            raw.append(Token("id", text))
+            raw.append(Token("id", text, spaced=gap))
         elif kind == "num":
-            raw.append(Token("num", text))
+            raw.append(Token("num", text, spaced=gap))
         else:
-            raw.append(Token("p", text))
+            raw.append(Token("p", text, spaced=gap))
+        gap = False
     tokens: list[Token] = []
     i = 0
     while i < len(raw):
@@ -325,7 +330,7 @@ def tokenize(kql: str) -> list[Token]:
                     f"The escaped name [{name!r}] cannot be analysed safely, so the query "
                     "was not sent."
                 )
-            tokens.append(Token("id", name, quoted=True))
+            tokens.append(Token("id", name, quoted=True, spaced=tok.spaced))
             i += 3
         else:
             tokens.append(tok)

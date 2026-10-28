@@ -741,8 +741,9 @@ def exec_batch_query(
     is clipped to ``start`` as well and there may be one window more. Each run goes through the
     same checks as ``exec_query``. The Sentinel cost guard applies to every window, but as the
     windows differ only in ``BatchStart`` and ``BatchEnd`` it checks the query (and reads the
-    table plans) once, for the first window sent, and the table plans it read hold for the
-    whole batch.
+    table plans) once, for the first window sent. That verdict lapses once the table plans it
+    used are 5 minutes old, and the next window is checked again, so a table moved to a billed
+    plan during a long batch is noticed.
 
     Each window is cached separately (see ``exec_query``), so re-running a batch reuses the
     windows that already succeeded: all of them for the same absolute ``start`` and ``end``, and

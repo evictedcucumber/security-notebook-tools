@@ -395,7 +395,7 @@ class SentinelClient:
                 self.resource_id, self.workspace_id, self.credential, self.tenant_id
             )
             check_sentinel_query(kql, policy)
-            note_batch_checked(kql, *ids)
+            note_batch_checked(kql, *ids, policy)
         logger.info(
             "Running Sentinel query (timespan=%s, kql=%s)",
             describe_timespan(timespan),
