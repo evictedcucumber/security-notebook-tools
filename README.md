@@ -24,7 +24,7 @@ Into a uv-managed project:
 uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
 
 # A specific release (less strict: tags can be moved)
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v6.0.1
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v7.0.0
 
 # Latest main (least strict: whatever main is at install time)
 uv add git+https://github.com/evictedcucumber/security-notebook-tools
