@@ -38,7 +38,13 @@ never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``forma
 ``merge_dataframe`` and ``pivot_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``):
 for that call, and everything it calls, the records at DEBUG and above are also printed to the
 cell's output, unredacted (raw KQL, workspace IDs, cluster URIs). DEBUG records are never
-written to the file.
+written to the file. The ``security_notebook_tools`` logger does not propagate to the root logger
+(a ``logging.basicConfig`` handler does not see these records); a handler you attach to it sees
+every record, DEBUG included, unredacted. Control and bidirectional override characters are
+written to the file as visible escapes.
+
+Frames from ``exec_query`` and ``exec_batch_query`` have ``attrs["partial"]`` (True if Sentinel
+returned only a partial result); pass ``raise_on_partial=True`` to raise ``PartialResultError``.
 
 Use ``help(function)`` for details. Submodules are private and may change.
 """

@@ -8,15 +8,16 @@ developing this repository itself, see the README and `.vscode/` in the repo.
 ```sh
 uv init my-sec-notebooks
 cd my-sec-notebooks
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v6.0.1
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
 uv add --dev ipykernel
 ```
 
-For sensitive environments, pin to a full commit SHA instead of a tag (tags can be moved) and
-install with `uv sync --locked`:
+Pinning to a full commit SHA is the recommended form, and install with `uv sync --locked`. A tag
+is less strict, because tags can be moved, and an install without a ref is the least strict (it
+takes whatever `main` is):
 
 ```sh
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v6.0.1
 ```
 
 The project needs Python 3.14 or newer. Other install options (latest main, editable local
@@ -56,6 +57,13 @@ and data lake tables bill per GB scanned). They must be the same workspace as
 `SENTINEL_WORKSPACE_ID`. Your identity needs `Microsoft.OperationalInsights/workspaces/tables/read`
 and `.../savedSearches/read` on the workspace (Log Analytics Reader includes both). If the plans
 cannot be read, queries are not sent. See the README's Cost guard section for what is rejected.
+
+Treat the `.env` file (loaded into the kernel by VS Code's `python.envFile`, see below) as trusted
+input. It sets `ADX_CLUSTER_URI`, and can also set `HTTPS_PROXY`, `REQUESTS_CA_BUNDLE` /
+`SSL_CERT_FILE` and `PATH` (which `az` runs from). The package only requires the ADX cluster to be
+on a Microsoft Kusto domain (such as `*.kusto.windows.net`), so any cluster there, including one in
+another tenant, is accepted and would receive the query and a Kusto access token. Review `.env`,
+check the cluster host, and never use a `.env` from an untrusted source.
 
 ### Find the values with the Azure CLI
 
@@ -139,6 +147,14 @@ A query that reads a non-Analytics table (or uses `search`, `union *`, saved fun
 raises an error naming the reason and is not sent.
 
 What is being run is logged to `notebooks.log` in the project root. Add that file to `.gitignore`.
+
+Notebook files store their outputs: query results, rendered tables, `debug=True` output and error
+tracebacks (which may include raw service messages such as UPNs, resource IDs and query
+fragments). Strip outputs (for example with `nbstripout` or "Clear All Outputs") before committing
+or sharing a notebook, and avoid `%xmode Verbose` with these calls.
+
+The result cache is keyed on tenant, workspace and query, not on the signed-in `az` account. After
+`az login` as a different account, or a permission change, call `clear_cache()`.
 
 ## Workspace settings (`.vscode/settings.json`)
 

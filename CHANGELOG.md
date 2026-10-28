@@ -1,5 +1,81 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- The `security_notebook_tools` logger no longer propagates to the root logger. Its DEBUG records
+  carry raw KQL, identifiers and tracebacks, and a `logging.basicConfig` call or other root
+  handler would have received them unredacted even without `debug=True`. Code that relied on a
+  root handler to see the package's records no longer sees them. Attach a handler to the
+  `security_notebook_tools` logger instead (it sees every record, DEBUG included, unredacted);
+  `logging.getLogger("security_notebook_tools").propagate = True` restores the old routing with
+  the same caveat. The content and location of `notebooks.log` are unchanged.
+- The Sentinel cost guard rejects more queries (see Security). Newly rejected legitimate forms:
+  a column reference in an `in`, `!in`, `in~`, `!in~`, `has_any` or `has_all` list unless it is
+  `let`-bound (`x in (colA, "b")`); a `let` function, `view` or function alias named like a KQL
+  keyword or operator or any part of a hyphenated operator (`let take = (...) {...}`,
+  `let keep = ...`); a call to a name bound by `let`, a parameter or `as` that is not a `let`
+  function, including a built-in name (`let min = 1; print min(2, 3)`); a call-like parameter
+  value with no space before the bracket (`hint.shufflekey=Col(T)`); a `let` name used outside
+  the `( )` or `[ ]` it was defined in; and a name bound by `as` anywhere but the `| as name`
+  operator (`graph-to-table nodes as N`).
+
+### Added
+
+- `exec_query` and `exec_batch_query` take `raise_on_partial: bool = False` (Sentinel only; no
+  effect on ADX). A partial result raises `PartialResultError`, a `QueryError` whose
+  `partial_error` is the service error and `partial_data` the list of DataFrames received (each
+  with `attrs["partial"]` True). In a batch the partial window raises, named, and is not retried
+  or split.
+- Every frame returned by `exec_query` and `exec_batch_query` has `df.attrs["partial"]`, a bool:
+  True if Sentinel returned only a partial result, False otherwise, including on ADX. Batch
+  frames also have `attrs["partial_windows"]`, the list of `(start, end)` UTC datetimes of the
+  partial windows (empty if none). `merge_dataframe` always sets `attrs["partial"]` (True if any
+  input was partial) and carries `partial_windows` if an input had it; `pivot_dataframe` carries
+  both over from its input when present.
+
+### Changed
+
+- `exec_batch_query` emits one summary warning for the partial windows ("Batch query returned
+  partial results for N of M windows ...", naming the first five) instead of one warning per
+  window, which Python's warning de-duplication could hide. The totals are undercounted when
+  this happens.
+
+### Security
+
+- The Sentinel cost guard failed open on queries that could read names it does not know (such
+  as the built-in `_Im_*` / `_ASim_*` parsers or a table created after the table plans were
+  read). It now checks the arguments of `let` functions named like KQL keywords or hyphenated
+  operator parts, keeps a `let` inside `( )` or `[ ]` local to that group, checks every element
+  of `in` / `has_any` / `has_all` lists rather than only the first, reads a spaced
+  `project - keep(...)` as a call instead of the `project-keep` operator, rejects calls to
+  bound names that are not `let` functions and call-like parameter values (`kind=keep(...)`),
+  and lets only the `| as name` operator bind a name.
+- `exec_batch_query` on Sentinel no longer keeps the cost guard's verdict for the whole batch:
+  it lapses once the table plans it used are 5 minutes old, and the next window is checked
+  again, so a table moved to a billed plan during a long batch is noticed.
+- `format_dataframe` HTML-escapes column headers (all `MultiIndex` levels), index labels and
+  index and column names. They used to render raw, so attacker-controlled telemetry (for example
+  a value that became a column header through `pivot_dataframe`) could run script in the
+  notebook output.
+- `notebooks.log` writes control characters (ESC and other C0/C1 controls, DEL) and
+  bidirectional override characters (U+202A to U+202E, U+2066 to U+2069, U+2028, U+2029) as
+  visible escapes such as `\x1b` and `\u202e`; tab is kept.
+- An existing `notebooks.log` with group or other permission bits is set to 0600 when opened.
+- Returned frames no longer share nested `dynamic` dict, list and set values with the in-memory
+  result cache, so changing them cannot alter later cached results.
+
+### Docs
+
+- The README and `docs/notebook-setup.md` now recommend installing by full commit SHA over a tag
+  (tags can be moved) and say the tag and unpinned forms are less strict.
+- New security guidance: `.env` is trusted input (it sets `ADX_CLUSTER_URI`, which accepts any
+  Microsoft Kusto domain, and can set `HTTPS_PROXY`, `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` and
+  `PATH`); notebook outputs hold results, `debug=True` output and tracebacks, so strip them before
+  sharing; the result cache is keyed on tenant, workspace and query, not on the `az` account, so
+  call `clear_cache()` after changing account or permissions.
+
 ## 6.0.1 - 2026-10-26
 
 ### Changed

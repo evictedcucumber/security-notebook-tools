@@ -28,6 +28,7 @@ exec_query(
     target: Literal["sentinel", "adx"] = "sentinel",
     timeout: int = 300,
     cache: bool = True,
+    raise_on_partial: bool = False,
     debug: bool = False,
 ) -> pandas.DataFrame
 ```
@@ -46,9 +47,10 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds (default 300); must be a positive `int`. Applies to both targets. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
+| `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a partial result (the service returned some data and an error) raises `PartialResultError` instead of being returned with a warning. Default false. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (clients, credentials, table policy, the query itself). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
-`target`, `timeout`, `cache` and `debug` are keyword-only.
+`target`, `timeout`, `cache`, `raise_on_partial` and `debug` are keyword-only.
 
 ### Environment variables
 
@@ -102,7 +104,8 @@ runs client-side before the query is sent, in `exec_query` and in the Sentinel c
    (needs `Microsoft.OperationalInsights/workspaces/tables/read` and `.../savedSearches/read`,
    for example Log Analytics Reader). The workspace's `customerId` must equal
    `SENTINEL_WORKSPACE_ID`. The result is cached for 5 minutes per workspace and tenant.
-   `exec_batch_query` does this, and the analysis below, once per batch rather than per window.
+   `exec_batch_query` does this, and the analysis below, once per batch rather than per window,
+   until the table plans it used are 5 minutes old; the next window then checks again.
 2. If that fails for any reason the query is not sent (`QueryError`: the tiers could not be
    verified). There is no fallback to "allow".
 3. The KQL is tokenized (comments and string literals are ignored) and rejected if it contains:
@@ -131,15 +134,26 @@ runs client-side before the query is sent, in `exec_query` and in the Sentinel c
      function and not a function defined with `let f = (...) { ... }` that is in scope.** This
      rejects saved functions and the built-in Sentinel parsers (`_Im_*`, `_ASim_*`, which are
      not saved searches) and `_GetWatchlist()`. The target of `invoke` must be a `let`
-     function; a lone name passed to one must be `let`-bound or an Analytics table;
+     function; a lone name passed to one must be `let`-bound or an Analytics table. A call to a
+     name bound by `let`, a parameter or `as` is rejected unless that name is a `let` function,
+     even if it is also a built-in name (`let min = 1; print min(2, 3)`);
+   - a function defined with `let` (a `(...) { ... }` lambda, a `view`, or an alias of one)
+     whose name is a KQL keyword or operator, or any part of a hyphenated operator (`take`,
+     `project`, `keep`, `kv`, `away` ...). Scalar and tabular `let`s may use such names
+     (`let limit = 10`);
    - a tabular source that is not a `let`-bound name or an Analytics table. Sources are the
      start of every statement (other than `let`, `set`, `declare`, `alias`, `pattern`,
      `restrict`), the value of `let x =`, `union`/`join`/`lookup` operands, the first name
      inside `(` or `{` when followed by `|`, `)` or `}` (subqueries, `materialize()`,
-     `toscalar()`, `view()`, `x in (T)`), sub-queries of `partition`, `fork`, `facet` and
-     `mv-apply`, the `with` tables of `make-graph`, and a lone name at the start of an argument
-     to a `let` function (`f(t=Name)`). A `let` name is visible after its statement, parameters
-     only inside their body, `as` names only within their statement. Keywords and function
+     `toscalar()`, `view()`, `x in (T)`), every element that starts with a name in an `in`,
+     `!in`, `in~`, `!in~`, `has_any` or `has_all` list (so a column reference there, as in
+     `x in (colA, "b")`, is rejected unless `let`-bound), sub-queries of `partition`, `fork`,
+     `facet` and `mv-apply`, the `with` tables of `make-graph`, and a lone name at the start of
+     an argument to a `let` function (`f(t=Name)`). A `let` name is visible after its statement
+     and only inside the brackets it was defined in, parameters only inside their body, and only
+     the `| as name` operator binds a name, visible within its statement. A hyphenated operator
+     must be written without spaces (`project-keep`): `project - keep(...)` is `project`
+     followed by a call. Keywords and function
      names are case-sensitive (`Print` is a name). Table names must match the workspace's
      spelling exactly (`signinlogs` is rejected with a hint to use `SigninLogs`);
    - text it cannot analyse with certainty (unterminated strings, control characters or line
@@ -200,8 +214,11 @@ explicitly in that case.
 
 The first result table as a `pandas.DataFrame`, or an empty DataFrame if the query returned no
 tables. Sentinel datetime columns are UTC-aware. `df.attrs["kql_types"]` maps each column name
-to its lowercase KQL type (`"long"`, `"dynamic"` ...), which `format_dataframe` uses. If Sentinel
-returns only a partial result, a warning is logged and the data received is returned.
+to its lowercase KQL type (`"long"`, `"dynamic"` ...), which `format_dataframe` uses.
+`df.attrs["partial"]` is always a bool: True if Sentinel returned only a partial result (a warning
+is issued and the data received is returned, so the frame may be incomplete), False otherwise,
+including on ADX. A partial result is never cached. Nested `dynamic` values (dicts and lists) are
+copies: changing them does not alter the cached result.
 
 On Sentinel, a `UserWarning` (and a WARNING log line) is also issued when the time range starts
 more than a day before the Analytics retention (`retentionInDays`) of a table the query reads, for example a
@@ -229,6 +246,7 @@ Known failures are raised as `QueryError` (or a subclass) with a message that ex
   `timeout` plus 30 seconds in total (the request is then abandoned; ADX has no such total
   deadline). It is not retried, as the same query would time out again.
 - `exec_batch_query` retries `QueryTransientError` (throttling, connection errors, HTTP 502/503).
+- With `raise_on_partial=True`, a partial Sentinel result raises `PartialResultError`.
 
 An error nobody anticipated is logged at ERROR with its traceback to the `security_notebook_tools`
 logger, and raised as a `QueryError` that names the operation and chains the original exception
@@ -239,7 +257,7 @@ and `SystemExit` are never wrapped.
 ### Raises
 
 - `ConfigurationError` (also a `ValueError`): `kql` is not a string or is blank, `timeout` is not a positive
-  integer, `cache` or `debug` is not a bool, `target` is unknown, `timespan` is not a positive
+  integer, `cache`, `raise_on_partial` or `debug` is not a bool, `target` is unknown, `timespan` is not a positive
   `timedelta` or a `(start, end)` / `(start, timedelta)` tuple of datetimes with a positive length,
   `timespan` is combined with `target="adx"`, a required environment variable is unset or invalid,
   `SENTINEL_WORKSPACE_ID` and the workspace named by `SENTINEL_SUBSCRIPTION_ID`,
@@ -254,6 +272,9 @@ and `SystemExit` are never wrapped.
   message explains the likely cause). HTTP 502/503 raise `QueryTransientError`, their base
   class. `QueryTimeoutError` (HTTP 504/408 or a timeout error code, or on Sentinel no answer
   within `timeout` plus 30 seconds) is a `QueryError` that is not transient.
+- `PartialResultError` (a `QueryError`): only with `raise_on_partial=True`, on Sentinel, when the
+  result was partial. `partial_error` holds the service error and `partial_data` the list of
+  DataFrames received so far, each with `attrs["partial"]` True.
 
 None of these classes is exported; catch `ValueError` for configuration problems, or `Exception`.
 
@@ -288,6 +309,7 @@ exec_batch_query(
     agg_column: str | Sequence[str] | None = None,
     agg_func: str | Callable = "sum",
     cache: bool = True,
+    raise_on_partial: bool = False,
     debug: bool = False,
 ) -> pandas.DataFrame
 ```
@@ -341,8 +363,9 @@ either name yourself. Other uses, such as `extend WindowStart = BatchStart`, are
 each window is also sent as the API time range, so the 1-day default and the "set in query" rules
 of `exec_query` do not apply. The Sentinel cost guard applies to every window. The windows differ
 only in `BatchStart` and `BatchEnd`, so it checks the query, and reads the table plans, once for
-the first window sent, and that verdict holds for the rest of the batch (even one that runs longer
-than the 5-minute table-plan cache). A new batch checks again.
+the first window sent. That verdict lapses once the table plans it used are 5 minutes old, and
+the next window is checked again, so a table moved to a billed plan during a long batch is
+noticed. A new batch checks again.
 
 Aggregations (`summarize`, `count`, `dcount`, `top` ...) run per window and by default are not
 combined. Pass `merge_on` and `agg_column` (and optionally `agg_func`) to group the merged rows and
@@ -369,6 +392,7 @@ after the first window, so a typo fails before the other windows run.
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
 | `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
+| `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a window whose result is partial (the service returned some data and an error) fails the batch with `PartialResultError` naming the window; it is not retried or split. Default false: the partial data is kept, the frame is marked (see Returns) and one warning summarises the partial windows. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (every window, also those run on worker threads). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
 ### Returns
@@ -383,12 +407,20 @@ Otherwise, the non-empty window results concatenated in window order with a fres
 window is empty, the first window's empty result. `df.attrs["kql_types"]` comes from the windows'
 results, adding columns that only later windows have.
 
+`df.attrs["partial"]` is always a bool: True if any Sentinel window returned only a partial
+result, so the rows (and any totals from `merge_on`/`agg_column`) may be incomplete; False
+otherwise, including on ADX. `df.attrs["partial_windows"]` is the list of `(start, end)` datetime
+tuples (UTC, in time order) of those windows, empty if none; a window that was split after a
+timeout is listed by its halves. Both are set on the aggregated frame too. After the batch one
+`UserWarning` states how many windows were partial and which (the first five are named), instead
+of one warning per window.
+
 ### Raises
 
 * `ConfigurationError`: `kql` is not a string or is blank, `start` is not a datetime or
   timedelta, `end` is not a datetime or `None`, `interval` is not a positive `timedelta`,
   `min_interval` is not a positive `timedelta` or is longer than `interval`,
-  `timeout` is not a positive integer, `cache` or `debug` is not a bool, `max_workers` is not an integer
+  `timeout` is not a positive integer, `cache`, `raise_on_partial` or `debug` is not a bool, `max_workers` is not an integer
   from 1 to 5, `start` is not before `end`,
   `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
   `< BatchEnd`, compares them in another form or defines them (checked before any query),
@@ -403,6 +435,9 @@ results, adding columns that only later windows have.
   half of `timeout`) fails with the
   subclass `QueryTimeoutError`, without retries (unless `min_interval` splits it; the final error
   then names the smallest window tried).
+* `PartialResultError` (a `QueryError`): only with `raise_on_partial=True`, on Sentinel, when a
+  window's result was partial. The message names the window; `partial_error` and `partial_data`
+  are those of the window's error. The window is not retried.
 
 ### Examples
 
@@ -451,8 +486,10 @@ them, by each column's KQL type from `df.attrs["kql_types"]` (set by `exec_query
 Columns with no recorded type (for example ones you added) are typed from their dtype and
 values. Nulls are empty cells. Text is left-aligned and numbers (`int`, `long`, `real`,
 `decimal`) are right-aligned, headers included. Cells never wrap and columns have no maximum
-width, so wide tables scroll horizontally. All text is HTML-escaped and an unnamed index is
-hidden. The DataFrame is not modified.
+width, so wide tables scroll horizontally. All text is HTML-escaped, including column headers
+(every level of a `MultiIndex`), index labels and index and column names, which can come from
+untrusted data (for example a value that became a header through `pivot_dataframe`). An unnamed
+index is hidden. The DataFrame is not modified.
 
 The `Total` row and columns of a `pivot_dataframe(..., totals=True)` result are bold and set off
 by a rule, the row also by a shaded background. They are found from `df.attrs["pivot_totals"]`,
@@ -515,7 +552,8 @@ and `last` keep the value's type, and a callable is left untyped), so it goes st
 total row's index label (`None` if there are no rows) and the column holding its `Total` label,
 as `{"columns": [...], "row": ..., "label_column": ...}`; `format_dataframe` uses it to make the
 totals stand out. `df` is not modified, and a `df` with no rows gives just the `index` columns
-(and `Total` if requested).
+(and `Total` if requested). If `df` has `attrs["partial"]` or `attrs["partial_windows"]`, they are
+copied to the result, so a pivot of a partial result stays marked.
 
 | Name | Description |
 | --- | --- |
@@ -578,7 +616,9 @@ The result has one row per distinct key sorted by the keys, with the `merge_on` 
 `agg_column` columns and a fresh index. If the (concatenated) input has no columns at all, an empty
 copy is returned as is. `kql_types` keeps the key types; an aggregated column keeps its type for
 `sum`, `min`, `max`, `first` and `last`, becomes `long` for `count`, `nunique` and `size`, `real`
-for `mean`, `median`, `std` and `var`, and has no entry otherwise.
+for `mean`, `median`, `std` and `var`, and has no entry otherwise. `attrs["partial"]` is always
+set: True if any input had it True, else False. `attrs["partial_windows"]` is carried over if an
+input had it.
 
 | Name | Description |
 | --- | --- |
@@ -663,8 +703,11 @@ used are dropped first.
   is resolved when the query first runs; a hit returns the data from then, not from now. Pass
   absolute datetimes, or `cache=False`, when you need current data.
 - **Not cached:** failures and partial Sentinel results. ADX `.show` commands are cached.
-- **Copies:** each call gets its own copy, so changing the returned DataFrame does not affect the
-  cache.
+- **Copies:** each call gets its own copy, including nested `dynamic` dicts and lists, so changing
+  the returned DataFrame does not affect the cache.
+- **Not keyed on the account.** The key has no signed-in `az` account in it. After `az login` as a
+  different account, or a change to your permissions, call `clear_cache()`, or a hit returns data
+  fetched under the earlier access.
 - **A hit sends no request**, so nothing is billed and the cost guard check is not needed. An
   INFO log line says the result came from the cache.
 - **Batch:** each window is cached separately, so re-running `exec_batch_query` reuses the
@@ -693,7 +736,8 @@ directory, that contains `.git` or `pyproject.toml`. The walk stops at your home
 never looks above it), and the working directory itself is used if no marker is found by then.
 The path follows `os.chdir`, and the file is created, with permissions 0600, when the first record
 is written. It is opened without following symbolic links, and records are dropped silently
-unless it is a regular file you own with a single link. Add `notebooks.log` to your `.gitignore`.
+unless it is a regular file you own with a single link. An existing file with group or other
+permission bits is set to 0600 when opened. Add `notebooks.log` to your `.gitignore`.
 
 Each line is an RFC 3339 UTC timestamp with milliseconds, the level, the logger name, the
 notebook in brackets and the message; tracebacks follow on the next lines:
@@ -715,7 +759,7 @@ query. The records come from these loggers:
 
 | Logger | Emits |
 | --- | --- |
-| `security_notebook_tools` | Parent of all the below |
+| `security_notebook_tools` | Parent of all the below; does not propagate to the root logger (see below) |
 | `security_notebook_tools.query` | `exec_query` entry and result summary, result cache hit, miss and bypass, `clear_cache` |
 | `security_notebook_tools.batch` | `exec_batch_query` entry and summary, each window, retries, fail-fast, pandas merge and aggregation |
 | `security_notebook_tools.sentinel` | Client creation, the Log Analytics call and the pandas conversion (with durations), partial results |
@@ -736,8 +780,16 @@ Levels:
 | --- | --- |
 | DEBUG | Internal detail: cached client, credential or table policy reused, the start of each dependency call. Never written to the file. |
 | INFO | An operation starting or completing: a public function's entry and result summary (rows, columns, duration), result cache hit, miss or bypass, client or credential created, each dependency call completing with its duration, cost guard passed, table policy fetched, `clear_cache`, a `%%kql` run, the extension loaded. |
-| WARNING | Recoverable or refused: a dependency call that failed (exception type and redacted message, no traceback), each batch retry, partial results, a call rejected by validation or the cost guard (`ConfigurationError`, `%%kql` `UsageError`). |
+| WARNING | Recoverable or refused: a dependency call that failed (exception type and redacted message, no traceback), each batch retry, partial results (in a batch, each partial window), a call rejected by validation or the cost guard (`ConfigurationError`, `%%kql` `UsageError`). |
 | ERROR | The operation failed and an exception reaches you. Logged once per failed public call, at the public function. An unanticipated error is logged once, with a traceback. |
+
+The `security_notebook_tools` logger does not propagate to the root logger: its DEBUG records
+carry raw KQL, identifiers and tracebacks, so a `logging.basicConfig` call or a root handler
+(such as a log shipper) does not receive the package's records, not even without `debug=True`. To
+capture them, attach a handler to the `security_notebook_tools` logger; it then sees every record,
+DEBUG included, unredacted, and where that goes is up to you. Setting
+`logging.getLogger("security_notebook_tools").propagate = True` restores the routing to the root
+logger, with the same caveat. `notebooks.log` is unaffected.
 
 Warnings and errors from the Azure SDK loggers (`azure.*`) now go only to `notebooks.log`; the
 notebook cell's stderr no longer shows them.
@@ -756,7 +808,10 @@ values, URL query strings, `sig=`, `code=`, `token=`, `access_token=`, `client_s
 `password=`, `key=` and `AccountKey=` values, email addresses, IPv4 and IPv6 addresses, GUIDs
 (only the first four hex digits are kept), the subscription, resource group and workspace
 segments of Azure resource paths, cookies and API key headers, and user names in home
-directories. Line breaks in a message are escaped, so one record is one line. Tracebacks list files and lines but no source text, and their messages get the same
+directories. Line breaks in a message are escaped, so one record is one line, and control characters (ESC and
+other C0/C1 controls, DEL) and bidirectional override characters (U+202A to U+202E, U+2066 to
+U+2069, U+2028, U+2029) are written as visible escapes such as `\x1b` and `\u202e` (tab is kept),
+so a value from telemetry cannot hide text or drive a terminal when you read the file. Tracebacks list files and lines but no source text, and their messages get the same
 treatment as above.
 
 ## `__version__`
@@ -792,6 +847,8 @@ df = exec_query("SigninLogs | take 100", debug=True)
 - **Where it goes.** To the output stream the cell had when the call started (`sys.stdout`).
   Only the package's own records are printed, not the `azure` loggers'.
 - **Never in the file.** DEBUG records are not written to `notebooks.log`; what the file gets at
-  INFO and above is the same with or without `debug`.
+  INFO and above is the same with or without `debug`. They are not passed to the root logger
+  either (see [Logging](#logging)); a handler you attach to `security_notebook_tools` does get
+  them.
 - **Cost.** Off by default; the package logger itself is at DEBUG so the records can be created,
   but nothing is formatted or printed unless a call asked for it.

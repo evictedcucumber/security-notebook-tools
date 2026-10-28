@@ -20,20 +20,20 @@ The package is not on PyPI. Install it from GitHub or a local checkout.
 Into a uv-managed project:
 
 ```sh
-# Latest main
-uv add git+https://github.com/evictedcucumber/security-notebook-tools
+# A full commit SHA (recommended, especially in sensitive environments; see Security)
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
 
-# A specific release
+# A specific release (less strict: tags can be moved)
 uv add git+https://github.com/evictedcucumber/security-notebook-tools@v6.0.1
 
-# A full commit SHA (recommended for sensitive environments, see Security)
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
+# Latest main (least strict: whatever main is at install time)
+uv add git+https://github.com/evictedcucumber/security-notebook-tools
 
 # Local checkout, editable (changes to the source apply without reinstalling)
 uv add --editable ../security-notebook-tools
 ```
 
-With pip:
+With pip (append `@<full-commit-sha>` to pin it):
 
 ```sh
 pip install git+https://github.com/evictedcucumber/security-notebook-tools
@@ -118,9 +118,13 @@ df = exec_query("Events | take 100", target="adx")
 df = exec_query(".show tables", target="adx")  # only .show commands are allowed
 ```
 
-`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True, debug=False)` returns the
+`exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True,
+raise_on_partial=False, debug=False)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
-columns are UTC-aware. A partial Sentinel result emits a warning and returns the data received. So does a time range
+columns are UTC-aware. A partial Sentinel result (the service returned some data and an error)
+emits a warning and returns the data received, and `df.attrs["partial"]` is True (it is always set,
+False otherwise, also on ADX); pass `raise_on_partial=True` to raise `PartialResultError` instead
+(Sentinel only). A time range
 that starts before a table's Analytics retention (for example 120 days on a table that keeps 90):
 the older rows are in long-term retention, which these queries cannot read.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
@@ -167,7 +171,8 @@ Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; 
 checked on both targets before any query is sent; other comparisons of the two names (`>`, `<=`,
 `==`, `between` ...) are rejected. On Sentinel each window is also sent as the API time range. The
 cost guard applies to every window: as the windows differ only in their bounds, it checks the
-query and reads the table plans once per batch, not once per window. The first failing window
+query and reads the table plans once per batch, not once per window, until those plans are 5
+minutes old (the next window then checks again). The first failing window
 stops the batch. See
 [docs/api.md](docs/api.md).
 
@@ -216,7 +221,10 @@ Results are cached in memory by default (up to 32 distinct queries, least recent
 first), so repeating a query in a notebook sends no request and costs nothing. A relative range
 (a `timedelta`, including the default last 1 day) is not re-evaluated on a hit, so you get the
 data from when the query first ran. Failures and partial results are not cached, and each call
-gets its own copy. `exec_batch_query` caches each window separately, so a re-run reuses the
+gets its own copy (nested `dynamic` dicts and lists included), so changing a returned frame never
+alters a later cached result. The cache is keyed on tenant, workspace and query, not on the
+signed-in `az` account: after `az login` as a different account, or a change to your permissions,
+call `clear_cache()`. `exec_batch_query` caches each window separately, so a re-run reuses the
 windows that already succeeded: all of them for the same absolute `start` and `end`, and for a
 range relative to now (`start` a `timedelta`, no `end`) every window but the first and last,
 because those windows are cut on a fixed `interval` grid (midnight UTC for the default 1 day).
@@ -279,6 +287,9 @@ format_dataframe(df)  # last expression in the cell renders the table
 format_dataframe(df, max_rows=None)  # every row
 ```
 
+Column headers, index labels and index names are HTML-escaped like cell values, so a value
+that became a header through `pivot_dataframe` cannot run script in the notebook output.
+
 The full rules are in [docs/api.md](docs/api.md).
 
 ### Pivot
@@ -324,12 +335,16 @@ The full rules are in [docs/api.md](docs/api.md).
 
 ## Logging
 
+The `security_notebook_tools` logger does not propagate to the root logger, so a
+`logging.basicConfig` call or a root handler does not receive the package's records (see below).
+
 Every log record at INFO and above from the `security_notebook_tools` logger and its children
 (`auth`, `config`, `sentinel`, `adx`, `timerange`, `tablepolicy`, `query`, `batch`, `format`,
 `pivot`, `merge`, `magic`) is appended to `notebooks.log` in your project root (the nearest
 directory above the working directory with `.git` or `pyproject.toml`, never looking above your
 home directory, else the working directory). The file is created with permissions 0600 and is not written if it
-is a symbolic link, a hard link or owned by someone else. WARNING and above from the `azure` SDK
+is a symbolic link, a hard link or owned by someone else; an existing file with group or other
+permission bits is set to 0600 when opened. WARNING and above from the `azure` SDK
 loggers go there too, so Azure SDK warnings now appear only in `notebooks.log`, not in the cell's
 stderr. Nothing is printed to the notebook cell unless you pass `debug=True` (see
 [Debug output](#debug-output-in-the-cell)). Add `notebooks.log` to your `.gitignore`.
@@ -359,7 +374,18 @@ error messages are best effort: shortened, with quoted text, known secret shapes
 identifiers removed. Whatever is logged is also redacted by
 the file formatter: tokens, `Authorization` values, URL query strings, `sig=`/`code=`/`token=`/
 `key=`/`password=` style parameters, email addresses, IP addresses, GUIDs (first four digits
-kept) and user names in home directories. Tracebacks list files and lines but no source text.
+kept) and user names in home directories. Control characters (ESC and other C0/C1 controls, DEL)
+and bidirectional override characters are written as visible escapes such as `\x1b` and
+`\u202e` (tab is kept), so telemetry cannot hide text in the file or drive a terminal that
+displays it. Tracebacks list files and lines but no source text.
+
+DEBUG records carry raw KQL, identifiers and tracebacks, which is why the logger does not
+propagate to the root logger: a `logging.basicConfig` handler or a log shipper on the root would
+otherwise receive them unredacted even without `debug=True`. To capture the package's records,
+attach a handler to the `security_notebook_tools` logger. It sees every record, DEBUG included,
+unredacted, and where it sends them is your responsibility. Setting
+`logging.getLogger("security_notebook_tools").propagate = True` restores the old routing, with the
+same caveat. `notebooks.log` is unchanged.
 
 ### Debug output in the cell
 
@@ -415,8 +441,29 @@ notebook saved with debug output, because notebooks are saved with their outputs
   path, query or fragment), and the database name non-blank without control characters.
 - **Logs are off by default.** When enabled, INFO logs include the first 200 characters of each
   KQL query, which may contain sensitive indicators. Treat log output accordingly.
-- **Supply chain.** In sensitive environments install pinned to a full commit SHA rather than a
-  tag (tags can be moved), and install with `uv sync --locked`; `uv.lock` records hashes.
+- **Output is escaped.** `format_dataframe` HTML-escapes cell values, column headers (all
+  `MultiIndex` levels), index labels and index and column names, because telemetry can control
+  them (for example a value that becomes a header through `pivot_dataframe`). `notebooks.log`
+  shows control and bidirectional override characters as escapes, and is set to 0600.
+- **Partial results are marked.** Every frame has `df.attrs["partial"]`, and batch frames have
+  `attrs["partial_windows"]`; `merge_dataframe` and `pivot_dataframe` carry them on. Check them
+  before relying on counts, or use `raise_on_partial=True`.
+- **`.env` is trusted input.** VS Code loads it into the kernel (`python.envFile`). It sets
+  `ADX_CLUSTER_URI`, and can also set `HTTPS_PROXY`, `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` and
+  `PATH` (which `az` runs from). The cluster check only requires a Microsoft Kusto domain (such as
+  `*.kusto.windows.net`), so any cluster on those domains, including one in another tenant, is
+  accepted and would receive the query and a Kusto access token. Review `.env`, check the cluster
+  host, and never use a `.env` from an untrusted source.
+- **Notebook outputs are data.** An `.ipynb` stores query results, rendered tables, `debug=True`
+  output and error tracebacks, and errors can include raw service messages (UPNs, resource IDs,
+  query fragments). Strip outputs (for example with `nbstripout` or "Clear All Outputs") before
+  committing or sharing a notebook, and avoid `%xmode Verbose` with these calls.
+- **The result cache ignores who is signed in.** It is keyed on tenant, workspace and query, not
+  on the `az` account. After `az login` as a different account or a permission change, call
+  `clear_cache()`.
+- **Supply chain.** Install pinned to a full commit SHA rather than a tag (tags can be moved,
+  and an unpinned install takes whatever `main` is), and install with `uv sync --locked`;
+  `uv.lock` records hashes.
 
 ### Cost guard
 
@@ -471,8 +518,14 @@ Rejected:
   start of each statement, the value of `let`, `union`/`join`/`lookup` operands, subqueries,
   `materialize()`/`toscalar()`/`view()` arguments, the sub-queries of `partition`, `fork`,
   `facet` and `mv-apply`, the `with` tables of `make-graph`, and a lone name at the start of an
-  argument to a `let` function (`f(t=Name)`). A `let`, parameter or `as` name is visible only
-  where KQL allows it.
+  argument to a `let` function (`f(t=Name)`), and every element that starts with a name in an
+  `in`, `!in`, `in~`, `!in~`, `has_any` or `has_all` list (so `x in (colA, "b")` needs `colA`
+  to be `let`-bound). A `let` name is visible only inside the brackets it was defined in, and
+  only the `| as name` operator binds a name.
+- `let` functions (a lambda, a `view`, or an alias of one) named like a KQL keyword or operator,
+  or any part of a hyphenated operator (`take`, `project`, `keep`, `kv` ...), and calls to a
+  name bound by `let`, a parameter or `as` that is not a `let` function, even a built-in name.
+  A spaced `project - keep(...)` is `project` followed by a call, not `project-keep`.
 - **Case.** Keywords and function names are case-sensitive, like the service (`Print` and
   `Union` are plain names). Table names must match the case of the workspace's table exactly:
   `signinlogs` is rejected with a hint to use `SigninLogs`, because a different spelling might
@@ -568,7 +621,11 @@ The exception classes are not part of the public API; read the message. Messages
 - `Unexpected X during ...`: an error the package does not handle yet. It is logged at ERROR
   with its traceback to `notebooks.log` in the project root, and the original exception is
   chained. Please report it.
-- `Sentinel query returned partial results: ...`: a warning, not an error.
+- `Sentinel query returned partial results: ...`: a warning, not an error, unless you pass
+  `raise_on_partial=True`, which raises `PartialResultError` (`partial_error` is the service
+  error, `partial_data` the DataFrames received). `exec_batch_query` instead warns once,
+  `Batch query returned partial results for N of M windows ...`, and raises (naming the window)
+  with `raise_on_partial=True`.
 - `<Table> keeps N days in Analytics ...`: a warning, not an error. The time range reaches back
   past the table's Analytics retention, so the older part returns no rows.
 
