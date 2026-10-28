@@ -403,3 +403,74 @@ def test_df_must_be_dataframe(bad):
 def test_debug_must_be_bool(bad):
     with pytest.raises(ValueError, match="debug must be a bool"):
         format_dataframe(pd.DataFrame({"a": [1]}), debug=bad)
+
+
+_PAYLOADS = [
+    "<script>alert(1)</script>",
+    "<img src=x onerror=alert(1)>",
+    "\"><b onmouseover='x'>",
+]
+
+
+@pytest.mark.parametrize("payload", _PAYLOADS)
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda p: pd.DataFrame({p: [1]}), id="column"),
+        pytest.param(
+            lambda p: pd.DataFrame([[1]], columns=pd.MultiIndex.from_tuples([("top", p)])),
+            id="multiindex-column",
+        ),
+        pytest.param(lambda p: pd.DataFrame({"c": [1]}, index=pd.Index([p], name="i")), id="index"),
+        pytest.param(
+            lambda p: pd.DataFrame(
+                {"c": [1]}, index=pd.MultiIndex.from_tuples([("a", p)], names=["x", "y"])
+            ),
+            id="multiindex-index",
+        ),
+        pytest.param(
+            lambda p: pd.DataFrame({"c": [1]}, index=pd.Index([0], name=p)), id="index-name"
+        ),
+        pytest.param(
+            lambda p: pd.DataFrame({"c": [1]}).rename_axis(index="i", columns=p), id="columns-name"
+        ),
+        pytest.param(
+            lambda p: pd.DataFrame(
+                {"c": [1]}, index=pd.MultiIndex.from_tuples([(1, 2)], names=[p, "z"])
+            ),
+            id="multiindex-index-name",
+        ),
+        pytest.param(
+            lambda p: pivot_dataframe(
+                pd.DataFrame({"User": ["u"], "CommandLine": [p], "n": [1]}), "User", "CommandLine"
+            ),
+            id="pivot",
+        ),
+    ],
+)
+def test_headers_and_index_names_are_escaped(build, payload):
+    out = format_dataframe(build(payload)).to_html()
+    assert payload not in out
+    # pandas writes quotes as numeric references, so compare the tag characters only.
+    assert (
+        re.sub(
+            r"[^<>]",
+            "",
+            re.sub(
+                r"<(?:/?(?:t[rdh]|table|thead|tbody|style|caption)\b)[^>]*>",
+                "",
+                out.split("</style>")[1],
+            ),
+        )
+        == ""
+    )
+    assert "&lt;" in out
+
+
+def test_plain_ampersand_header_not_double_escaped():
+    df = pd.DataFrame({"a&b": [1]}, index=pd.Index(["x&y"], name="n&m"))
+    out = format_dataframe(df).to_html()
+    assert "a&amp;b" in out
+    assert "x&amp;y" in out
+    assert "n&amp;m" in out
+    assert "&amp;amp;" not in out

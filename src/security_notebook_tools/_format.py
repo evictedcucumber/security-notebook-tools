@@ -326,6 +326,15 @@ def format_dataframe(
                 if kql_type in _NUMERIC_TYPES:
                     numeric.append(name)
 
+            # Headers and index names come from untrusted data (pivoted cell values, dynamic
+            # keys); Styler renders them raw unless told to escape.
+            styler = (
+                styler.format_index(escape="html", axis=0)
+                .format_index(escape="html", axis=1)
+                .format_index_names(escape="html", axis=0)
+                .format_index_names(escape="html", axis=1)
+            )
+
             styler = styler.set_table_styles(_TABLE_STYLES).set_table_styles(
                 {
                     name: [{"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")]
