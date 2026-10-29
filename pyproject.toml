@@ -21,9 +21,19 @@ Changelog = "https://github.com/evictedcucumber/security-notebook-tools/blob/mai
 
 [project.optional-dependencies]
 notebook = ["ipykernel"]
+charts = [
+    "nbformat>=4.2.0",
+    "plotly>=7.1.0",
+]
 
 [dependency-groups]
-dev = ["ipython", "pytest", "ruff"]
+dev = [
+    "ipython",
+    "nbformat>=4.2.0",
+    "plotly>=7.1.0",
+    "pytest",
+    "ruff",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14"]
