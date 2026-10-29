@@ -43,6 +43,10 @@ To register a Jupyter kernel from the project's environment, add the `notebook` 
 (it installs `ipykernel`): `uv add "security-notebook-tools[notebook] @ git+https://github.com/evictedcucumber/security-notebook-tools"`.
 See [docs/notebook-setup.md](docs/notebook-setup.md) for kernel and VS Code setup.
 
+Charts (`render_dataframe` and the chart output of `%%kql`) need Plotly, an optional extra:
+`uv add "security-notebook-tools[charts] @ git+https://github.com/evictedcucumber/security-notebook-tools"`
+or `pip install "security-notebook-tools[charts] @ git+https://github.com/evictedcucumber/security-notebook-tools"`.
+
 ## Import and quick start
 
 The public API is these names, all importable from the top-level package:
@@ -257,7 +261,7 @@ the extension once per kernel:
 ```
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--debug]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--table] [--debug]
 SigninLogs
 | summarize count() by UserPrincipalName
 ```
@@ -269,6 +273,11 @@ The cell body is passed to `exec_query` unchanged (no `{}` or `$` expansion), an
 `1d12h`) or a Python expression evaluated in the notebook, such as `ts`, `"(start, end)"` or
 `"timedelta(hours=3)"`. `--target` defaults to `sentinel`, `--timeout` to 300. `%%kql?` shows the
 usage. IPython comes with the `notebook` extra.
+
+If the query ends in `| render <charttype>`, the cell shows the chart instead of the table (see
+[Charts](#charts)); `--table` shows the table anyway. Without Plotly, or for a chart type that
+cannot be drawn (or drawing fails for any reason), the table is shown with one warning saying why;
+the cell never loses the result.
 
 ```text
 %%kql --timespan 1d --timeout 600
@@ -291,6 +300,38 @@ Column headers, index labels and index names are HTML-escaped like cell values, 
 that became a header through `pivot_dataframe` cannot run script in the notebook output.
 
 The full rules are in [docs/api.md](docs/api.md).
+
+### Charts
+
+A query that ends in `| render <charttype> [with (...)]` keeps its chart spec in
+`df.attrs["visualization"]` (a dict; absent when there is no `render`), and `render_dataframe(df)`
+draws it with [Plotly](https://plotly.com/python/). Install the optional extra first:
+`pip install "security-notebook-tools[charts]"` (plus the `git+` source from [Install](#install)).
+
+```python
+from security_notebook_tools import exec_query, render_dataframe
+
+df = exec_query("""
+SigninLogs
+| summarize Signins = count() by bin(TimeGenerated, 1h), ResultType
+| render timechart with (title="Sign-ins per hour")
+""")
+df.attrs["visualization"]  # {"visualization": "timechart", "title": "Sign-ins per hour"}
+render_dataframe(df)  # a plotly Figure; last expression in the cell renders it
+```
+
+In a `%%kql` cell the chart is shown automatically; `%%kql --table` shows the table instead.
+
+Supported: `timechart`, `linechart`, `areachart`, `stackedareachart`, `columnchart`, `barchart`
+(`kind` default, unstacked, stacked or stacked100), `piechart`, `scatterchart`, `anomalychart`,
+`card` and `table`, with the properties `title`, `xtitle`, `ytitle`, `xcolumn`, `ycolumns`,
+`series`, `anomalycolumns`, `kind`, `legend=hidden`, `ymin`/`ymax`, `xaxis`/`yaxis` (`log`) and
+`accumulate`. Other types (`pivotchart`, `ladderchart`, `timepivot`, `3Dchart`, `treemap`,
+`sankey`, `plotly` ...) raise `ConfigurationError`, as does a chart with more than 100 traces
+(reduce the series with `top` or `where`). A `make-series` result is expanded from its arrays; figure JSON in the data is never interpreted.
+Text from the data (category values, column names, titles) is HTML-escaped before Plotly sees it,
+so markup in telemetry is shown as text. A batch result (`exec_batch_query`) keeps the spec when
+every window agrees on it.
 
 ### Pivot
 
@@ -623,7 +664,7 @@ The exception classes are not part of the public API; read the message. Messages
   chained. Please report it.
 - `Sentinel query returned partial results: ...`: a warning, not an error, unless you pass
   `raise_on_partial=True`, which raises `PartialResultError` (`partial_error` is the service
-  error, `partial_data` the DataFrames received). `exec_batch_query` instead warns once,
+  error, `partial_data` the DataFrames received, `visualization` the raw render spec). `exec_batch_query` instead warns once,
   `Batch query returned partial results for N of M windows ...`, and raises (naming the window)
   with `raise_on_partial=True`.
 - `<Table> keeps N days in Analytics ...`: a warning, not an error. The time range reaches back

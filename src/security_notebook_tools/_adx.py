@@ -49,6 +49,7 @@ from ._exceptions import (
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import dependency_call, fingerprint, mask_name
+from ._render import set_visualization
 
 logger = logging.getLogger("security_notebook_tools.adx")
 
@@ -58,6 +59,39 @@ def _table_to_df(table: Any) -> pd.DataFrame:
     df = dataframe_from_result_table(table)
     df.attrs[KQL_TYPES_ATTR] = {c.column_name: str(c.column_type).lower() for c in table.columns}
     return df
+
+
+def _visualizations(response: Any) -> dict[Any, Any]:
+    """Map ``TableId`` to the raw render spec of every ``Visualization`` row of the response.
+
+    The ``QueryProperties`` table holds ``(TableId, Key, Value)`` rows; ``Value`` is JSON text (or
+    already a dict) with PascalCase keys. Anything unexpected is skipped.
+    """
+    found: dict[Any, Any] = {}
+    tables = getattr(response, "tables", None)
+    if not isinstance(tables, list | tuple):
+        return found
+    for table in tables:
+        kind = getattr(table, "table_kind", None)
+        if getattr(kind, "value", kind) != "QueryProperties":
+            continue
+        for row in table.rows:
+            try:
+                if row["Key"] == "Visualization":
+                    found.setdefault(row["TableId"], row["Value"])
+            except KeyError, IndexError, TypeError:
+                logger.debug("Skipping a malformed QueryProperties row", exc_info=True)
+    return found
+
+
+def _attach_visualizations(response: Any, dfs: list[pd.DataFrame]) -> None:
+    """Store each render spec in ``attrs`` of the primary table it belongs to (else the first)."""
+    specs = _visualizations(response)
+    if not specs or not dfs:
+        return
+    ids = [getattr(t, "table_id", None) for t in response.primary_results]
+    for table_id, raw in specs.items():
+        set_visualization(dfs, raw, ids.index(table_id) if table_id in ids else 0)
 
 
 Properties = dict[str, Any] | ClientRequestProperties | None
@@ -204,6 +238,7 @@ class ADXClient:
             response = self._call(kind, execute, db, text, props)
             with dependency_call(logger, "pandas DataFrame conversion", target="adx") as call:
                 dfs = [_table_to_df(t) for t in response.primary_results]
+                _attach_visualizations(response, dfs)
                 call["rows"] = [len(df) for df in dfs]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",

@@ -6,7 +6,6 @@ from unittest import mock
 
 import pandas as pd
 import pytest
-from azure.core.exceptions import AzureError  # noqa: F401
 from azure.kusto.data.response import KustoResponseDataSetV2
 from azure.monitor.query import LogsQueryPartialResult, LogsQueryResult, LogsTable
 
@@ -164,9 +163,11 @@ def test_exec_query_partial_result_keeps_visualization(monkeypatch, sentinel_sdk
     sentinel_sdk.query_workspace.return_value = LogsQueryPartialResult(
         partial_data=[_logs_table()], partial_error="boom", visualization=RENDER
     )
-    with mock.patch("security_notebook_tools._query.get_credential"):
-        with pytest.warns(UserWarning, match="partial"):
-            df = snt.exec_query("T | render piechart")
+    with (
+        mock.patch("security_notebook_tools._query.get_credential"),
+        pytest.warns(UserWarning, match="partial"),
+    ):
+        df = snt.exec_query("T | render piechart")
     assert df.attrs["partial"] is True
     assert df.attrs["visualization"]["visualization"] == "piechart"
 
@@ -244,7 +245,6 @@ def test_adx_without_render_has_no_key(adx_sdk):
 
 
 def test_adx_malformed_value_is_ignored(adx_sdk):
-    adx_sdk.execute_query.return_value = _adx_response("not json")
     adx_sdk.execute_query.return_value = _adx_response("{broken")
     assert "visualization" not in _adx().query("T").attrs
 
@@ -331,7 +331,7 @@ def test_cost_guard_accepts_render_with_properties():
     from security_notebook_tools._tablepolicy import check_sentinel_query
 
     check_sentinel_query(
-        'T | summarize c = count() by bin(TimeGenerated, 1h), Result | render timechart with '
+        "T | summarize c = count() by bin(TimeGenerated, 1h), Result | render timechart with "
         '(title="x y", xcolumn=TimeGenerated, ycolumns=c, kind=stacked, legend=hidden, '
         "ymin=0, xtitle='t', series=Result)",
         POLICY,
@@ -354,12 +354,12 @@ def test_validation():
 
 
 def test_timechart_defaults():
-    fig = render_dataframe(_frame(_spec("timechart")))
+    fig = render_dataframe(_frame(_spec("timechart", ycolumns=["Count"])))
     assert [t.type for t in fig.data] == ["scatter", "scatter"]
     assert {t.name for t in fig.data} == {"ok", "fail"}  # series: the string column
     assert all(t.mode == "lines" for t in fig.data)
     ok = next(t for t in fig.data if t.name == "ok")
-    assert list(ok.y) == [1.0, 2.0]  # first numeric column only? no, see ycolumns test below
+    assert list(ok.y) == [1.0, 2.0]
     assert fig.layout.xaxis.title.text == "TimeGenerated"
 
 
@@ -370,8 +370,8 @@ def test_defaults_use_all_numeric_columns_as_y():
 
 
 def test_timechart_x_is_the_first_datetime_column():
-    df = pd.DataFrame({"Name": ["a", "b"], "T": [T0, T0 + timedelta(1)], "n": [1, 2]})
-    fig = render_dataframe(_frame(_spec("timechart"), df.to_dict("list")))
+    data = {"Name": ["a", "a"], "T": [T0, T0 + timedelta(1)], "n": [1, 2]}
+    fig = render_dataframe(_frame(_spec("timechart"), data))
     assert list(fig.data[0].x) == [T0.isoformat(), (T0 + timedelta(1)).isoformat()]
 
 
@@ -512,7 +512,6 @@ def test_properties_are_honoured():
     assert layout.yaxis.title.text == "how many"
     assert layout.showlegend is False
     assert layout.yaxis.type == "log"
-    assert layout.yaxis.range == (pytest.approx(0) if False else layout.yaxis.range)
 
 
 def test_log_axis_with_zero_minimum_keeps_autorange():
@@ -588,7 +587,9 @@ def test_no_numeric_column_and_duplicate_columns():
 def test_missing_plotly(monkeypatch):
     monkeypatch.setitem(sys.modules, "plotly", None)
     monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
-    with pytest.raises(_render.PlotlyMissingError, match=r"security-notebook-tools\[charts\]") as ei:
+    with pytest.raises(
+        _render.PlotlyMissingError, match=r"security-notebook-tools\[charts\]"
+    ) as ei:
         render_dataframe(_frame(_spec("timechart")))
     assert isinstance(ei.value, ConfigurationError)
 
@@ -620,7 +621,6 @@ def _all_strings(fig):
 @pytest.mark.parametrize("chart", ["columnchart", "barchart", "linechart", "scatterchart"])
 def test_data_column_names_and_properties_are_escaped(chart):
     data = {EVIL: [EVIL, BOLD], BOLD: [1, 2], "n2": [3, 4]}
-    spec = _spec(chart, title=BOLD, xtitle=EVIL, ytitle=BOLD, series=[EVIL]) if chart != "x" else {}
     spec = _spec(chart, title=BOLD, xtitle=EVIL, ytitle=BOLD, xcolumn="n2", ycolumns=[BOLD])
     texts = _all_strings(render_dataframe(_frame(spec, data)))
     assert texts
@@ -661,7 +661,9 @@ def test_ampersand_is_escaped_too():
 
 def test_no_data_values_in_the_log(caplog):
     caplog.set_level("INFO", logger="security_notebook_tools")
-    render_dataframe(_frame(_spec("columnchart", title="secret-title"), {"k": ["secret"], "n": [1]}))
+    render_dataframe(
+        _frame(_spec("columnchart", title="secret-title"), {"k": ["secret"], "n": [1]})
+    )
     assert "render_dataframe" in caplog.text
     assert "secret" not in caplog.text
 
@@ -740,3 +742,292 @@ def test_magic_falls_back_when_a_named_column_is_missing(shell):
     shell.frame = _frame(_spec("columnchart", xcolumn="Nope"))
     with pytest.warns(UserWarning, match="Nope"):
         assert isinstance(shell.run_cell_magic("kql", "", "T"), Styler)
+
+
+# --- review round -------------------------------------------------------------------------------
+
+TEX = r"$\href{javascript:alert(1)}{x}$"
+HOSTILE = [EVIL, BOLD, TEX, "a&b"]
+
+
+@pytest.mark.parametrize(
+    "chart",
+    [
+        "timechart",
+        "linechart",
+        "areachart",
+        "stackedareachart",
+        "columnchart",
+        "barchart",
+        "piechart",
+        "scatterchart",
+        "anomalychart",
+    ],
+)
+def test_no_raw_markup_or_tex_in_any_string(chart):
+    data = {
+        TEX: HOSTILE,  # x: hostile category values and column name
+        EVIL: [1, 2, 3, 4],
+        "ser": [TEX, EVIL, BOLD, TEX],
+        BOLD: [0, 1, 0, 0],
+    }
+    spec = _spec(
+        chart,
+        title=TEX + EVIL,
+        xtitle=EVIL,
+        ytitle=TEX,
+        xcolumn=TEX,
+        ycolumns=[EVIL],
+        series=["ser"],
+        anomalycolumns=[BOLD],
+    )
+    texts = _all_strings(render_dataframe(_frame(spec, data)))
+    assert texts
+    assert not [t for t in texts if "<" in t or ">" in t or "$" in t]
+
+
+def test_no_raw_markup_or_tex_in_card_and_table():
+    for data in ({TEX: [EVIL]}, {TEX: [None]}):
+        texts = _all_strings(render_dataframe(_frame(_spec("card", title=TEX), data)))
+        assert texts
+        assert not [t for t in texts if "<" in t or ">" in t or "$" in t]
+    fig = render_dataframe(_frame(_spec("table", title=TEX), {TEX: [EVIL, BOLD], "n": [1, 2]}))
+    assert not [t for t in _all_strings(fig) if "<" in t or ">" in t or "$" in t]
+
+
+def test_dollar_is_escaped_to_an_entity():
+    assert _render._esc("$x$") == "&#36;x&#36;"
+
+
+def test_card_null_shows_null_marker():
+    fig = render_dataframe(_frame(_spec("card"), {"v": [None]}))
+    assert any(a.text == "(null)" for a in fig.layout.annotations)
+
+
+# robustness of the spec
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"visualization": "card", "ymax": 10**400},
+        '{"Visualization": "card", "Ymax": ' + "9" * 400 + "}",
+        "[" * 100000,
+    ],
+)
+def test_normalise_survives_hostile_specs(raw):
+    out = normalise_visualization(raw)
+    assert out is None or "ymax" not in out
+
+
+def test_set_visualization_never_raises_and_drops_the_spec():
+    frames = [pd.DataFrame({"a": [1]})]
+    with mock.patch.object(_render, "normalise_visualization", side_effect=RecursionError):
+        _render.set_visualization(frames, {"visualization": "card"})
+    assert "visualization" not in frames[0].attrs
+    _render.set_visualization(frames, {"visualization": "card"})
+    assert frames[0].attrs["visualization"] == {"visualization": "card"}
+
+
+def test_query_still_returns_data_when_the_spec_is_unreadable(sentinel_sdk):
+    sentinel_sdk.query_workspace.return_value = LogsQueryResult(
+        tables=[_logs_table()], visualization={"visualization": "card", "ymax": 10**400}
+    )
+    (df,) = _sentinel().query_tables("T | render card")
+    assert len(df) == 2
+    assert df.attrs["visualization"] == {"visualization": "card"}
+
+
+# re-aggregation drops the spec
+
+
+def test_merge_dataframe_drops_the_spec():
+    a = _viz_frame({"visualization": "columnchart"})
+    b = _viz_frame({"visualization": "columnchart"})
+    assert "visualization" not in snt.merge_dataframe([a, b], "a", "n").attrs
+    assert "visualization" not in snt.merge_dataframe(a, "a", "n").attrs
+    empty = pd.DataFrame()
+    empty.attrs["visualization"] = {"visualization": "card"}
+    assert "visualization" not in snt.merge_dataframe(empty, "a", "n").attrs
+
+
+def test_batch_with_merge_on_drops_the_spec(sentinel_env):
+    spec = {"visualization": "columnchart"}
+    frames = iter([[_viz_frame(spec)], [_viz_frame(spec)]])
+    sentinel_env.query_tables.side_effect = lambda *a, **k: next(frames)
+    df = snt.exec_batch_query(
+        BATCH_KQL, BATCH_START, BATCH_START + timedelta(days=2), merge_on="a", agg_column="n"
+    )
+    assert "visualization" not in df.attrs
+
+
+# make-series
+
+
+def _series_frame(**extra):
+    hours = [(T0 + timedelta(hours=i)).isoformat() for i in range(3)]
+    df = pd.DataFrame(
+        {
+            "Result": ["ok", "fail"],
+            "TimeGenerated": [hours, hours],
+            "c": [[1, 2, 3], [4, 5, 6]],
+            **extra,
+        }
+    )
+    df.attrs["kql_types"] = {
+        "Result": "string",
+        "TimeGenerated": "dynamic",
+        "c": "dynamic",
+        **dict.fromkeys(extra, "dynamic"),
+    }
+    df.attrs["visualization"] = _spec("timechart")
+    return df
+
+
+def test_make_series_arrays_are_expanded():
+    fig = render_dataframe(_series_frame())
+    assert {t.name for t in fig.data} == {"ok", "fail"}
+    ok = next(t for t in fig.data if t.name == "ok")
+    assert list(ok.y) == [1.0, 2.0, 3.0]
+    assert list(ok.x) == [(T0 + timedelta(hours=i)).isoformat() for i in range(3)]
+    assert fig.layout.xaxis.title.text == "TimeGenerated"
+
+
+def test_make_series_datetime_object_arrays_are_expanded():
+    df = _series_frame()
+    df["TimeGenerated"] = [[T0 + timedelta(hours=i) for i in range(3)]] * 2
+    fig = render_dataframe(df)
+    assert {t.name for t in fig.data} == {"ok", "fail"}
+    assert all(len(t.x) == 3 for t in fig.data)
+
+
+def test_make_series_json_text_cells_and_columnchart():
+    df = _series_frame()
+    df["c"] = [json.dumps(v) for v in df["c"]]
+    df.attrs["visualization"] = _spec("columnchart", ycolumns=["c"])
+    fig = render_dataframe(df)
+    assert [t.type for t in fig.data] == ["bar", "bar"]
+
+
+def test_make_series_anomaly_arrays():
+    df = _series_frame(anomalies=[[0, 0, 1], [0, 0, 0]])
+    df.attrs["visualization"] = _spec("anomalychart", anomalycolumns=["anomalies"])
+    fig = render_dataframe(df)
+    marks = [t for t in fig.data if t.mode == "markers"]
+    assert len(marks) == 2
+    assert {m.name for m in marks} == {"ok: anomalies (anomaly)", "fail: anomalies (anomaly)"}
+    ok = next(m for m in marks if m.name.startswith("ok"))
+    assert list(ok.y) == [3.0]
+
+
+def test_make_series_unequal_lengths_are_rejected():
+    df = _series_frame()
+    df["c"] = [[1, 2], [4, 5, 6]]
+    with pytest.raises(ConfigurationError, match="differ in length"):
+        render_dataframe(df)
+
+
+def test_a_lone_list_column_is_not_a_make_series():
+    df = _frame(_spec("columnchart"), {"k": ["a", "b"], "n": [1, 2], "tags": [["x"], ["y"]]})
+    fig = render_dataframe(df)  # not expanded: the list column just splits the series
+    assert len(fig.data) == 2
+    assert all(len(t.y) == 1 for t in fig.data)
+
+
+# category axes, y columns, traces
+
+
+def test_string_categories_are_a_category_axis():
+    data = {"k": ["0", "50126", "2024-05"], "n": [1, 2, 3]}
+    assert render_dataframe(_frame(_spec("columnchart"), data)).layout.xaxis.type == "category"
+    fig = render_dataframe(_frame(_spec("barchart"), data))
+    assert fig.layout.yaxis.type == "category"
+    assert fig.layout.xaxis.type is None
+
+
+def test_ycolumns_without_numeric_values_is_rejected():
+    data = {"k": ["a", "b"], "n": ["x", "y"]}
+    with pytest.raises(ConfigurationError, match="no numeric values"):
+        render_dataframe(_frame(_spec("columnchart", ycolumns=["n"]), data))
+
+
+@pytest.mark.filterwarnings("ignore:Could not infer format")
+def test_bad_datetimes_do_not_break_sorting():
+    data = {"T": [T0, T0 + timedelta(hours=1)], "n": [1, 2]}
+    df = _frame(_spec("timechart"), data)
+    df["T"] = df["T"].astype(object)
+    df.loc[0, "T"] = "garbage"
+    df.attrs["kql_types"] = {"T": "datetime", "n": "long"}
+    render_dataframe(df)
+
+
+def test_anomaly_trace_name_keeps_group_and_column():
+    data = {
+        "T": [T0, T0 + timedelta(hours=1)] * 2,
+        "s": ["a", "a", "b", "b"],
+        "n": [1, 2, 3, 4],
+        "an": [0, 1, 1, 0],
+    }
+    fig = render_dataframe(_frame(_spec("anomalychart", anomalycolumns=["an"]), data))
+    assert {"a: an (anomaly)", "b: an (anomaly)"} <= {t.name for t in fig.data}
+
+
+def test_series_cap(caplog):
+    n = _render.MAX_TRACES + 1
+    data = {"k": [str(i) for i in range(n)], "n": list(range(n))}
+    spec = _spec("linechart", xcolumn="n", series=["k"], ycolumns=["n"])
+    with pytest.raises(ConfigurationError, match=r"top.*where|where.*top"):
+        render_dataframe(_frame(spec, data))
+    assert caplog.text.count("plotly figure: failed") == 0  # validated before the dependency call
+    ok = {"k": [str(i) for i in range(_render.MAX_TRACES)], "n": list(range(_render.MAX_TRACES))}
+    assert len(render_dataframe(_frame(spec, ok)).data) == _render.MAX_TRACES
+
+
+def test_user_error_is_logged_once(caplog):
+    caplog.set_level("DEBUG", logger="security_notebook_tools")
+    with pytest.raises(ConfigurationError):
+        render_dataframe(_frame(_spec("columnchart", xcolumn="Nope")))
+    assert "plotly figure" not in caplog.text
+
+
+# partial error carries the spec
+
+
+def test_partial_error_carries_visualization(monkeypatch, sentinel_sdk):
+    from security_notebook_tools._exceptions import PartialResultError
+
+    for var, value in {
+        "SENTINEL_WORKSPACE_ID": WS,
+        "SENTINEL_SUBSCRIPTION_ID": "22222222-2222-2222-2222-222222222222",
+        "SENTINEL_RESOURCE_GROUP": "rg",
+        "SENTINEL_WORKSPACE_NAME": "sentinel-ws",
+    }.items():
+        monkeypatch.setenv(var, value)
+    sentinel_sdk.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[_logs_table()], partial_error="boom", visualization=RENDER
+    )
+    with mock.patch("security_notebook_tools._query.get_credential"):
+        with pytest.raises(PartialResultError) as ei:
+            snt.exec_query("T | render piechart", raise_on_partial=True)
+        assert ei.value.visualization["visualization"] == "piechart"
+        with pytest.raises(PartialResultError) as ei:
+            _sentinel().query_tables("T", raise_on_partial=True)
+        assert ei.value.visualization == RENDER
+
+
+# %%kql never loses the table
+
+
+def test_magic_falls_back_on_any_chart_exception(shell):
+    from pandas.io.formats.style import Styler
+
+    with (
+        mock.patch(
+            "security_notebook_tools._magic.render_dataframe", side_effect=KeyError("secret")
+        ),
+        pytest.warns(UserWarning, match="KeyError") as record,
+    ):
+        out = shell.run_cell_magic("kql", "", "T | render columnchart")
+    assert isinstance(out, Styler)
+    assert len(record) == 1
+    assert "secret" not in str(record[0].message)

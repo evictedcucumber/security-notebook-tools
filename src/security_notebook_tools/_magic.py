@@ -1,4 +1,4 @@
-"""IPython ``%%kql`` cell magic for quick queries, shown with ``format_dataframe``.
+"""IPython ``%%kql`` cell magic for quick queries, shown with ``format_dataframe`` or a chart.
 
 Logging (``security_notebook_tools.magic``): a run is logged like a public function (entry,
 result summary, one WARNING if the cell is rejected). The cell body is logged only as a
@@ -9,7 +9,9 @@ unredacted and never to the file, including the raw ``--timespan`` text and its 
 """
 
 import logging
+import os
 import re
+import warnings
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -18,17 +20,21 @@ from IPython.core.magic import Magics, cell_magic, magics_class
 from IPython.core.magic_arguments import argument, magic_arguments, parse_argstring
 
 from ._errors import public_call
+from ._exceptions import ConfigurationError
 from ._format import format_dataframe
 from ._log import dependency_call, fingerprint
 from ._query import DEFAULT_TIMEOUT, exec_query
+from ._render import VISUALIZATION_ATTR, check_spec, render_dataframe
 
 if TYPE_CHECKING:
     from pandas.io.formats.style import Styler
+    from plotly.graph_objects import Figure
 
 logger = logging.getLogger("security_notebook_tools.magic")
 
 _SHORTHAND = re.compile(r"(?:\d+[dhms])+", re.IGNORECASE)
 _PART = re.compile(r"(\d+)([dhms])", re.IGNORECASE)
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 _UNITS = {"d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
 
 
@@ -75,6 +81,31 @@ def _parse_timespan(text: str, user_ns: dict[str, Any]) -> Any:
         raise UsageError(f"Could not evaluate --timespan {text!r}: {exc!r}") from exc
 
 
+def _chart(df: Any, debug: bool) -> Figure | None:
+    """The chart for a result with a render spec, or ``None`` to show the table.
+
+    Warns once, naming the reason, if the chart cannot be drawn; never raises for that.
+    """
+    if not isinstance(df.attrs.get(VISUALIZATION_ATTR), dict):
+        return None
+    try:
+        spec = check_spec(df)
+        if spec[VISUALIZATION_ATTR].lower() == "table":
+            return None  # `render table` asks for the table itself
+        return render_dataframe(df, debug=debug)
+    except ConfigurationError as exc:
+        warnings.warn(f"{exc} Showing the table instead.", skip_file_prefixes=(_PACKAGE_DIR,))
+        return None
+    except Exception as exc:
+        # A query you paid for must never lose its result to a chart bug (no values in the text).
+        logger.debug("Chart drawing failed", exc_info=True)
+        warnings.warn(
+            f"Could not draw the chart: {type(exc).__name__}. Showing the table instead.",
+            skip_file_prefixes=(_PACKAGE_DIR,),
+        )
+        return None
+
+
 @magics_class
 class KqlMagics(Magics):
     """Magics provided by security_notebook_tools."""
@@ -108,16 +139,24 @@ class KqlMagics(Magics):
         help="Run the query even if an identical result is cached.",
     )
     @argument(
+        "--table",
+        action="store_true",
+        help="Show the table even if the query ends in `| render <charttype>`.",
+    )
+    @argument(
         "--debug",
         action="store_true",
         help="Also print this run's log records, at DEBUG and above, below the cell.",
     )
     @cell_magic
-    def kql(self, line: str, cell: str) -> Styler:
+    def kql(self, line: str, cell: str) -> Styler | Figure:
         """Run the cell body as KQL with exec_query and display the result.
 
         The body is passed verbatim (no ``{}`` or ``$`` expansion). The result is shown with
         format_dataframe and not kept; call exec_query directly to work with the DataFrame.
+        If the query ends in ``| render <charttype>`` the chart is shown instead (render_dataframe,
+        needs Plotly); ``--table`` shows the table. If the chart cannot be drawn (Plotly missing,
+        unsupported chart type) one warning says why and the table is shown.
         With ``--debug`` the run's log records, at DEBUG and above, are also printed below the
         cell.
         """
@@ -148,4 +187,9 @@ class KqlMagics(Magics):
                 cache=not args.no_cache,
                 debug=args.debug,
             )
+            if not args.table:
+                figure = _chart(df, args.debug)
+                if figure is not None:
+                    call.update(chart=True)
+                    return figure
             return format_dataframe(df, debug=args.debug)

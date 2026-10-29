@@ -9,6 +9,7 @@ from security_notebook_tools import (
     format_dataframe,
     pivot_dataframe,
     merge_dataframe,
+    render_dataframe,
     clear_cache,
 )
 import security_notebook_tools
@@ -220,6 +221,15 @@ is issued and the data received is returned, so the frame may be incomplete), Fa
 including on ADX. A partial result is never cached. Nested `dynamic` values (dicts and lists) are
 copies: changing them does not alter the cached result.
 
+If the query ends in `| render <charttype> [with (...)]`, `df.attrs["visualization"]` is a dict
+with the render spec for `render_dataframe`; with no `render` the key is absent. Both services are
+normalised to the same shape: `"visualization"` is the lower-case chart type, and these keys are
+present only when the render sets them: `"title"`, `"xtitle"`, `"ytitle"`, `"xcolumn"`, `"kind"`,
+`"legend"`, `"xaxis"`, `"yaxis"`, `"ysplit"` (strings), `"ycolumns"`, `"series"`,
+`"anomalycolumns"` (lists of column names), `"ymin"`, `"ymax"`, `"xmin"`, `"xmax"` (numbers) and
+`"accumulate"` (`True`, only when set). It is set on the table it applies to (the first table on
+Sentinel), also on a partial result, and is a copy: changing it does not alter the cached result.
+
 On Sentinel, a `UserWarning` (and a WARNING log line) is also issued when the time range starts
 more than a day before the Analytics retention (`retentionInDays`) of a table the query reads, for example a
 120-day range on a table that keeps 90 days. Older rows are in long-term retention / the Sentinel
@@ -274,7 +284,8 @@ and `SystemExit` are never wrapped.
   within `timeout` plus 30 seconds) is a `QueryError` that is not transient.
 - `PartialResultError` (a `QueryError`): only with `raise_on_partial=True`, on Sentinel, when the
   result was partial. `partial_error` holds the service error and `partial_data` the list of
-  DataFrames received so far, each with `attrs["partial"]` True.
+  DataFrames received so far, each with `attrs["partial"]` True, and `visualization` the raw
+  `| render` spec the service sent with them (or `None`).
 
 None of these classes is exported; catch `ValueError` for configuration problems, or `Exception`.
 
@@ -405,7 +416,10 @@ type for `sum`, `min`, `max`, `first` and `last`, becomes `long` for `count`, `n
 
 Otherwise, the non-empty window results concatenated in window order with a fresh index; if every
 window is empty, the first window's empty result. `df.attrs["kql_types"]` comes from the windows'
-results, adding columns that only later windows have.
+results, adding columns that only later windows have. `df.attrs["visualization"]` (the `| render`
+spec, see `exec_query`) is kept when every window that returned a table has the same one; it is
+absent when there is no `render` or the windows disagree, and it is dropped by `merge_on` /
+`agg_column`, which change the columns.
 
 `df.attrs["partial"]` is always a bool: True if any Sentinel window returned only a partial
 result, so the rows (and any totals from `merge_on`/`agg_column`) may be incomplete; False
@@ -436,8 +450,8 @@ of one warning per window.
   subclass `QueryTimeoutError`, without retries (unless `min_interval` splits it; the final error
   then names the smallest window tried).
 * `PartialResultError` (a `QueryError`): only with `raise_on_partial=True`, on Sentinel, when a
-  window's result was partial. The message names the window; `partial_error` and `partial_data`
-  are those of the window's error. The window is not retried.
+  window's result was partial. The message names the window; `partial_error`, `partial_data` and
+  `visualization` are those of the window's error. The window is not retried.
 
 ### Examples
 
@@ -516,6 +530,75 @@ from security_notebook_tools import exec_query, format_dataframe
 df = exec_query("SigninLogs | take 100")
 format_dataframe(df)  # at most 1000 rows, with a caption
 format_dataframe(df, max_rows=None)  # every row
+```
+
+## render_dataframe
+
+```python
+render_dataframe(
+    df: pandas.DataFrame,
+    *,
+    debug: bool = False,
+) -> plotly.graph_objects.Figure
+```
+
+Draw the chart a query asked for with `| render <charttype>`, from `df.attrs["visualization"]`
+(see `exec_query`'s Returns). Needs the optional extra: `pip install "security-notebook-tools[charts]"`
+(Plotly is imported only when this is called). Jupyter renders the returned figure when it is the
+last expression in a cell. The DataFrame is not modified.
+
+Defaults follow the KQL `render` operator: x is `xcolumn` or the first column (for `timechart`
+the first datetime column); y is `ycolumns` or every numeric column other than x; `series`, or the
+remaining non-numeric columns, split the data into one trace per value.
+
+| Chart type | Drawn as |
+| --- | --- |
+| `timechart`, `linechart` | Lines, sorted by x. |
+| `areachart` | Filled lines; `kind=stacked` or `stacked100` stacks them. |
+| `stackedareachart` | Stacked areas (`kind=stacked100` for percentages). |
+| `columnchart` | Vertical bars; `kind` default or unstacked groups, `stacked` stacks, `stacked100` stacks to 100%. |
+| `barchart` | Horizontal bars, same `kind`s. The x column runs along the vertical axis. |
+| `piechart` | The x column labels the slices, the first y column sizes them. |
+| `scatterchart` | Markers. |
+| `anomalychart` | Lines, plus a marker on the first y column wherever an `anomalycolumns` column of the same row (or array element, for `make-series`) is not zero. |
+| `card` | The first cell of the first row, as a number indicator or text. |
+| `table` | A Plotly table of the whole frame (`%%kql` shows the normal table for it). |
+
+A `make-series` result (one row per series, with the x axis and every aggregate as an array) is
+expanded first: the x, y and anomaly arrays of each row are exploded together, so a row of `n`
+points becomes `n` rows, and scalar columns such as the `by` key become the series. Arrays in a
+row must have equal lengths. A chart may have at most 100 traces (series values times y columns);
+more raises `ConfigurationError` suggesting `top` or `where` in the query to reduce the series.
+String categories are always drawn on a category axis, so `"0"` or `"2024-05"` are not read as
+numbers or dates. A named `ycolumns` column with no numeric values raises `ConfigurationError`.
+
+Honoured properties: `title`, `xtitle`, `ytitle`, `legend=hidden`, `ymin` and `ymax` (both
+needed; `log` axes need positive limits), `xmin` and `xmax` (numeric x, both needed), `xaxis` and
+`yaxis` (`log` or `linear`; in a `barchart`, `xaxis` is the category axis) and `accumulate`.
+`ysplit` is ignored. Any other chart type (`pivotchart`, `ladderchart`, `timepivot`, `3Dchart`,
+`treemap`, `sankey`, `plotly` ...) raises `ConfigurationError`; figure JSON found in the data is
+never interpreted.
+
+Every string from the data, the column names or the render properties is HTML-escaped (`&`, `<`,
+`>`) before Plotly sees it. Plotly would otherwise interpret `<a href>`, `<b>`, `<br>` and
+`<span style>` in titles, tick labels, legend entries and hover text.
+
+| Name | Description |
+| --- | --- |
+| `df` | A result with `attrs["visualization"]`, usually from `exec_query`. |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted. See [Debug output](#debug-output-in-the-cell). |
+
+`debug` is keyword-only. `ValueError` is raised if `df` is not a DataFrame or `debug` is not a
+bool. `ConfigurationError` is raised if `df` has no `attrs["visualization"]`, its chart type is
+not supported, a column named by the render is not in `df`, no numeric column can be plotted, or
+Plotly is not installed (the message gives the install command), or the chart would have more than
+100 traces.
+
+```python
+from security_notebook_tools import exec_query, render_dataframe
+
+df = exec_query("SigninLogs | summarize n = count() by bin(TimeGenerated, 1h) | render timechart")
+render_dataframe(df)
 ```
 
 ## pivot_dataframe
@@ -648,12 +731,13 @@ apps = merge_dataframe(raw, "UserPrincipalName", "AppDisplayName", "nunique")  #
 ## %%kql
 
 ```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--debug]
+%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--table] [--debug]
 <KQL>
 ```
 
 IPython cell magic for quick queries: runs the cell body with `exec_query` and displays the
-result with `format_dataframe` (default `max_rows`). The DataFrame is not assigned anywhere; call
+result with `format_dataframe` (default `max_rows`), or, if the query ends in
+`| render <charttype>`, as a chart with `render_dataframe`. The DataFrame is not assigned anywhere; call
 `exec_query` directly when you need it. Enable it with
 `%load_ext security_notebook_tools` (`load_ipython_extension`, not part of `__all__`). Importing
 the package does not import IPython; it is only needed when the extension is loaded.
@@ -664,6 +748,8 @@ the package does not import IPython; it is only needed when the extension is loa
 | `--target` | `sentinel` (default) or `adx`. |
 | `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
 | `--no-cache` | Same as `cache=False`: skip the [result cache](#caching) for this cell. |
+| `--table` | Show the table even when the query ends in `| render <charttype>`. Without this flag, a chart that cannot be drawn (Plotly not installed, an unsupported chart type, a column the render names is missing) falls back to the table with one `UserWarning` saying why; the cell does not fail. Any other
+error while drawing (a bug) also falls back to the table with a warning naming only the error type. `render table` always shows the table. |
 | `--debug` | Same as `debug=True` for the whole run (`exec_query` and `format_dataframe`): print the run's log records, at DEBUG and above, below the cell. See [Debug output](#debug-output-in-the-cell). |
 
 The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, a positional

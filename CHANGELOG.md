@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A query that ends in `| render <charttype> [with (...)]` keeps its chart spec in
+  `df.attrs["visualization"]`, a dict with lower-case keys (`visualization`, `title`, `xcolumn`,
+  `ycolumns`, `series`, `kind` ...) that is the same for Sentinel and ADX. Absent when there is no
+  `render`; kept through the result cache (as a copy), on partial results, and by
+  `exec_batch_query` when every window agrees on it. `merge_dataframe` and
+  `exec_batch_query(merge_on=...)` drop it, since re-aggregating changes the columns.
+- `render_dataframe(df, *, debug=False)` draws it with Plotly (`timechart`, `linechart`,
+  `areachart`, `stackedareachart`, `columnchart`, `barchart`, `piechart`, `scatterchart`,
+  `anomalychart`, `card`, `table`). Other chart types raise `ConfigurationError`.
+- The `charts` extra (`security-notebook-tools[charts]`) installs Plotly (and `nbformat`, which
+  Plotly's notebook renderer needs). Plotly is only imported
+  when a chart is drawn; without it `render_dataframe` raises `ConfigurationError` with the
+  install command.
+- `render_dataframe` expands `make-series` results (array cells) into points, including
+  `anomalychart` arrays, refuses charts with more than 100 traces (`ConfigurationError`
+  suggesting `top`/`where`), and draws string categories on a category axis.
+- `PartialResultError.visualization` holds the raw render spec of the partial result.
+- `%%kql` shows the chart for a query that ends in `render`, and takes `--table` to show the table
+  instead. Without Plotly, for an unsupported chart type, or on any other error while drawing, it
+  shows the table with one warning.
+
+### Security
+
+- Text from the data (category and series values, column names) and the render title and axis
+  titles is HTML-escaped before Plotly sees it, so markup in telemetry such as `<a href>` is shown
+  as text in titles, tick labels, legends and hover text. `$` is escaped too, so plotly.js cannot
+  hand `$...$` text from the data to MathJax (TeX injection).
+- An oversized or deeply nested render spec (`ymax=10**400`, `'['*100000`) is dropped instead of
+  raising, and any failure reading a spec never loses the query's data.
+
+### Docs
+
+- README and `docs/api.md` document charts, `render_dataframe` and `%%kql --table`.
+
 ## 7.0.0 - 2026-10-28
 
 ### Breaking

@@ -17,6 +17,7 @@ PUBLIC = {
     "format_dataframe",
     "merge_dataframe",
     "pivot_dataframe",
+    "render_dataframe",
 }
 
 

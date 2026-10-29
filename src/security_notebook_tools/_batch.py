@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import random
 import re
@@ -50,6 +51,7 @@ from ._query import (
     timed_out_before,
     window_key,
 )
+from ._render import VISUALIZATION_ATTR
 from ._tablepolicy import batch_check
 from ._timerange import validate_window_args
 
@@ -177,6 +179,17 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
         merged.attrs["kql_types"] = types
     # A frame from exec_query has "partial" only; one from a batch window has both keys.
     merged.attrs[PARTIAL_ATTR] = any(df.attrs.get(PARTIAL_ATTR) for df in results)
+    # Keep the render spec only if every window that returned a table has the same one.
+    specs = [
+        df.attrs.get(VISUALIZATION_ATTR)
+        for df in results
+        if len(df.columns) or VISUALIZATION_ATTR in df.attrs
+    ]
+    merged.attrs.pop(VISUALIZATION_ATTR, None)
+    if specs and specs[0] is not None and all(spec == specs[0] for spec in specs):
+        merged.attrs[VISUALIZATION_ATTR] = copy.deepcopy(specs[0])
+    else:
+        logger.debug("Windows disagree on the render spec or have none; not set on the result")
     if any(PARTIAL_WINDOWS_ATTR in df.attrs for df in results):
         merged.attrs[PARTIAL_WINDOWS_ATTR] = [
             w for df in results for w in df.attrs.get(PARTIAL_WINDOWS_ATTR, [])
@@ -283,6 +296,7 @@ def _aggregate(
             types[col] = kql_type
     if types:
         out.attrs[KQL_TYPES_ATTR] = types
+    out.attrs.pop(VISUALIZATION_ATTR, None)  # groupby copies attrs; the columns changed
     return out
 
 
@@ -387,7 +401,10 @@ def _attempt_window(
             if isinstance(exc, PartialResultError):
                 logger.warning("Batch %s returned a partial result and is not retried", label)
                 raise PartialResultError(
-                    f"{name} failed: {exc}", exc.partial_error, exc.partial_data
+                    f"{name} failed: {exc}",
+                    exc.partial_error,
+                    exc.partial_data,
+                    visualization=exc.visualization,
                 ) from exc
             if not isinstance(exc, QueryTransientError):
                 logger.warning(
@@ -859,6 +876,11 @@ def exec_batch_query(
         rows are skipped; if every window is empty, the first window's empty result is
         returned. ``df.attrs["kql_types"]`` is taken from the windows' results, adding columns
         that only later windows have.
+
+        ``df.attrs["visualization"]`` (the ``| render`` spec; see :func:`exec_query`) is set when
+        every window that returned a table has the same one, and absent otherwise (no render, or
+        windows that disagree). It is dropped when ``merge_on`` and ``agg_column`` re-aggregate
+        the rows, because the columns change.
 
         ``df.attrs["partial"]`` is always a bool: True if any Sentinel window returned only a
         partial result, so the rows (and any totals from ``merge_on``/``agg_column``) may be

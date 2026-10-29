@@ -13,12 +13,12 @@ query results are untrusted.
 
 from __future__ import annotations
 
-import copy
 import html
 import json
 import logging
 import math
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -55,6 +55,7 @@ _ENUM_KEYS = ("kind", "legend", "xaxis", "yaxis", "ysplit")
 _LIMIT_KEYS = ("ymin", "ymax", "xmin", "xmax")
 _NUMERIC_KQL = {"int", "int32", "int64", "long", "real", "double", "decimal"}
 _STACK_KINDS = {"stacked", "stacked100"}
+MAX_TRACES = 100  # more series than this is unreadable and slow to draw: refuse, do not truncate
 
 
 class PlotlyMissingError(ConfigurationError):
@@ -81,6 +82,8 @@ def _limit(value: Any) -> float | str | None:
         return None
     try:
         number = float(value)
+    except OverflowError:
+        return None
     except TypeError, ValueError:
         return _text(value)
     return number if math.isfinite(number) else None
@@ -103,7 +106,7 @@ def normalise_visualization(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, str | bytes):
         try:
             raw = json.loads(raw)
-        except ValueError:
+        except ValueError, RecursionError:
             return None
     if not isinstance(raw, dict):
         return None
@@ -133,20 +136,26 @@ def normalise_visualization(raw: Any) -> dict[str, Any] | None:
 
 
 def set_visualization(tables: list[pd.DataFrame], raw: Any, index: int = 0) -> None:
-    """Store the normalised ``raw`` render spec in ``attrs`` of ``tables[index]`` if there is one."""
-    spec = normalise_visualization(raw)
-    if spec is not None and tables:
-        tables[min(max(index, 0), len(tables) - 1)].attrs[VISUALIZATION_ATTR] = spec
+    """Store the normalised ``raw`` render spec in ``attrs`` of ``tables[index]``, if it has one.
 
-
-def copy_visualization(value: Any) -> Any:
-    """A deep copy of a stored spec, so callers cannot change a cached one."""
-    return copy.deepcopy(value)
+    Fails safe: a spec that cannot be read is dropped (logged at DEBUG) and never raises, so a
+    chart problem cannot lose the query's data.
+    """
+    try:
+        spec = normalise_visualization(raw)
+        if spec is not None and tables:
+            tables[min(max(index, 0), len(tables) - 1)].attrs[VISUALIZATION_ATTR] = spec
+    except Exception:
+        logger.debug("Dropping a render spec that could not be read", exc_info=True)
 
 
 def _esc(value: Any) -> str:
-    """Escape text for Plotly, which would otherwise read ``<a href>`` and friends as markup."""
-    return html.escape(str(value), quote=False)
+    """Escape text for Plotly, which would otherwise read ``<a href>`` and friends as markup.
+
+    ``$`` is escaped too: plotly.js hands ``$...$`` to MathJax (TeX) when that is loaded, before it
+    handles tags and entities, and turns ``&#36;`` back into a literal ``$`` afterwards.
+    """
+    return html.escape(str(value), quote=False).replace("$", "&#36;")
 
 
 def _load_plotly() -> Any:
@@ -155,13 +164,13 @@ def _load_plotly() -> Any:
         import plotly.graph_objects as go
     except ImportError as exc:
         raise PlotlyMissingError(
-            f"Plotly is not installed, so the chart cannot be drawn. Install it with {INSTALL_HINT}."
+            f"Plotly is not installed, so the chart cannot be drawn. Install: {INSTALL_HINT}."
         ) from exc
     return go
 
 
 def check_spec(df: Any) -> dict[str, Any]:
-    """Return ``df.attrs["visualization"]`` or raise ``ConfigurationError`` if it cannot be drawn."""
+    """Return ``df.attrs["visualization"]``, or raise ``ConfigurationError`` if unusable."""
     spec = df.attrs.get(VISUALIZATION_ATTR)
     if not isinstance(spec, dict) or not isinstance(spec.get(VISUALIZATION_ATTR), str):
         raise ConfigurationError(
@@ -222,6 +231,93 @@ def _numbers(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
+def _as_list(value: Any) -> list[Any] | None:
+    """A cell as a list if it is an array (or JSON text of one), else ``None``."""
+    if isinstance(value, str) and value.lstrip().startswith("["):
+        try:
+            value = json.loads(value)
+        except ValueError, RecursionError:
+            return None
+    if isinstance(value, list | tuple):
+        return list(value)
+    return value.tolist() if hasattr(value, "tolist") and getattr(value, "ndim", 0) == 1 else None
+
+
+def _expand_arrays(df: pd.DataFrame, spec: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Expand ``make-series`` array columns into rows; scalar frames are returned unchanged.
+
+    ``make-series`` returns one row per series with the x axis and each aggregate as an array of
+    the same length. The x, y and anomaly arrays of every row are exploded together (so a row with
+    ``n`` points becomes ``n`` rows), scalar columns such as the ``by`` key are repeated, and the
+    spec gets the resolved ``xcolumn`` and ``ycolumns`` so the plan finds them.
+    """
+    if not df.columns.is_unique:
+        return df, spec
+    arrays: dict[Any, pd.Series] = {}
+    for name in df.columns:
+        cells = [_as_list(v) for v in df[name]]
+        if (
+            cells
+            and any(c is not None for c in cells)
+            and all(c is not None or _is_missing(v) for c, v in zip(cells, df[name], strict=True))
+        ):
+            arrays[name] = pd.Series(cells, index=df.index, dtype=object)
+    if not arrays:
+        return df, spec
+
+    def first_item(name: Any) -> Any:
+        return next((i for cell in arrays[name] if cell for i in cell if i is not None), None)
+
+    def is_number(item: Any) -> bool:
+        return isinstance(item, int | float) and not isinstance(item, bool)
+
+    def is_time(item: Any) -> bool:
+        if isinstance(item, datetime):  # pd.Timestamp is a datetime too
+            return True
+        try:
+            return isinstance(item, str) and not pd.isna(pd.Timestamp(item))
+        except ValueError, TypeError:
+            return False
+
+    anomaly = [c for c in spec.get("anomalycolumns") or [] if c in arrays]
+    x = spec.get("xcolumn")
+    if x is None:
+        x = next((c for c in arrays if is_time(first_item(c)) or is_number(first_item(c))), None)
+    if x not in arrays:
+        return df, spec
+    if spec.get("ycolumns"):
+        y = [c for c in spec["ycolumns"] if c in arrays]
+    else:
+        y = [c for c in arrays if c != x and c not in anomaly and is_number(first_item(c))]
+    expand = list(dict.fromkeys([x, *y, *anomaly]))
+    if len(expand) < 2:
+        return df, spec  # a lone list column (say, a dynamic tag list) is not a make-series
+    out = df.copy()
+    for name in expand:
+        out[name] = arrays[name]
+    out = out.drop(columns=[c for c in arrays if c not in expand])
+    try:
+        out = out.explode(expand, ignore_index=True)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "The array columns of the result (make-series) differ in length within a row."
+        ) from exc
+    types = dict(df.attrs.get(KQL_TYPES_ATTR) or {})
+    if out[x].dropna().map(is_time).all() and out[x].notna().any():
+        out[x] = pd.to_datetime(out[x], utc=True, errors="coerce")
+        types[x] = "datetime"
+    else:
+        numeric = pd.to_numeric(out[x], errors="coerce")
+        if numeric.notna().sum() == out[x].notna().sum():
+            out[x] = numeric
+            types[x] = "real"
+    for name in [*y, *anomaly]:
+        out[name] = pd.to_numeric(out[name], errors="coerce")
+        types[name] = "real"
+    out.attrs = {**df.attrs, KQL_TYPES_ATTR: types}
+    return out, {**spec, "xcolumn": x, "ycolumns": y or spec.get("ycolumns")}
+
+
 class _Plan:
     """Which columns a chart reads, resolved from the render properties and KQL's defaults."""
 
@@ -257,6 +353,12 @@ class _Plan:
         else:
             skip = taken | set(self.y)
             self.series = [c for c in columns if c not in skip and kinds[c] == "other"]
+        for name in self.y_given:
+            if len(df) and not _numbers(df[name]).notna().any():
+                raise ConfigurationError(
+                    f"The render property ycolumns names column {str(name)[:80]!r}, which has no "
+                    "numeric values to plot."
+                )
         if not self.y and chart != "card":
             raise ConfigurationError(
                 "The result has no numeric column to plot besides the x column; name one with "
@@ -267,15 +369,27 @@ class _Plan:
 
 
 def _groups(df: pd.DataFrame, plan: _Plan) -> list[tuple[str | None, pd.DataFrame]]:
-    """Split the rows into one frame per series value (a single ``None`` group without series)."""
+    """Split the rows into one frame per series value (a single ``None`` group without series).
+
+    Raises:
+        ConfigurationError: There would be more than ``MAX_TRACES`` traces.
+    """
     if not plan.series:
         return [(None, df)]
-    keys = df[plan.series].astype(object).where(df[plan.series].notna(), "(null)")
-    labels = keys.apply(lambda row: ", ".join(str(v) for v in row), axis=1)
-    out: list[tuple[str | None, pd.DataFrame]] = []
-    for label in dict.fromkeys(labels):
-        out.append((_esc(label), df[(labels == label).to_numpy()]))
-    return out
+    labels = None
+    for name in plan.series:
+        column = df[name]
+        part = column.astype(object).where(column.notna(), "(null)").astype(str)
+        labels = part if labels is None else labels + ", " + part
+    grouped = df.groupby(labels, sort=False)
+    traces = grouped.ngroups * max(len(plan.y), 1)
+    if traces > MAX_TRACES:
+        raise ConfigurationError(
+            f"The chart would have {traces} traces ({grouped.ngroups} series values x "
+            f"{max(len(plan.y), 1)} y columns); the limit is {MAX_TRACES}. "
+            "Reduce the series with `top` or `where` in the query."
+        )
+    return [(_esc(label), frame) for label, frame in grouped]
 
 
 def _trace_name(group: str | None, column: str, many_columns: bool) -> str:
@@ -294,17 +408,25 @@ def _stack_kind(spec: dict[str, Any], chart: str) -> str:
 
 
 def _series_traces(
-    go: Any, df: pd.DataFrame, plan: _Plan, spec: dict[str, Any], chart: str
+    go: Any,
+    groups: list[tuple[str | None, pd.DataFrame]],
+    plan: _Plan,
+    spec: dict[str, Any],
+    chart: str,
 ) -> list[Any]:
     """Traces for every chart type that plots y columns against x, one per series and column."""
     stack = _stack_kind(spec, chart)
     accumulate = bool(spec.get("accumulate"))
     sort = chart in LINE_CHARTS | {"areachart", "stackedareachart", "anomalychart"}
     traces: list[Any] = []
-    for group, frame in _groups(df, plan):
+    for group, frame in groups:
         if sort and plan.x_kind in ("datetime", "numeric"):
             order = frame[plan.x]
-            order = pd.to_datetime(order, utc=True) if plan.x_kind == "datetime" else _numbers(order)
+            order = (
+                pd.to_datetime(order, utc=True, errors="coerce")
+                if plan.x_kind == "datetime"
+                else _numbers(order)
+            )
             frame = frame.iloc[order.argsort(kind="stable").to_numpy()]
         x_values = _labels(frame[plan.x], plan.x_kind)
         for column in plan.y:
@@ -340,7 +462,7 @@ def _series_traces(
                     go.Scatter(
                         x=[v for v, f in zip(x_values, flags, strict=True) if f],
                         y=[float(v) for v, f in zip(base, flags, strict=True) if f],
-                        name=_trace_name(group, f"{column} (anomaly)", False),
+                        name=_trace_name(group, f"{column} (anomaly)", True),
                         mode="markers",
                         marker={"symbol": "x", "size": 10},
                     )
@@ -358,17 +480,15 @@ def _pie_trace(go: Any, df: pd.DataFrame, plan: _Plan) -> Any:
 
 def _card(go: Any, df: pd.DataFrame) -> Any:
     """The first cell of the first row, as a number if it is one, else as text."""
-    if df.empty:
-        raise ConfigurationError("The result has no rows to show in a card.")
     value = df.iloc[0, 0]
     title = _esc(df.columns[0])
     number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     if _kind_of(df, 0) == "numeric" and not pd.isna(number):
         return go.Figure(go.Indicator(mode="number", value=float(number), title={"text": title}))
     fig = go.Figure()
-    fig.add_annotation(
-        text=f"{title}<br>{_esc(value)}", showarrow=False, font={"size": 28}, x=0.5, y=0.5
-    )
+    text = "(null)" if _is_missing(value) else _esc(value)
+    fig.add_annotation(text=title, showarrow=False, font={"size": 14}, x=0.5, y=0.65)
+    fig.add_annotation(text=text, showarrow=False, font={"size": 28}, x=0.5, y=0.45)
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return fig
@@ -416,6 +536,8 @@ def _style(fig: Any, spec: dict[str, Any], plan: _Plan, chart: str) -> None:
     # In a barchart the x column runs along the vertical axis.
     cat, val = ("yaxis", "xaxis") if horizontal else ("xaxis", "yaxis")
     cat_axis: dict[str, Any] = {"title": {"text": x_title}}
+    if plan.x_kind == "other":
+        cat_axis["type"] = "category"  # "0" or "2024-05" must not be autotyped as a number/date
     val_axis: dict[str, Any] = {}
     if y_title:
         val_axis["title"] = {"text": y_title}
@@ -454,9 +576,15 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
     * ``piechart``: the x column labels the slices, the first y column sizes them.
     * ``scatterchart``: markers.
     * ``anomalychart``: lines, with a marker on the first y column wherever an ``anomalycolumns``
-      column of the same row is not zero (row-wise data only, not ``make-series`` arrays).
+      column of the same row (or array element, for ``make-series``) is not zero.
     * ``card``: the first column of the first row as a single value.
     * ``table``: a Plotly table of the whole frame.
+
+    A ``make-series`` result (one row per series, with the x axis and every aggregate as an array)
+    is expanded first: the x, y and anomaly arrays of each row are exploded together and scalar
+    columns such as the ``by`` key become the series. Arrays in a row must have equal lengths.
+    A chart is limited to ``MAX_TRACES`` (100) traces, series values times y columns; more raises
+    ``ConfigurationError`` suggesting ``top`` or ``where`` to reduce the series.
 
     Honoured properties: ``title``, ``xtitle``, ``ytitle``, ``legend=hidden``, ``ymin`` and
     ``ymax`` (both needed), ``xmin`` and ``xmax`` (numeric x, both needed), ``xaxis`` and ``yaxis``
@@ -510,23 +638,29 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
         chart = spec[VISUALIZATION_ATTR].lower()
         call.update(chart=chart)
         go = _load_plotly()
+        # Everything that can fail on bad input is checked before the dependency call, so a
+        # user error is logged once (by public_call) and not also as a plotly failure.
+        frame, spec = (df, spec) if chart in ("card", "table") else _expand_arrays(df, spec)
+        plan = groups = None
+        if chart == "card" and df.empty:
+            raise ConfigurationError("The result has no rows to show in a card.")
+        if chart not in ("card", "table"):
+            plan = _Plan(frame, spec, chart)
+            logger.debug("Chart columns: x=%r y=%r series=%r", plan.x, plan.y, plan.series)
+            if chart != "piechart":
+                groups = _groups(frame, plan)
         with dependency_call(logger, "plotly figure", chart=chart) as dep:
             if chart == "card":
                 fig = _card(go, df)
             elif chart == "table":
                 fig = _table(go, df)
+            elif chart == "piechart":
+                fig = go.Figure(_pie_trace(go, frame, plan))
+                if spec.get("legend") == "hidden":
+                    fig.update_layout(showlegend=False)
             else:
-                plan = _Plan(df, spec, chart)
-                logger.debug(
-                    "Chart columns: x=%r y=%r series=%r", plan.x, plan.y, plan.series
-                )
-                if chart == "piechart":
-                    fig = go.Figure(_pie_trace(go, df, plan))
-                    if spec.get("legend") == "hidden":
-                        fig.update_layout(showlegend=False)
-                else:
-                    fig = go.Figure(_series_traces(go, df, plan, spec, chart))
-                    _style(fig, spec, plan, chart)
+                fig = go.Figure(_series_traces(go, groups, plan, spec, chart))
+                _style(fig, spec, plan, chart)
             if chart in ("card", "table", "piechart") and spec.get("title"):
                 fig.update_layout(title={"text": _esc(spec["title"])})  # _style does the others
             dep["traces"] = len(fig.data)

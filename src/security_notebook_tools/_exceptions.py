@@ -55,13 +55,21 @@ class PartialResultError(QueryError):
     """A query returned only partial results and ``raise_on_partial`` was set.
 
     ``partial_error`` holds the service error; ``partial_data`` the tables returned so far.
+    ``visualization`` is the raw ``| render`` spec the service sent with them, or ``None``.
     """
 
-    def __init__(self, message: str, partial_error: Any = None, partial_data: Any = None) -> None:
-        """Store the service error and partial tables alongside the message."""
+    def __init__(
+        self,
+        message: str,
+        partial_error: Any = None,
+        partial_data: Any = None,
+        visualization: Any = None,
+    ) -> None:
+        """Store the service error, partial tables and render spec alongside the message."""
         super().__init__(message)
         self.partial_error = partial_error
         self.partial_data = partial_data
+        self.visualization = visualization
 
 
 class ConfigurationError(SecurityNotebookToolsError, ValueError):

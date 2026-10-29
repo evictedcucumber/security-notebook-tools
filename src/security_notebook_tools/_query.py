@@ -32,6 +32,7 @@ from ._config import (
 from ._errors import public_call, unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
 from ._log import dependency_call, fingerprint
+from ._render import set_visualization
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
 from ._timerange import Timespan, resolve_timespan, validate_timespan
@@ -134,6 +135,7 @@ def _sentinel_tables(
         # query_tables already logged it; hand the data back without caching it.
         with dependency_call(logger, "pandas DataFrame conversion", target="sentinel_partial"):
             tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
+            set_visualization(list(tables), exc.visualization)
         logger.info("Partial result is returned but not stored in the result cache")
         raise _PartialResult(tables, str(exc), exc.partial_error) from exc
 
@@ -229,10 +231,7 @@ def _copies(tables: tuple[pd.DataFrame, ...] | list[pd.DataFrame]) -> list[pd.Da
     for df in tables:
         frame = df.copy()
         _detach_containers(frame)
-        frame.attrs = {
-            key: value.copy() if hasattr(value, "copy") else value
-            for key, value in df.attrs.items()
-        }
+        frame.attrs = {key: copy.deepcopy(value) for key, value in df.attrs.items()}
         copies.append(frame)
     return copies
 
@@ -304,7 +303,10 @@ def _query_sentinel(
         tables = list(partial.tables) or [pd.DataFrame()]
         if raise_on_partial:
             raise PartialResultError(
-                partial.message, partial.error, _flag_partial(tables, True)
+                partial.message,
+                partial.error,
+                _flag_partial(tables, True),
+                visualization=tables[0].attrs.get("visualization"),
             ) from partial
         if warn_partial:
             warnings.warn(partial.message, stacklevel=2)
@@ -467,6 +469,14 @@ def exec_query(
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
         tables. Sentinel datetime columns are UTC-aware. ``df.attrs["kql_types"]`` maps each
         column to its KQL type (``"long"``, ``"dynamic"`` ...), which ``format_dataframe`` uses.
+        If the query ends in ``| render <charttype> [with (...)]``, ``df.attrs["visualization"]``
+        is a dict of the render spec (and absent otherwise) for ``render_dataframe``: the key
+        ``"visualization"`` is the lower-case chart type and, when the render sets them,
+        ``"title"``, ``"xtitle"``, ``"ytitle"``, ``"xcolumn"``, ``"kind"``, ``"legend"``,
+        ``"xaxis"``, ``"yaxis"``, ``"ysplit"`` (strings), ``"ycolumns"``, ``"series"``,
+        ``"anomalycolumns"`` (lists of column names), ``"ymin"``, ``"ymax"``, ``"xmin"``,
+        ``"xmax"`` and ``"accumulate"`` (only when true). It is a copy, also from the cache. It is
+        set on the table it applies to (the first one on Sentinel), also for a partial result.
         ``df.attrs["partial"]`` is always a bool: True if Sentinel returned only a partial result
         (a warning is emitted and the data received is returned, so the frame may be incomplete),
         False otherwise, including on ADX. A partial result is never cached. Nested ``dynamic``

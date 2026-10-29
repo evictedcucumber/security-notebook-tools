@@ -19,6 +19,7 @@ from ._batch import (
 from ._errors import public_call
 from ._exceptions import ConfigurationError
 from ._query import _check_bool
+from ._render import VISUALIZATION_ATTR
 
 logger = logging.getLogger("security_notebook_tools.merge")
 
@@ -117,6 +118,7 @@ def merge_dataframe(
             out = merged.copy()
         else:
             out = _aggregate(merged, keys, cols, agg_func, log=logger, where="the DataFrame")
+        out.attrs.pop(VISUALIZATION_ATTR, None)  # the columns changed (or a copy kept the attrs)
         # groupby does not carry attrs reliably: restate whether any input was partial
         out.attrs[PARTIAL_ATTR] = bool(merged.attrs.get(PARTIAL_ATTR))
         if PARTIAL_WINDOWS_ATTR in merged.attrs:

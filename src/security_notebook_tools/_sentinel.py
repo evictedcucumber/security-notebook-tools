@@ -64,6 +64,7 @@ from ._log import (
     mask_id,
     redact_exception_text,
 )
+from ._render import set_visualization
 from ._tablepolicy import (
     batch_checked,
     check_sentinel_query,
@@ -219,6 +220,7 @@ class SentinelClient:
                 kql,
                 timespan=timespan,
                 server_timeout=server_timeout,
+                include_visualization=True,
                 **transport,
             )
 
@@ -425,7 +427,12 @@ class SentinelClient:
                 f" ({hint})" if hint else "",
             )
             if raise_on_partial:
-                raise PartialResultError(msg, partial_error=err, partial_data=result.partial_data)
+                raise PartialResultError(
+                    msg,
+                    partial_error=err,
+                    partial_data=result.partial_data,
+                    visualization=result.visualization,
+                )
             warnings.warn(msg, stacklevel=2)
             tables = result.partial_data
         else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
@@ -436,6 +443,7 @@ class SentinelClient:
             dependency_call(logger, "pandas DataFrame conversion", target="sentinel") as call,
         ):
             dfs = [_table_to_df(t) for t in tables]
+            set_visualization(dfs, result.visualization)
             call["rows"] = [len(df) for df in dfs]
         logger.info(
             "Sentinel query returned %d table(s), rows=%s in %.2fs",
