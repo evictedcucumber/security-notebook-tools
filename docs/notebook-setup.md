@@ -17,7 +17,7 @@ is less strict, because tags can be moved, and an install without a ref is the l
 takes whatever `main` is):
 
 ```sh
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v7.1.0
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v7.1.1
 ```
 
 The project needs Python 3.14 or newer. Other install options (latest main, editable local
