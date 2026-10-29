@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `render_dataframe` (and `%%kql`) now draws `make-series ... | render timechart` results.
+  `make-series` puts the aggregate columns before the time axis column, and the first array column
+  was taken as the x axis, so these charts failed with "no numeric column to plot". A time-valued
+  array column is now preferred as the x axis.
+
 ## 7.1.0 - 2026-10-29
 
 ### Added

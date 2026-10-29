@@ -920,6 +920,54 @@ def test_make_series_anomaly_arrays():
     assert list(ok.y) == [3.0]
 
 
+def _wire_series_frame(chart, **props):
+    # as Log Analytics returns make-series: by, aggregates, then the axis, as dynamic JSON text
+    hours = json.dumps([f"2026-01-01T0{i}:00:00.0000000Z" for i in range(3)])
+    df = pd.DataFrame(
+        {
+            "ResultType": ["0", "50126"],
+            "count_": [json.dumps([1, 2, 30]), json.dumps([4, 5, 6])],
+            "TimeGenerated": [hours, hours],
+            "anomalies": [json.dumps([0, 0, 1]), json.dumps([0, 0, 0])],
+        }
+    )
+    df.attrs["kql_types"] = {
+        "ResultType": "string",
+        "count_": "dynamic",
+        "TimeGenerated": "dynamic",
+        "anomalies": "dynamic",
+    }
+    df.attrs["visualization"] = _spec(chart, **props)
+    return df
+
+
+@pytest.mark.parametrize("chart", ["timechart", "linechart", "columnchart", "areachart"])
+def test_make_series_axis_after_the_aggregates_is_the_x_axis(chart):
+    df = _wire_series_frame(chart).drop(columns=["anomalies"])
+    fig = render_dataframe(df)
+    assert {t.name for t in fig.data} == {"0", "50126"}
+    first = next(t for t in fig.data if t.name == "0")
+    assert list(first.y) == [1.0, 2.0, 30.0]
+    assert list(first.x) == [(T0 + timedelta(hours=i)).isoformat() for i in range(3)]
+    assert fig.layout.xaxis.title.text == "TimeGenerated"
+
+
+def test_make_series_wire_format_anomalychart():
+    fig = render_dataframe(_wire_series_frame("anomalychart", anomalycolumns=["anomalies"]))
+    marked = [t for t in fig.data if t.mode == "markers"]
+    assert [len(t.x) for t in marked if len(t.x)] == [1]
+    assert list(marked[0].y) == [30.0]
+
+
+def test_make_series_on_a_numeric_axis():
+    df = pd.DataFrame({"n": [json.dumps([5, 6, 7])], "bucket": [json.dumps([0, 10, 20])]})
+    df.attrs["kql_types"] = {"n": "dynamic", "bucket": "dynamic"}
+    df.attrs["visualization"] = _spec("linechart", xcolumn="bucket")
+    fig = render_dataframe(df)
+    assert list(fig.data[0].x) == [0, 10, 20]
+    assert list(fig.data[0].y) == [5.0, 6.0, 7.0]
+
+
 def test_make_series_unequal_lengths_are_rejected():
     df = _series_frame()
     df["c"] = [[1, 2], [4, 5, 6]]

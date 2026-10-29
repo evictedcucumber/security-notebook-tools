@@ -282,7 +282,10 @@ def _expand_arrays(df: pd.DataFrame, spec: dict[str, Any]) -> tuple[pd.DataFrame
     anomaly = [c for c in spec.get("anomalycolumns") or [] if c in arrays]
     x = spec.get("xcolumn")
     if x is None:
-        x = next((c for c in arrays if is_time(first_item(c)) or is_number(first_item(c))), None)
+        # make-series puts the aggregates before the axis column, so a time axis beats a number
+        x = next((c for c in arrays if is_time(first_item(c))), None)
+        if x is None:
+            x = next((c for c in arrays if is_number(first_item(c))), None)
     if x not in arrays:
         return df, spec
     if spec.get("ycolumns"):
