@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Charts from `render_dataframe` and `%%kql` use Plotly's dark theme (`plotly_dark`) by default.
+  A template set with `plotly.io.templates.default` is still respected, and
+  `fig.update_layout(template="plotly")` makes a chart light.
+
 ## 7.1.1 - 2026-10-29
 
 ### Fixed

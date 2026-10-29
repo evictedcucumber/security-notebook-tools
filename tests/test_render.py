@@ -1079,3 +1079,21 @@ def test_magic_falls_back_on_any_chart_exception(shell):
     assert isinstance(out, Styler)
     assert len(record) == 1
     assert "secret" not in str(record[0].message)
+
+
+@pytest.mark.parametrize(
+    "chart", ["timechart", "columnchart", "barchart", "piechart", "card", "table"]
+)
+def test_charts_are_dark_by_default(chart):
+    import plotly.io as pio
+
+    fig = render_dataframe(_frame(_spec(chart)))
+    assert fig.layout.template == pio.templates["plotly_dark"]
+
+
+def test_a_template_the_user_chose_is_kept(monkeypatch):
+    import plotly.io as pio
+
+    monkeypatch.setattr(pio.templates, "default", "seaborn")
+    fig = render_dataframe(_frame(_spec("timechart")))
+    assert fig.layout.template == pio.templates["seaborn"]

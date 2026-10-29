@@ -56,6 +56,7 @@ _LIMIT_KEYS = ("ymin", "ymax", "xmin", "xmax")
 _NUMERIC_KQL = {"int", "int32", "int64", "long", "real", "double", "decimal"}
 _STACK_KINDS = {"stacked", "stacked100"}
 MAX_TRACES = 100  # more series than this is unreadable and slow to draw: refuse, do not truncate
+DARK_TEMPLATE = "plotly_dark"
 
 
 class PlotlyMissingError(ConfigurationError):
@@ -167,6 +168,13 @@ def _load_plotly() -> Any:
             f"Plotly is not installed, so the chart cannot be drawn. Install: {INSTALL_HINT}."
         ) from exc
     return go
+
+
+def _template() -> str | None:
+    """``"plotly_dark"`` unless the user changed Plotly's default template, then ``None``."""
+    import plotly.io as pio
+
+    return DARK_TEMPLATE if pio.templates.default == "plotly" else None
 
 
 def check_spec(df: Any) -> dict[str, Any]:
@@ -596,6 +604,10 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
     ``3Dchart``, ``treemap``, ``sankey``, ``plotly`` ...) is refused; figure JSON in the data is
     never interpreted.
 
+    Charts use Plotly's dark theme (``plotly_dark``). If ``plotly.io.templates.default`` has been
+    changed from Plotly's own ``"plotly"``, that template is used instead; for one chart,
+    ``fig.update_layout(template="plotly")`` switches it back to light.
+
     Every string that comes from the data, the column names or the render properties is
     HTML-escaped before Plotly sees it, so Plotly shows ``<a href=...>`` and ``<b>`` as text
     rather than markup.
@@ -666,6 +678,8 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
                 _style(fig, spec, plan, chart)
             if chart in ("card", "table", "piechart") and spec.get("title"):
                 fig.update_layout(title={"text": _esc(spec["title"])})  # _style does the others
+            if template := _template():
+                fig.update_layout(template=template)
             dep["traces"] = len(fig.data)
         call.update(traces=len(fig.data))
         return fig

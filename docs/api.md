@@ -583,6 +583,10 @@ Every string from the data, the column names or the render properties is HTML-es
 `>`) before Plotly sees it. Plotly would otherwise interpret `<a href>`, `<b>`, `<br>` and
 `<span style>` in titles, tick labels, legend entries and hover text.
 
+Charts use Plotly's dark theme (`plotly_dark`). If `plotly.io.templates.default` has been changed
+from Plotly's own `"plotly"`, that template is used instead. For a light chart, call
+`fig.update_layout(template="plotly")` on the returned figure.
+
 | Name | Description |
 | --- | --- |
 | `df` | A result with `attrs["visualization"]`, usually from `exec_query`. |

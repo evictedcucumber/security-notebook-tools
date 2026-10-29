@@ -333,6 +333,9 @@ Text from the data (category values, column names, titles) is HTML-escaped befor
 so markup in telemetry is shown as text. A batch result (`exec_batch_query`) keeps the spec when
 every window agrees on it.
 
+Charts use Plotly's dark theme (`plotly_dark`). If you set `plotly.io.templates.default` yourself,
+your template is used instead; `fig.update_layout(template="plotly")` makes one chart light.
+
 ### Pivot
 
 `pivot_dataframe(df, index, columns)` counts rows per combination (for example sign-ins per user
