@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Re-running `exec_batch_query` after a failure or an interrupt now reuses every window that
+  already succeeded and runs only the rest, also for batches with more than 32 windows. Windows
+  were kept in the 32-entry result cache of `exec_query`, so a longer batch evicted its own
+  earlier windows (and a re-run then evicted the rest before reaching them), and other queries in
+  between could push them out too. Batch windows now have their own store: every window of the 4
+  most recently run batch queries is kept, however many there are. `clear_cache()` clears it.
+
 ## 7.2.0 - 2026-10-29
 
 ### Changed

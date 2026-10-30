@@ -2131,3 +2131,216 @@ def test_detach_containers_with_a_non_range_index_and_kql_types():
     assert frame.loc[10, "P"] == {"a": 1}
     assert frame.loc[20, "U"] == {"u": 2}
     assert copy.index.tolist() == [10, 20]
+
+
+# --- batch window store -------------------------------------------------------------------------
+
+
+def _fail_window(cls, n, error=None):
+    """Make the SDK fail every call for the 1-based window ``n`` of a daily batch from D0."""
+    ok = cls.return_value.query_tables.return_value
+
+    def query_tables(kql, timespan, **kwargs):
+        if _window_no(timespan) == n:
+            raise error or QueryError("boom")
+        return ok
+
+    cls.return_value.query_tables.side_effect = query_tables
+    return ok
+
+
+def _heal(cls, ok):
+    cls.return_value.query_tables.side_effect = None
+    cls.return_value.query_tables.return_value = ok
+
+
+def _batch_n(n, days=2, **kwargs):
+    """Run a distinct batch query (its KQL ends in a comment ``n``) over ``days`` daily windows."""
+    return snt.exec_batch_query(f"{FILTER} // {n}", D0, _days(days), **kwargs)
+
+
+def test_long_batch_rerun_after_late_failure_sends_only_the_rest(sentinel):
+    from security_notebook_tools._query import RESULT_CACHE_SIZE
+
+    cls, _ = sentinel
+    days = RESULT_CACHE_SIZE + 8
+    ok = _fail_window(cls, days - 4)
+    with pytest.raises(QueryError, match=f"window {days - 4}/{days}"):
+        snt.exec_batch_query(FILTER, D0, _days(days))
+    assert _sdk_calls(cls) == days - 4
+    _heal(cls, ok)
+    snt.exec_batch_query(FILTER, D0, _days(days))
+    assert [_window_no(w) for w in _sent_windows(cls)[days - 4 :]] == list(
+        range(days - 4, days + 1)
+    )
+    assert _sdk_calls(cls) == days - 4 + 5
+
+
+def test_long_adx_batch_rerun_after_late_failure_sends_only_the_rest(adx):
+    from security_notebook_tools._query import RESULT_CACHE_SIZE
+
+    cls, _ = adx
+    days = RESULT_CACHE_SIZE + 8
+    kql = "T | where Timestamp >= BatchStart and Timestamp < BatchEnd"
+    ok = cls.return_value.query_tables.return_value
+    cls.return_value.query_tables.side_effect = [ok] * (days - 5) + [QueryError("boom")]
+    with pytest.raises(QueryError, match=f"window {days - 4}/{days}"):
+        snt.exec_batch_query(kql, D0, _days(days), target="adx")
+    cls.return_value.query_tables.side_effect = None
+    before = cls.return_value.query_tables.call_count
+    snt.exec_batch_query(kql, D0, _days(days), target="adx")
+    assert cls.return_value.query_tables.call_count - before == 5
+
+
+def test_batch_windows_survive_many_intervening_queries(sentinel):
+    from security_notebook_tools._query import RESULT_CACHE_SIZE
+
+    cls, _ = sentinel
+    _batch_n(0, days=3)
+    for i in range(RESULT_CACHE_SIZE + 5):
+        snt.exec_query(f"T | take {i + 1}")
+    sent = _sdk_calls(cls)
+    _batch_n(0, days=3)
+    assert _sdk_calls(cls) == sent
+
+
+def test_batch_store_keeps_the_four_most_recent_batch_queries(sentinel, caplog):
+    cls, _ = sentinel
+    for n in range(4):
+        _batch_n(n, days=3)
+    assert _sdk_calls(cls) == 12
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools.query"):
+        _batch_n(4, days=3)  # drops batch 0, the least recently used
+    assert "Dropped 3 stored window(s) of an older batch query" in caplog.text
+    assert _sdk_calls(cls) == 15
+    for n in (1, 2, 3, 4):
+        _batch_n(n, days=3)
+    assert _sdk_calls(cls) == 15
+    _batch_n(0, days=3)
+    assert _sdk_calls(cls) == 18
+
+
+def test_reusing_a_batch_query_makes_it_the_most_recent(sentinel):
+    cls, _ = sentinel
+    for n in range(4):
+        _batch_n(n)
+    _batch_n(0)  # batch 1 is now the least recently used
+    _batch_n(4)
+    assert _sdk_calls(cls) == 10
+    _batch_n(0)
+    assert _sdk_calls(cls) == 10
+    _batch_n(1)
+    assert _sdk_calls(cls) == 12
+
+
+def test_batch_cache_false_neither_reads_nor_writes_the_store(sentinel):
+    cls, _ = sentinel
+    _batch_n(0, cache=False)
+    assert _sdk_calls(cls) == 2
+    _batch_n(0)  # nothing was written
+    assert _sdk_calls(cls) == 4
+    _batch_n(0, cache=False)  # stored windows are not read
+    assert _sdk_calls(cls) == 6
+    _batch_n(0)
+    assert _sdk_calls(cls) == 6
+
+
+def test_clear_cache_empties_the_batch_store(sentinel, caplog):
+    cls, _ = sentinel
+    _batch_n(0, days=3)
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools"):
+        snt.clear_cache()
+    assert "clear_cache: dropped 3 stored result(s)" in caplog.text
+    _batch_n(0, days=3)
+    assert _sdk_calls(cls) == 6
+
+
+def test_batch_hit_is_logged_and_returns_independent_copies(sentinel, caplog):
+    _batch_n(0)
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools.query"):
+        first = _batch_n(0)
+    assert "Returning cached window" in caplog.text
+    first.loc[0, "a"] = 99
+    assert _batch_n(0).loc[0, "a"] == 1
+
+
+def test_batch_partial_window_is_not_kept(monkeypatch):
+    from azure.monitor.query import LogsQueryPartialResult, LogsQueryResult, LogsTable
+
+    monkeypatch.setenv("SENTINEL_WORKSPACE_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("SENTINEL_SUBSCRIPTION_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("SENTINEL_RESOURCE_GROUP", "rg")
+    monkeypatch.setenv("SENTINEL_WORKSPACE_NAME", "sentinel-ws")
+    table = LogsTable(name="T", columns=["a"], columns_types=["long"], rows=[[1]])
+    full = LogsQueryResult(tables=[table])
+    partial = LogsQueryPartialResult(partial_data=[table], partial_error="boom")
+
+    def query_workspace(workspace_id, kql, timespan=None, **kwargs):
+        return partial if _window_no(timespan) == 2 else full
+
+    with (
+        mock.patch("security_notebook_tools._query.get_credential"),
+        mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as sdk,
+        mock.patch("security_notebook_tools._sentinel.get_policy"),
+        mock.patch("security_notebook_tools._sentinel.check_sentinel_query"),
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("ignore")
+        sdk.return_value.query_workspace.side_effect = query_workspace
+        snt.exec_batch_query(FILTER, D0, _days(3))
+        assert sdk.return_value.query_workspace.call_count == 3
+        snt.exec_batch_query(FILTER, D0, _days(3))
+        sent = [
+            _window_no(c.kwargs.get("timespan") or c.args[2])
+            for c in sdk.return_value.query_workspace.call_args_list
+        ]
+    assert sent[3:] == [2]  # only the partial window ran again
+
+
+def test_batch_parallel_failure_keeps_the_windows_that_finished(sentinel):
+    cls, _ = sentinel
+    days = 6
+    ok = cls.return_value.query_tables.return_value
+    others_done = threading.Semaphore(0)
+
+    def query_tables(kql, timespan, **kwargs):
+        n = _window_no(timespan)
+        if n == days:
+            for _ in range(days - 2):  # windows 2..5 have all finished
+                assert others_done.acquire(timeout=10)
+            raise QueryError("boom")
+        if n > 1:
+            others_done.release()
+        return ok
+
+    cls.return_value.query_tables.side_effect = query_tables
+    with pytest.raises(QueryError, match=f"window {days}/{days}"):
+        snt.exec_batch_query(FILTER, D0, _days(days), max_workers=3)
+    assert _sdk_calls(cls) == days
+    _heal(cls, ok)
+    snt.exec_batch_query(FILTER, D0, _days(days), max_workers=3)
+    assert [_window_no(w) for w in _sent_windows(cls)[days:]] == [days]
+
+
+def test_a_successful_batch_keeps_only_the_windows_of_its_run(sentinel):
+    cls, _ = sentinel
+    snt.exec_batch_query(FILTER, D0, _days(2))  # windows 1-2
+    snt.exec_batch_query(FILTER, _days(2), _days(4))  # windows 3-4, same query: 1-2 dropped
+    assert _sdk_calls(cls) == 4
+    snt.exec_batch_query(FILTER, _days(2), _days(4))
+    assert _sdk_calls(cls) == 4
+    snt.exec_batch_query(FILTER, D0, _days(2))
+    assert _sdk_calls(cls) == 6
+
+
+def test_a_failed_batch_does_not_drop_earlier_windows_of_the_query(sentinel):
+    cls, _ = sentinel
+    ok = cls.return_value.query_tables.return_value
+    snt.exec_batch_query(FILTER, D0, _days(2))  # windows 1-2
+    _fail_window(cls, 4)
+    with pytest.raises(QueryError, match="window 2/2"):
+        snt.exec_batch_query(FILTER, _days(2), _days(4))
+    _heal(cls, ok)
+    sent = _sdk_calls(cls)
+    snt.exec_batch_query(FILTER, D0, _days(2))
+    assert _sdk_calls(cls) == sent  # windows 1-2 still stored

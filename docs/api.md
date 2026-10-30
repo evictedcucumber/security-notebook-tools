@@ -782,9 +782,10 @@ clear_cache()
 
 ## Caching
 
-Query results are cached in memory (`functools.lru_cache`), on by default, for `exec_query` and
-for each window of `exec_batch_query`. Up to 32 distinct queries are kept; the least recently
-used are dropped first.
+Query results are cached in memory, on by default, for `exec_query` and for each window of
+`exec_batch_query`. Up to 32 distinct `exec_query` queries are kept (`functools.lru_cache`); the
+least recently used are dropped first. Batch windows are kept apart from those (see **Batch**
+below).
 
 - **Key:** the target, the connection settings (Sentinel: workspace ID, resource ID and tenant;
   ADX: cluster, tenant and database), the exact KQL text, the resolved time range and the timeout.
@@ -800,11 +801,16 @@ used are dropped first.
   fetched under the earlier access.
 - **A hit sends no request**, so nothing is billed and the cost guard check is not needed. An
   INFO log line says the result came from the cache.
-- **Batch:** each window is cached separately, so re-running `exec_batch_query` reuses the
-  windows that already succeeded: all of them with the same absolute `start` and `end`, and with
-  a range relative to now (`start` a `timedelta`, no `end`) every window except the first and
-  last, which move with now. Such a range is cut on a fixed `interval` grid so the windows in
-  between stay the same.
+- **Batch:** each window is cached separately, so re-running `exec_batch_query` after a failure
+  or an interrupt (including `KeyboardInterrupt`) reuses the windows that already succeeded and
+  runs only the rest: all of them with the same absolute `start` and `end`, and with a range
+  relative to now (`start` a `timedelta`, no `end`) every window except the first and last, which
+  move with now. Such a range is cut on a fixed `interval` grid so the windows in between stay
+  the same. Windows are not counted against the 32 above: every window of the 4 most recently run
+  batch queries (same target, connection, KQL and `timeout`) is kept, however many windows there
+  are, and the least recently run batch query is dropped first. Once a batch query succeeds, only
+  the windows of that run are kept for it (not those of other ranges it was run over before), so
+  the memory used is about that of its 4 most recent merged results.
 
 Use `cache=False` (or `--no-cache` in `%%kql`) for one fresh call, or `clear_cache()` to drop
 everything. Large results stay in memory until evicted or cleared, so use `cache=False` or call

@@ -11,6 +11,7 @@ import copy
 import logging
 import threading
 import warnings
+from collections import OrderedDict
 from datetime import timedelta
 from functools import cache, lru_cache
 from typing import Literal
@@ -42,6 +43,12 @@ logger = logging.getLogger("security_notebook_tools.query")
 Target = Literal["sentinel", "adx"]
 DEFAULT_TIMEOUT = 300
 RESULT_CACHE_SIZE = 32
+# Batch windows are kept apart from the result cache, all windows of each of this many most
+# recently used batch queries, so a long batch cannot evict its own windows (see _cached_call).
+# Keyed by batch_key, then by the window's fetch arguments.
+BATCH_CACHE_SIZE = 4
+_batch_results: OrderedDict[tuple, dict[tuple, tuple[pd.DataFrame, ...]]] = OrderedDict()
+_batch_lock = threading.Lock()
 
 # Set by the cached fetch functions when they actually run, so the caller can tell a hit from a
 # miss without racing on ``cache_info()``.
@@ -182,6 +189,26 @@ def window_key(target: Target, kql: str, timespan: Timespan | None, timeout: int
     return ("adx", resolve_cluster_uri(), resolve_tenant_id(), database, kql, timeout)
 
 
+class BatchRun:
+    """One run of a batch query: its key in the window store and the windows it has used."""
+
+    def __init__(self, target: Target, kql: str, timeout: int) -> None:
+        """Key the run by the batch query: ``kql`` without a window's prefix (reads the env)."""
+        self.key = window_key(target, kql, None, timeout)
+        self.used: set[tuple] = set()
+
+    def keep_only_used(self) -> None:
+        """Drop the stored windows of this batch query that this run did not use.
+
+        Called when the run succeeds, so the store holds one run per batch query, not every
+        range it was ever run over; a failed run keeps them all for the re-run.
+        """
+        with _batch_lock:
+            windows = _batch_results.get(self.key, {})
+            for args in windows.keys() - self.used:
+                del windows[args]
+
+
 def remember_timed_out(key: tuple, elapsed: float) -> None:
     """Note that the window with this :func:`window_key` timed out after ``elapsed`` seconds."""
     with _timed_out_lock:
@@ -243,11 +270,48 @@ def _flag_partial(tables: list[pd.DataFrame], partial: bool) -> list[pd.DataFram
     return tables
 
 
-def _cached_call(fetch, args: tuple, *, cache: bool) -> list[pd.DataFrame]:
-    """Call the cached ``fetch`` (or its uncached function), logging a cache hit."""
+def _batch_lookup(run: BatchRun, args: tuple) -> tuple[pd.DataFrame, ...] | None:
+    """The stored tables of a batch window, or None; marks the batch as most recently used."""
+    with _batch_lock:
+        run.used.add(args)
+        windows = _batch_results.get(run.key)
+        if windows is None:
+            return None
+        _batch_results.move_to_end(run.key)
+        return windows.get(args)
+
+
+def _batch_store(run: BatchRun, args: tuple, tables: tuple[pd.DataFrame, ...]) -> None:
+    """Keep the tables of a batch window, dropping the least recently used batch past the limit."""
+    with _batch_lock:
+        _batch_results.setdefault(run.key, {})[args] = tables
+        _batch_results.move_to_end(run.key)
+        while len(_batch_results) > BATCH_CACHE_SIZE:
+            dropped = len(_batch_results.popitem(last=False)[1])
+            logger.info("Dropped %d stored window(s) of an older batch query", dropped)
+
+
+def _cached_call(
+    fetch, args: tuple, *, cache: bool, batch: BatchRun | None = None
+) -> list[pd.DataFrame]:
+    """Call the cached ``fetch`` (or its uncached function), logging a cache hit.
+
+    With ``batch`` the window is read from and kept in the store of that batch query instead of
+    the ``lru_cache`` of ``fetch``: the windows of the :data:`BATCH_CACHE_SIZE` most recent batch
+    queries are kept, however many there are, so a re-run after a failure or interrupt finds all
+    the windows that succeeded.
+    """
     if not cache:
         logger.info("Result cache bypassed (cache=False); running the query")
         return _copies(fetch.__wrapped__(*args))
+    if batch is not None:
+        tables = _batch_lookup(batch, args)
+        if tables is not None:
+            logger.info("Returning cached window (clear_cache() or cache=False for fresh data)")
+            return _copies(tables)
+        tables = fetch.__wrapped__(*args)  # a partial result raises and is not stored
+        _batch_store(batch, args, tables)
+        return _copies(tables)
     _fetch.ran = False
     tables = fetch(*args)
     if not _fetch.ran:
@@ -277,6 +341,7 @@ def _query_sentinel(
     check_retention: bool = True,
     raise_on_partial: bool = False,
     warn_partial: bool = True,
+    batch: BatchRun | None = None,
 ) -> list[pd.DataFrame]:
     """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables.
 
@@ -284,7 +349,8 @@ def _query_sentinel(
     A batch passes ``check_retention=False`` and warns once for its whole range instead, and
     ``warn_partial=False`` to summarise partial windows itself. Every returned table has
     ``attrs["partial"]``. A partial result raises ``PartialResultError`` with ``raise_on_partial``;
-    otherwise it is returned (an empty table stands in if none arrived) and not cached.
+    otherwise it is returned (an empty table stands in if none arrived) and not cached. A batch
+    window passes ``batch`` (see :func:`_cached_call`).
     """
     if check_retention:
         _warn_retention(kql, timespan)
@@ -297,7 +363,8 @@ def _query_sentinel(
         timeout,
     )
     try:
-        return _flag_partial(_cached_call(_sentinel_tables, args, cache=cache), False)
+        tables = _cached_call(_sentinel_tables, args, cache=cache, batch=batch)
+        return _flag_partial(tables, False)
     except _PartialResult as partial:
         # built fresh for this call and never cached, so no copy is needed
         tables = list(partial.tables) or [pd.DataFrame()]
@@ -313,13 +380,18 @@ def _query_sentinel(
         return _flag_partial(tables, True)
 
 
-def _query_adx(kql: str, timeout: int, *, cache: bool = True) -> list[pd.DataFrame]:
-    """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables."""
+def _query_adx(
+    kql: str, timeout: int, *, cache: bool = True, batch: BatchRun | None = None
+) -> list[pd.DataFrame]:
+    """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables.
+
+    A batch window passes ``batch`` (see :func:`_cached_call`).
+    """
     tenant_id = resolve_tenant_id()
     cluster_uri = resolve_cluster_uri()
     database = validate_database(require(None, DATABASE_VAR, "database"))
     args = (cluster_uri, tenant_id, database, kql, timeout)
-    return _flag_partial(_cached_call(_adx_tables, args, cache=cache), False)
+    return _flag_partial(_cached_call(_adx_tables, args, cache=cache, batch=batch), False)
 
 
 def clear_cache() -> None:
@@ -336,6 +408,9 @@ def clear_cache() -> None:
     results = _sentinel_tables.cache_info().currsize + _adx_tables.cache_info().currsize
     _sentinel_tables.cache_clear()
     _adx_tables.cache_clear()
+    with _batch_lock:
+        results += sum(len(windows) for windows in _batch_results.values())
+        _batch_results.clear()
     _clear_clients()
     clear_credential_cache()
     clear_policy_cache()
@@ -433,7 +508,8 @@ def exec_query(
     re-evaluated on a hit, so the data is from when the query first ran. Failures and partial
     results are not cached, and a copy is returned each time. On a hit no request is sent, so
     the cost guard check is not re-run and nothing is billed. Use ``cache=False`` or
-    ``clear_cache()`` for fresh data.
+    ``clear_cache()`` for fresh data. The windows of ``exec_batch_query`` are cached apart from
+    these 32 (see there).
 
     Args:
         kql: The KQL query, a non-blank string. With ``target="adx"``, text starting with ``.``

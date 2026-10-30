@@ -40,6 +40,7 @@ from ._log import (
 )
 from ._query import (
     DEFAULT_TIMEOUT,
+    BatchRun,
     Target,
     _check_bool,
     _check_kql,
@@ -324,6 +325,7 @@ def _attempt_window(
     cache: bool,
     stop: threading.Event,
     raise_on_partial: bool = False,
+    run: BatchRun | None = None,
 ) -> pd.DataFrame:
     """Run one window, retrying transient failures; wrap a failure with the window's name.
 
@@ -339,6 +341,8 @@ def _attempt_window(
         raise_on_partial: Fail the window with ``PartialResultError`` (not retried) if Sentinel
             returns only a partial result; otherwise the partial window is returned, recorded in
             ``attrs["partial_windows"]``.
+        run: The batch run; with ``cache`` the window is served from and kept in its store
+            rather than the result cache of ``exec_query``.
 
     Raises:
         PartialResultError: ``raise_on_partial`` and the window's result was partial.
@@ -352,6 +356,7 @@ def _attempt_window(
     w_start, w_end = bounds
     name = f"Batch window {label} ({w_start} to {w_end})"
     prefix = _prefix(bounds)
+    batch = run if cache else None
     retries = 0
     while True:
         attempt_start = _clock()
@@ -365,9 +370,10 @@ def _attempt_window(
                     check_retention=False,
                     raise_on_partial=raise_on_partial,
                     warn_partial=False,
+                    batch=batch,
                 )
             else:
-                tables = _query_adx(prefix + kql, timeout, cache=cache)
+                tables = _query_adx(prefix + kql, timeout, cache=cache, batch=batch)
             break
         except SecurityNotebookToolsError as exc:
             elapsed = _clock() - attempt_start
@@ -467,6 +473,7 @@ def _run_or_split(
     stop: threading.Event,
     min_interval: timedelta | None,
     raise_on_partial: bool = False,
+    run: BatchRun | None = None,
 ) -> pd.DataFrame:
     """Run a window; if it times out and ``min_interval`` is set, run its two halves instead.
 
@@ -507,7 +514,7 @@ def _run_or_split(
     else:
         try:
             return _attempt_window(
-                label, bounds, kql, target, timeout, cache, stop, raise_on_partial
+                label, bounds, kql, target, timeout, cache, stop, raise_on_partial, run
             )
         except _WindowTimeout as exc:
             if key is not None:
@@ -563,6 +570,7 @@ def _run_or_split(
                 stop,
                 min_interval,
                 raise_on_partial,
+                run,
             )
         )
     return _merge(parts)
@@ -579,6 +587,7 @@ def _run_window(
     stop: threading.Event,
     min_interval: timedelta | None = None,
     raise_on_partial: bool = False,
+    run: BatchRun | None = None,
 ) -> pd.DataFrame:
     """Run window ``index`` of ``total``: retry transient failures, split on a timeout.
 
@@ -594,6 +603,7 @@ def _run_window(
         stop,
         min_interval,
         raise_on_partial,
+        run,
     )
 
 
@@ -762,9 +772,15 @@ def exec_batch_query(
     used are 5 minutes old, and the next window is checked again, so a table moved to a billed
     plan during a long batch is noticed.
 
-    Each window is cached separately (see ``exec_query``), so re-running a batch reuses the
-    windows that already succeeded: all of them for the same absolute ``start`` and ``end``, and
-    for a period relative to now every window except the first and last, which move with now.
+    Each window is cached separately (see ``exec_query``), so re-running a batch after a failure
+    or an interrupt reuses the windows that already succeeded and runs only the rest: all of them
+    for the same absolute ``start`` and ``end``, and for a period relative to now every window
+    except the first and last, which move with now. Windows are not counted against the 32
+    queries of ``exec_query``: every window of the 4 most recently run batch queries (same
+    target, connection, KQL and ``timeout``) is kept, however many there are, and the least
+    recently run batch query is dropped first. Once a batch query succeeds, only the windows of
+    that run are kept for it (not those of other ranges it was run over before). Partial windows
+    are not kept.
 
     By default the windows run one after another, oldest first. With ``max_workers`` above 1 the
     first window still runs alone (so a bad query or configuration fails once, and the client,
@@ -859,7 +875,7 @@ def exec_batch_query(
             ``"count"``, ``"first"``, ``"last"`` ...) or a callable. Passing it without
             ``agg_column`` is an error.
         cache: If true (default), each window may be served from, and kept in, the in-memory
-            result cache. Pass false to run every window.
+            result cache (see above). Pass false to run every window and keep none.
         raise_on_partial: Sentinel only. If true, a window whose result is partial (the service
             returned some data and an error) fails the batch with ``PartialResultError`` naming
             the window; it is not retried or split. Default false: the partial data is kept, the
@@ -1017,6 +1033,7 @@ def exec_batch_query(
         total = len(windows)
 
         stop = threading.Event()
+        run = BatchRun(target, kql, timeout) if cache else None
         jobs = [
             partial(
                 _run_window,
@@ -1030,6 +1047,7 @@ def exec_batch_query(
                 stop,
                 min_interval,
                 raise_on_partial,
+                run,
             )
             for index, bounds in enumerate(windows, start=1)
         ]
@@ -1051,6 +1069,8 @@ def exec_batch_query(
                 results += _run_parallel(jobs[1:], max_workers, stop)
             else:
                 results += [job() for job in jobs[1:]]
+        if run is not None:
+            run.keep_only_used()  # a failed run keeps every window for the re-run
         merged = _merge(results)
         partial_windows = list(merged.attrs[PARTIAL_WINDOWS_ATTR])
         logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))

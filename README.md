@@ -228,10 +228,12 @@ data from when the query first ran. Failures and partial results are not cached,
 gets its own copy (nested `dynamic` dicts and lists included), so changing a returned frame never
 alters a later cached result. The cache is keyed on tenant, workspace and query, not on the
 signed-in `az` account: after `az login` as a different account, or a change to your permissions,
-call `clear_cache()`. `exec_batch_query` caches each window separately, so a re-run reuses the
-windows that already succeeded: all of them for the same absolute `start` and `end`, and for a
-range relative to now (`start` a `timedelta`, no `end`) every window but the first and last,
-because those windows are cut on a fixed `interval` grid (midnight UTC for the default 1 day).
+call `clear_cache()`. `exec_batch_query` caches each window separately, so a re-run after a
+failure or an interrupt reuses the windows that already succeeded and runs only the rest: all of
+them for the same absolute `start` and `end`, and for a range relative to now (`start` a
+`timedelta`, no `end`) every window but the first and last, because those windows are cut on a
+fixed `interval` grid (midnight UTC for the default 1 day). Batch windows do not count against
+the 32: every window of the 4 most recently run batch queries is kept, however many there are.
 
 ```python
 df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call (`--no-cache` in %%kql)
