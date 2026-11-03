@@ -658,7 +658,11 @@ def _hide(fig: Any, chart: str, keys: list[str]) -> None:
 
 
 def render_dataframe(
-    df: pd.DataFrame, *, hidden: str | Iterable[str] | None = None, debug: bool = False
+    df: pd.DataFrame,
+    *,
+    title: str | None = None,
+    hidden: str | Iterable[str] | None = None,
+    debug: bool = False,
 ) -> Any:
     """Draw the chart a query asked for with ``| render <charttype>``.
 
@@ -701,6 +705,9 @@ def render_dataframe(
     ``fig.update_layout(template="plotly")`` switches it back to light. The legend sits underneath
     the chart whichever template is used; ``fig.update_layout(legend=...)`` moves it.
 
+    ``title`` sets the chart's title, replacing any ``title`` in the render properties, and is
+    escaped like them. ``title=""`` draws no title.
+
     ``hidden`` starts legend entries switched off: they are left out of the chart but stay in the
     legend, and clicking one draws it. Name an entry exactly as the legend shows it: a y column
     (``Count``), a series value (``fail``), both when there are several y columns (``fail: Count``),
@@ -714,6 +721,7 @@ def render_dataframe(
 
     Args:
         df: A result with ``attrs["visualization"]``. It is not modified.
+        title: The chart's title. Default none, which keeps the render's ``title``, if any.
         hidden: A legend entry, or a list of them, to start switched off. Default none.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs. Default false. The lines are printed unredacted
@@ -725,8 +733,8 @@ def render_dataframe(
         cell; call ``.show()`` elsewhere.
 
     Raises:
-        ValueError: ``df`` is not a DataFrame, ``hidden`` is not a string or an iterable of
-            strings, or ``debug`` is not a bool.
+        ValueError: ``df`` is not a DataFrame, ``title`` is not a string, ``hidden`` is not a
+            string or an iterable of strings, or ``debug`` is not a bool.
         ConfigurationError: ``df`` has no ``attrs["visualization"]``, its chart type is not
             supported, a column the render names is not in ``df``, no column can be plotted, or
             Plotly is not installed (the message gives the install command).
@@ -737,6 +745,7 @@ def render_dataframe(
         ...     "SigninLogs | summarize n = count() by bin(TimeGenerated, 1h) | render timechart"
         ... )
         >>> render_dataframe(df)
+        >>> render_dataframe(df, title="Sign-ins per hour")
         >>> render_dataframe(df, hidden="n")  # starts switched off; click "n" in the legend
     """
     shape = getattr(df, "shape", None)
@@ -752,8 +761,12 @@ def render_dataframe(
             raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
         if not isinstance(debug, bool):
             raise ValueError(f"debug must be a bool, got {debug!r}.")
+        if title is not None and not isinstance(title, str):
+            raise ValueError(f"title must be a string, got {type(title).__name__}.")
         keys = _hidden_keys(hidden)
         spec = check_spec(df)
+        if title is not None:
+            spec = {**spec, "title": title}
         chart = spec[VISUALIZATION_ATTR].lower()
         call.update(chart=chart)
         go = _load_plotly()

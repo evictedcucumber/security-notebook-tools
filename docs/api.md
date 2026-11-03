@@ -558,6 +558,7 @@ format_dataframe(df, max_rows=None)  # every row
 render_dataframe(
     df: pandas.DataFrame,
     *,
+    title: str | None = None,
     hidden: str | Iterable[str] | None = None,
     debug: bool = False,
 ) -> plotly.graph_objects.Figure
@@ -600,6 +601,9 @@ needed; `log` axes need positive limits), `xmin` and `xmax` (numeric x, both nee
 `treemap`, `sankey`, `plotly` ...) raises `ConfigurationError`; figure JSON found in the data is
 never interpreted.
 
+`title` sets the chart's title, replacing any `title` in the render properties, and is escaped
+like them. `title=""` draws no title.
+
 `hidden` starts legend entries switched off: they are left out of the chart but stay in the
 legend, and clicking one draws it. Name an entry exactly as the legend shows it: a y column
 (`Count`), a series value (`fail`), both when there are several y columns (`fail: Count`), or a
@@ -619,11 +623,13 @@ whichever template is used; `fig.update_layout(legend=...)` moves it.
 | Name | Description |
 | --- | --- |
 | `df` | A result with `attrs["visualization"]`, usually from `exec_query`. |
+| `title` | The chart's title. Default none, which keeps the render's `title`, if any. |
 | `hidden` | A legend entry, or a list of them, to start switched off. Default none. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted. See [Debug output](#debug-output-in-the-cell). |
 
-`hidden` and `debug` are keyword-only. `ValueError` is raised if `df` is not a DataFrame, `hidden`
-is not a string or an iterable of strings, or `debug` is not a bool. `ConfigurationError` is raised
+`title`, `hidden` and `debug` are keyword-only. `ValueError` is raised if `df` is not a DataFrame,
+`title` is not a string, `hidden` is not a string or an iterable of strings, or `debug` is not a
+bool. `ConfigurationError` is raised
 if `df` has no `attrs["visualization"]`, its chart type is
 not supported, a column named by the render is not in `df`, no numeric column can be plotted, or
 Plotly is not installed (the message gives the install command), or the chart would have more than
@@ -634,6 +640,7 @@ from security_notebook_tools import exec_query, render_dataframe
 
 df = exec_query("SigninLogs | summarize n = count() by bin(TimeGenerated, 1h) | render timechart")
 render_dataframe(df)
+render_dataframe(df, title="Sign-ins per hour")
 render_dataframe(df, hidden="n")  # starts switched off; click "n" in the legend to draw it
 ```
 

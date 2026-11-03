@@ -374,6 +374,9 @@ Text from the data (category values, column names, titles) is HTML-escaped befor
 so markup in telemetry is shown as text. A batch result (`exec_batch_query`) keeps the spec when
 every window agrees on it.
 
+To set the chart's title from Python, replacing any `title` in the render, pass
+`render_dataframe(df, title="Sign-ins per hour")`.
+
 To start a legend entry switched off, name it in `hidden`, exactly as the legend shows it:
 `render_dataframe(df, hidden="fail")` or `hidden=["fail", "ok"]`. It stays in the legend, and
 clicking it draws it. A name the legend does not have warns and is otherwise ignored.

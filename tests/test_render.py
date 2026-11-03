@@ -1205,3 +1205,38 @@ def test_hidden_on_a_chart_with_no_legend_warns(chart):
 def test_hidden_of_the_wrong_type_is_rejected(bad):
     with pytest.raises(ValueError, match="hidden must be"):
         render_dataframe(_frame(_spec("timechart")), hidden=bad)
+
+
+# --- title argument -----------------------------------------------------------------------------
+
+TITLE_DATA = {"Result": ["ok", "fail"], "Count": [1, 2]}
+
+
+@pytest.mark.parametrize("chart", ["columnchart", "piechart", "card", "table"])
+def test_title_is_used_when_the_render_has_none(chart):
+    fig = render_dataframe(_frame(_spec(chart), TITLE_DATA), title="Mine")
+    assert fig.layout.title.text == "Mine"
+
+
+@pytest.mark.parametrize("chart", ["columnchart", "piechart", "card", "table"])
+def test_title_replaces_the_render_title_and_leaves_the_frame_alone(chart):
+    df = _frame(_spec(chart, title="Query"), TITLE_DATA)
+    assert render_dataframe(df, title="Mine").layout.title.text == "Mine"
+    assert df.attrs["visualization"]["title"] == "Query"
+    assert render_dataframe(df).layout.title.text == "Query"
+
+
+def test_empty_title_removes_the_render_title():
+    fig = render_dataframe(_frame(_spec("columnchart", title="Query"), TITLE_DATA), title="")
+    assert fig.layout.title.text is None
+
+
+def test_title_is_escaped():
+    fig = render_dataframe(_frame(_spec("columnchart"), TITLE_DATA), title="<b>x</b>")
+    assert fig.layout.title.text == "&lt;b&gt;x&lt;/b&gt;"
+
+
+@pytest.mark.parametrize("bad", [1, True, ["x"], b"x"])
+def test_title_of_the_wrong_type_is_rejected(bad):
+    with pytest.raises(ValueError, match="title must be"):
+        render_dataframe(_frame(_spec("columnchart"), TITLE_DATA), title=bad)

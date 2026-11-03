@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `render_dataframe(df, title=...)` sets the chart's title, replacing any `title` in the render
+  properties. `title=""` draws no title.
+
 ## 7.5.0 - 2026-11-03
 
 ### Changed
