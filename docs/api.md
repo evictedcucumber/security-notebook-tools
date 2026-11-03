@@ -538,6 +538,7 @@ format_dataframe(df, max_rows=None)  # every row
 render_dataframe(
     df: pandas.DataFrame,
     *,
+    hidden: str | Iterable[str] | None = None,
     debug: bool = False,
 ) -> plotly.graph_objects.Figure
 ```
@@ -579,6 +580,13 @@ needed; `log` axes need positive limits), `xmin` and `xmax` (numeric x, both nee
 `treemap`, `sankey`, `plotly` ...) raises `ConfigurationError`; figure JSON found in the data is
 never interpreted.
 
+`hidden` starts legend entries switched off: they are left out of the chart but stay in the
+legend, and clicking one draws it. Name an entry exactly as the legend shows it: a y column
+(`Count`), a series value (`fail`), both when there are several y columns (`fail: Count`), or a
+slice of a `piechart`. The legend is always shown when an entry is hidden, even with
+`legend=hidden`. A name the legend does not have warns and is otherwise ignored, because a series
+value can be absent from one run of a query. `card` and `table` have no legend.
+
 Every string from the data, the column names or the render properties is HTML-escaped (`&`, `<`,
 `>`) before Plotly sees it. Plotly would otherwise interpret `<a href>`, `<b>`, `<br>` and
 `<span style>` in titles, tick labels, legend entries and hover text.
@@ -590,10 +598,12 @@ from Plotly's own `"plotly"`, that template is used instead. For a light chart, 
 | Name | Description |
 | --- | --- |
 | `df` | A result with `attrs["visualization"]`, usually from `exec_query`. |
+| `hidden` | A legend entry, or a list of them, to start switched off. Default none. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted. See [Debug output](#debug-output-in-the-cell). |
 
-`debug` is keyword-only. `ValueError` is raised if `df` is not a DataFrame or `debug` is not a
-bool. `ConfigurationError` is raised if `df` has no `attrs["visualization"]`, its chart type is
+`hidden` and `debug` are keyword-only. `ValueError` is raised if `df` is not a DataFrame, `hidden`
+is not a string or an iterable of strings, or `debug` is not a bool. `ConfigurationError` is raised
+if `df` has no `attrs["visualization"]`, its chart type is
 not supported, a column named by the render is not in `df`, no numeric column can be plotted, or
 Plotly is not installed (the message gives the install command), or the chart would have more than
 100 traces.
@@ -603,6 +613,7 @@ from security_notebook_tools import exec_query, render_dataframe
 
 df = exec_query("SigninLogs | summarize n = count() by bin(TimeGenerated, 1h) | render timechart")
 render_dataframe(df)
+render_dataframe(df, hidden="n")  # starts switched off; click "n" in the legend to draw it
 ```
 
 ## pivot_dataframe

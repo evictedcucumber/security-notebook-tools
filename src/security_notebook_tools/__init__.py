@@ -25,7 +25,8 @@ Public API:
 * ``merge_dataframe``: group a DataFrame (or several) by key columns and aggregate columns.
 * ``pivot_dataframe``: pivot a result into one row per key and one column per value of another.
 * ``render_dataframe``: draw the chart a query asked for with ``| render <charttype>`` (Plotly,
-  optional: ``pip install "security-notebook-tools[charts]"``).
+  optional: ``pip install "security-notebook-tools[charts]"``); ``hidden=`` starts legend entries
+  switched off, to be clicked on.
 * ``clear_cache``: forget cached query results (and clients, credentials and table plans).
 
 In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cell magic that

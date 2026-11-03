@@ -1097,3 +1097,97 @@ def test_a_template_the_user_chose_is_kept(monkeypatch):
     monkeypatch.setattr(pio.templates, "default", "seaborn")
     fig = render_dataframe(_frame(_spec("timechart")))
     assert fig.layout.template == pio.templates["seaborn"]
+
+
+# --- hidden legend entries ----------------------------------------------------------------------
+
+
+def _visibility(fig):
+    return {trace.name: trace.visible for trace in fig.data}
+
+
+@pytest.mark.parametrize("chart", ["timechart", "columnchart", "barchart", "scatterchart"])
+def test_hidden_series_value_starts_switched_off(chart):
+    data = {"X": [1, 2, 1, 2], "Result": ["ok", "ok", "fail", "fail"], "Count": [1, 2, 3, 4]}
+    fig = render_dataframe(_frame(_spec(chart), data), hidden="fail")
+    assert _visibility(fig) == {"ok": None, "fail": "legendonly"}
+    assert fig.layout.showlegend is True
+
+
+def test_hidden_takes_a_list_and_any_iterable():
+    df = _frame(_spec("timechart", series=["Result"], ycolumns=["Count", "Other"]))
+    fig = render_dataframe(df, hidden=["fail: Count", "ok: Other"])
+    assert _visibility(fig) == {
+        "ok: Count": None,
+        "ok: Other": "legendonly",
+        "fail: Count": "legendonly",
+        "fail: Other": None,
+    }
+    fig = render_dataframe(df, hidden=(k for k in ["ok: Count"]))
+    assert _visibility(fig)["ok: Count"] == "legendonly"
+
+
+def test_no_hidden_changes_nothing():
+    fig = render_dataframe(_frame(_spec("timechart")))
+    assert set(_visibility(fig).values()) == {None}
+    assert fig.layout.showlegend is None
+
+
+def test_hidden_only_trace_keeps_a_legend_to_click():
+    # Plotly leaves the legend out of a one-trace chart, which would strand the hidden trace.
+    df = _frame(_spec("timechart", ycolumns=["Count"]), {"X": [1, 2], "Count": [1, 2]})
+    fig = render_dataframe(df, hidden="Count")
+    assert _visibility(fig) == {"Count": "legendonly"}
+    assert fig.layout.showlegend is True
+
+
+def test_hidden_overrides_legend_hidden():
+    fig = df = _frame(_spec("timechart", ycolumns=["Count"], legend="hidden"))
+    fig = render_dataframe(df, hidden="fail")
+    assert fig.layout.showlegend is True
+
+
+def test_hidden_matches_the_escaped_legend_text():
+    data = {"X": [1, 2], "Result": ["<b>$x", "ok"], "Count": [1, 2]}
+    fig = render_dataframe(_frame(_spec("columnchart"), data), hidden="<b>$x")
+    assert _visibility(fig) == {"&lt;b&gt;&#36;x": "legendonly", "ok": None}
+
+
+def test_hidden_anomaly_markers():
+    data = {"X": [1, 2], "Count": [1, 2], "Flag": [0, 1]}
+    spec = _spec("anomalychart", ycolumns=["Count"], anomalycolumns=["Flag"])
+    fig = render_dataframe(_frame(spec, data), hidden="Flag (anomaly)")
+    assert _visibility(fig) == {"Count": None, "Flag (anomaly)": "legendonly"}
+
+
+def test_hidden_pie_slice():
+    data = {"App": ["a", "<b>"], "Count": [1, 2]}
+    fig = render_dataframe(_frame(_spec("piechart"), data), hidden=["<b>"])
+    assert fig.layout.hiddenlabels == ("&lt;b&gt;",)
+    assert fig.layout.showlegend is True
+
+
+def test_hidden_entry_not_in_the_legend_warns_and_still_draws():
+    df = _frame(_spec("timechart", ycolumns=["Count"]))
+    with pytest.warns(UserWarning, match="legend does not have") as caught:
+        fig = render_dataframe(df, hidden=["fail", "nope"])
+    assert "['nope']" in str(caught[0].message)
+    assert _visibility(fig)["fail"] == "legendonly"
+
+
+def test_hidden_with_no_match_leaves_the_legend_alone():
+    with pytest.warns(UserWarning, match="legend does not have"):
+        fig = render_dataframe(_frame(_spec("timechart", legend="hidden")), hidden="nope")
+    assert fig.layout.showlegend is False
+
+
+@pytest.mark.parametrize("chart", ["card", "table"])
+def test_hidden_on_a_chart_with_no_legend_warns(chart):
+    with pytest.warns(UserWarning, match="legend does not have"):
+        render_dataframe(_frame(_spec(chart)), hidden="fail")
+
+
+@pytest.mark.parametrize("bad", [1, True, {"fail": 1}, ["fail", 1], b"fail"])
+def test_hidden_of_the_wrong_type_is_rejected(bad):
+    with pytest.raises(ValueError, match="hidden must be"):
+        render_dataframe(_frame(_spec("timechart")), hidden=bad)

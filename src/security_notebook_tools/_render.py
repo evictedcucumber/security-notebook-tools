@@ -17,6 +17,8 @@ import html
 import json
 import logging
 import math
+import os
+import warnings
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
@@ -57,6 +59,7 @@ _NUMERIC_KQL = {"int", "int32", "int64", "long", "real", "double", "decimal"}
 _STACK_KINDS = {"stacked", "stacked100"}
 MAX_TRACES = 100  # more series than this is unreadable and slow to draw: refuse, do not truncate
 DARK_TEMPLATE = "plotly_dark"
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class PlotlyMissingError(ConfigurationError):
@@ -567,7 +570,51 @@ def _style(fig: Any, spec: dict[str, Any], plan: _Plan, chart: str) -> None:
     fig.update_layout(**layout)
 
 
-def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
+def _hidden_keys(hidden: Any) -> list[str]:
+    """``hidden`` as a list of legend entries, or raise ``ValueError``."""
+    if hidden is None:
+        return []
+    if isinstance(hidden, str):
+        return [hidden]
+    if hasattr(hidden, "__iter__") and not isinstance(hidden, dict):
+        keys = list(hidden)
+        if all(isinstance(key, str) for key in keys):
+            return keys
+    raise ValueError(f"hidden must be a legend entry or a list of them, got {hidden!r}.")
+
+
+def _hide(fig: Any, chart: str, keys: list[str]) -> None:
+    """Start the legend entries ``keys`` switched off, so that clicking one draws it.
+
+    Plotly leaves the legend out of a chart with one trace, and ``legend=hidden`` removes it, but a
+    switched-off entry needs it to be clicked back on, so the legend is turned on here. A key that
+    is not in the legend warns: a series value can be absent from one run of a query.
+    """
+    if chart == "piechart":
+        labels = fig.data[0].labels
+        entries = [] if labels is None else list(labels)
+        fig.update_layout(hiddenlabels=[_esc(key) for key in keys if _esc(key) in entries])
+    elif chart in ("card", "table"):
+        entries = []  # no legend to click
+    else:
+        entries = [trace.name for trace in fig.data]
+        escaped = {_esc(key) for key in keys}
+        for trace in fig.data:
+            if trace.name in escaped:
+                trace.visible = "legendonly"
+    if any(_esc(key) in entries for key in keys):
+        fig.update_layout(showlegend=True)
+    if missing := [key for key in keys if _esc(key) not in entries]:
+        warnings.warn(
+            f"hidden names {[key[:80] for key in missing]}, which the chart's legend does not "
+            f"have; it has {[str(entry)[:80] for entry in entries[:20]]}.",
+            skip_file_prefixes=(_PACKAGE_DIR,),
+        )
+
+
+def render_dataframe(
+    df: pd.DataFrame, *, hidden: str | Iterable[str] | None = None, debug: bool = False
+) -> Any:
     """Draw the chart a query asked for with ``| render <charttype>``.
 
     :func:`exec_query` and :func:`exec_batch_query` store the render operator's chart type and
@@ -608,12 +655,20 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
     changed from Plotly's own ``"plotly"``, that template is used instead; for one chart,
     ``fig.update_layout(template="plotly")`` switches it back to light.
 
+    ``hidden`` starts legend entries switched off: they are left out of the chart but stay in the
+    legend, and clicking one draws it. Name an entry exactly as the legend shows it: a y column
+    (``Count``), a series value (``fail``), both when there are several y columns (``fail: Count``),
+    or a slice of a ``piechart``. The legend is always shown when an entry is hidden, even with
+    ``legend=hidden``. A name the legend does not have warns and is otherwise ignored, because a
+    series value can be absent from one run of a query. ``card`` and ``table`` have no legend.
+
     Every string that comes from the data, the column names or the render properties is
     HTML-escaped before Plotly sees it, so Plotly shows ``<a href=...>`` and ``<b>`` as text
     rather than markup.
 
     Args:
         df: A result with ``attrs["visualization"]``. It is not modified.
+        hidden: A legend entry, or a list of them, to start switched off. Default none.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs. Default false. The lines are printed unredacted
             (debug output is not written to the file; be careful when sharing a notebook saved
@@ -624,7 +679,8 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
         cell; call ``.show()`` elsewhere.
 
     Raises:
-        ValueError: ``df`` is not a DataFrame or ``debug`` is not a bool.
+        ValueError: ``df`` is not a DataFrame, ``hidden`` is not a string or an iterable of
+            strings, or ``debug`` is not a bool.
         ConfigurationError: ``df`` has no ``attrs["visualization"]``, its chart type is not
             supported, a column the render names is not in ``df``, no column can be plotted, or
             Plotly is not installed (the message gives the install command).
@@ -635,6 +691,7 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
         ...     "SigninLogs | summarize n = count() by bin(TimeGenerated, 1h) | render timechart"
         ... )
         >>> render_dataframe(df)
+        >>> render_dataframe(df, hidden="n")  # starts switched off; click "n" in the legend
     """
     shape = getattr(df, "shape", None)
     with public_call(
@@ -649,6 +706,7 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
             raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
         if not isinstance(debug, bool):
             raise ValueError(f"debug must be a bool, got {debug!r}.")
+        keys = _hidden_keys(hidden)
         spec = check_spec(df)
         chart = spec[VISUALIZATION_ATTR].lower()
         call.update(chart=chart)
@@ -681,5 +739,7 @@ def render_dataframe(df: pd.DataFrame, *, debug: bool = False) -> Any:
             if template := _template():
                 fig.update_layout(template=template)
             dep["traces"] = len(fig.data)
+        if keys:
+            _hide(fig, chart, keys)
         call.update(traces=len(fig.data))
         return fig

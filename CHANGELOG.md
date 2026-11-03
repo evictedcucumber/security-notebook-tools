@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `render_dataframe(df, hidden=...)` starts the named legend entries switched off. They stay in the
+  legend, and clicking one draws it. Works for every chart with a legend, including slices of a
+  `piechart`. A name the legend does not have warns and is otherwise ignored.
+
 ## 7.2.1 - 2026-10-30
 
 ### Fixed
