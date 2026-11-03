@@ -98,8 +98,8 @@ the Azure CLI.
 | `SENTINEL_SUBSCRIPTION_ID` | Azure subscription ID (GUID) of the workspace; the cost guard builds the workspace's ARM resource ID from this and the next two | For `target="sentinel"` (the default) |
 | `SENTINEL_RESOURCE_GROUP` | Resource group name of the workspace | For `target="sentinel"` (the default) |
 | `SENTINEL_WORKSPACE_NAME` | Log Analytics workspace name (not the ID); must be the same workspace as `SENTINEL_WORKSPACE_ID` | For `target="sentinel"` (the default) |
-| `ADX_CLUSTER_URI` | ADX cluster URI | For `target="adx"` |
-| `ADX_DATABASE` | ADX database | For `target="adx"` |
+| `ADX_CLUSTER_URI` | ADX cluster URI, or the URL of one Sentinel workspace (see [ADX features on Sentinel data](#adx-features-on-sentinel-data)) | For `target="adx"` |
+| `ADX_DATABASE` | ADX database; not needed on a workspace URL | For `target="adx"` on a cluster |
 
 Env vars are read on every call, so changing `os.environ` in a cell takes effect on the next
 query. Clients are created on first use and reused. Every value can be looked up with the Azure
@@ -132,6 +132,45 @@ False otherwise, also on ADX); pass `raise_on_partial=True` to raise `PartialRes
 that starts before a table's Analytics retention (for example 120 days on a table that keeps 90):
 the older rows are in long-term retention, which these queries cannot read.
 Full reference: [docs/api.md](docs/api.md), or `help(exec_query)` in a notebook.
+
+### ADX features on Sentinel data
+
+Some KQL is documented only for Azure Data Explorer, for example `render anomalychart`. To use it
+on Sentinel data, point `ADX_CLUSTER_URI` at the URL of one workspace and query with
+`target="adx"`:
+
+```sh
+ADX_CLUSTER_URI=https://adx.monitor.azure.com$(az monitor log-analytics workspace show -g <rg> -n <name> --query id -o tsv)
+# https://adx.monitor.azure.com/subscriptions/<GUID>/resourcegroups/<group>/providers/microsoft.operationalinsights/workspaces/<name>
+```
+
+```python
+df = exec_query(
+    "SigninLogs | where TimeGenerated > ago(7d) | make-series n=count() on TimeGenerated step 1h"
+    " | extend (a, s, b) = series_decompose_anomalies(n)"
+    " | render anomalychart with (anomalycolumns=a)",
+    target="adx",
+)
+```
+
+- `https://ade.loganalytics.io` works in place of `https://adx.monitor.azure.com`. The path is
+  matched case-insensitively and one trailing `/` is dropped.
+- `ADX_DATABASE` is not needed: the database is the workspace name from the URL. If it is set, it
+  must name that workspace (case-insensitive), otherwise `ConfigurationError`. Unset a leftover
+  value from a real cluster. The `SENTINEL_*` variables are not used on this route;
+  `AZURE_TENANT_ID` applies as usual.
+- Every query passes the same [cost guard](#cost-guard) as `target="sentinel"` (Analytics-plan
+  tables only), with the same ARM permissions (`tables/read` and `savedSearches/read`, for
+  example Log Analytics Reader), and nothing is sent if the plans cannot be read. The usual ADX
+  rejections and `request_readonly` apply on top.
+- `timespan` is still rejected, so filter on time in the KQL. There is no 1-day default, and the
+  partial-result and retention-warning behaviour of `target="sentinel"` does not apply.
+- A `.show` command may be plain words only (no pipe, second statement or new line). Microsoft
+  documents only `.show functions`, `.show function <name>` and `.show database <name> schema as
+  json` on the proxy, so others such as `.show tables` may be refused by the service.
+- Rejected: a proxy host without a workspace path, a whole subscription or resource group, other
+  proxy hosts (`ade.applicationinsights.io`, `adx.loganalytics.azure.com` ...), the sovereign-cloud
+  proxies (`adx.monitor.azure.us`, `.cn`) and the Sentinel data lake.
 
 ### Time range (Sentinel)
 
@@ -468,12 +507,17 @@ notebook saved with debug output, because notebooks are saved with their outputs
   server-enforced `request_readonly` option, which callers cannot turn off.
 - **Sentinel** queries use the Log Analytics query API, which is read-only, and pass the cost
   guard described below.
-- **ADX cannot reach the Sentinel data lake or Log Analytics workspaces.** The cluster URI host
-  must be a Kusto cluster domain (`*.kusto.windows.net`, `*.kusto.fabric.microsoft.com`,
+- **ADX cannot reach the Sentinel data lake, and reaches Log Analytics only through the cost
+  guard.** The cluster URI host must be a Kusto cluster domain (`*.kusto.windows.net`,
+  `*.kusto.fabric.microsoft.com`,
   `*.kusto.azuresynapse.net`, the US government, China and other sovereign-cloud Kusto domains;
   the list is taken from `azure-kusto-data`'s trusted endpoints). The Sentinel data lake
   (`*.securityplatform.microsoft.com`) and the Log Analytics / Application Insights / Azure
-  Monitor ADX proxy (`ade.loganalytics.io`, `ade.applicationinsights.io`, `adx.*`) are rejected.
+  Monitor ADX proxy (`ade.loganalytics.io`, `ade.applicationinsights.io`, `adx.*`) are rejected,
+  with one exception: the URL of a single workspace on `adx.monitor.azure.com` or
+  `ade.loganalytics.io` (see [ADX features on Sentinel data](#adx-features-on-sentinel-data)).
+  Every query on it passes the cost guard, which reads plans from `management.azure.com`, so
+  sovereign-cloud proxies and URLs for a whole subscription or resource group stay rejected.
   ADX queries and `.show` commands using `cluster()`, `external_table()`, `externaldata`, calls
   through escaped names (`['cluster'](...)`) or data-reading `evaluate` plugins (`sql_request`,
   `http_request`, `python`, `r`, `ai_*` ...) are rejected before any request is made, as is ADX
@@ -484,7 +528,8 @@ notebook saved with debug output, because notebooks are saved with their outputs
 - **Configuration is validated** on every call: workspace ID must be a GUID, workspace resource
   ID a strict `/subscriptions/<GUID>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>`
   ID, tenant ID a GUID or domain name, cluster URI a plain `https://<host>` URI (no user info, port other than 443,
-  path, query or fragment), and the database name non-blank without control characters.
+  path, query or fragment; the one path allowed is that of a workspace URL), and the database name
+  non-blank without control characters.
 - **Logs are off by default.** When enabled, INFO logs include the first 200 characters of each
   KQL query, which may contain sensitive indicators. Treat log output accordingly.
 - **Output is escaped.** `format_dataframe` HTML-escapes cell values, column headers (all
@@ -637,8 +682,9 @@ The exception classes are not part of the public API; read the message. Messages
 - `Invalid $SENTINEL_WORKSPACE_ID: ...` (similarly `$SENTINEL_SUBSCRIPTION_ID`,
   `$SENTINEL_RESOURCE_GROUP`, `$SENTINEL_WORKSPACE_NAME`, `$AZURE_TENANT_ID`, `$ADX_CLUSTER_URI`,
   `$ADX_DATABASE`): the value failed validation; see Security. An `$ADX_CLUSTER_URI` that is
-  not a Kusto cluster domain (the Sentinel data lake and the Log Analytics proxy included) says
-  so.
+  not a Kusto cluster domain (the Sentinel data lake and any Log Analytics proxy URL that is not
+  a single-workspace URL included) says so and shows the workspace form. An `$ADX_DATABASE` that
+  does not name the workspace in a workspace URL is reported the same way.
 - `$SENTINEL_WORKSPACE_ID (...) does not match the workspace behind $SENTINEL_SUBSCRIPTION_ID /
   $SENTINEL_RESOURCE_GROUP / $SENTINEL_WORKSPACE_NAME (customerId ...)`: the ID and the three
   name variables point at different workspaces.

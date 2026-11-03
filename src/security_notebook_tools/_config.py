@@ -50,10 +50,10 @@ _RESOURCE_ID_RE = re.compile(
 )
 # Kusto cluster domains, taken from the trusted-endpoint list of azure-kusto-data
 # (wellKnownKustoEndpoints.json): public, US government, China, and the other sovereign clouds.
-# Only real clusters are accepted. The Sentinel data lake (``api.securityplatform.microsoft.com``)
-# and the Log Analytics / Application Insights / Azure Monitor ADX proxies (``ade.*``,
-# ``adx.*``) are on that list too but reach Basic, Auxiliary and data lake data, which bill per
-# GB scanned, so they are deliberately absent here.
+# The Sentinel data lake (``api.securityplatform.microsoft.com``) and the Log Analytics /
+# Application Insights / Azure Monitor ADX proxies (``ade.*``, ``adx.*``) are on that list too but
+# reach Basic, Auxiliary and data lake data, which bill per GB scanned, so they are deliberately
+# absent here (for the one exception see ``_WORKSPACE_PROXY_HOSTS``).
 _KUSTO_SUFFIXES = (
     ".kusto.windows.net",
     ".kustomfa.windows.net",
@@ -77,6 +77,14 @@ _KUSTO_SUFFIXES = (
     ".kustomfa.sovcloud-api.sg",
 )
 _LAKE_DOMAIN = "securityplatform.microsoft.com"
+# ADX proxy hosts accepted only with the path of one workspace, which lets the cost guard check
+# every query against that workspace's table plans (see ``ADXClient``). Public cloud only, because
+# the guard reads the plans from management.azure.com.
+_WORKSPACE_PROXY_HOSTS = frozenset({"adx.monitor.azure.com", "ade.loganalytics.io"})
+_WORKSPACE_URL_FORM = (
+    "https://adx.monitor.azure.com/subscriptions/<GUID>/resourcegroups/<group>/providers/"
+    "microsoft.operationalinsights/workspaces/<name>"
+)
 
 
 def from_env(value: str | None, var: str) -> str | None:
@@ -219,7 +227,7 @@ def validate_tenant_id(value: str, var: str = TENANT_ID_VAR) -> str:
 
 
 def validate_cluster_uri(value: str, var: str = CLUSTER_URI_VAR) -> str:
-    """Check that ``value`` is a plain ``https://<host>`` ADX cluster URI.
+    """Check that ``value`` is a plain ``https://<host>`` ADX cluster URI or a workspace URL.
 
     The scheme must be exactly ``https`` and the host a fully qualified DNS name. Userinfo,
     ports other than 443, paths (other than ``/``), query strings and fragments are rejected.
@@ -228,6 +236,11 @@ def validate_cluster_uri(value: str, var: str = CLUSTER_URI_VAR) -> str:
     data lake (``*.securityplatform.microsoft.com``) and the Log Analytics / Application
     Insights ADX proxy (``ade.loganalytics.io``, ``ade.applicationinsights.io``, ``adx.*``) are
     rejected, because they reach Basic, Auxiliary and data lake data that bill per GB scanned.
+
+    The one exception is the URL of a single Log Analytics workspace on the public-cloud proxy:
+    ``https://adx.monitor.azure.com`` or ``https://ade.loganalytics.io`` followed by the
+    workspace's resource ID as the path (see :func:`validate_workspace_resource_id`). Queries
+    sent to it pass the cost guard. URLs for a whole subscription or resource group are rejected.
 
     Args:
         value: The candidate URI; surrounding whitespace is ignored.
@@ -263,7 +276,12 @@ def validate_cluster_uri(value: str, var: str = CLUSTER_URI_VAR) -> str:
         )
     if "?" in value or "#" in value:
         raise invalid("query strings and fragments are not allowed")
-    if parts.path not in ("", "/"):
+    has_path = parts.path not in ("", "/")
+    is_workspace = has_path and host in _WORKSPACE_PROXY_HOSTS
+    if is_workspace:
+        if not _RESOURCE_ID_RE.fullmatch(parts.path.removesuffix("/")):
+            raise invalid(f"a workspace URL must look like {_WORKSPACE_URL_FORM}")
+    elif has_path:
         raise invalid("a path is not allowed")
     if ":" in parts.netloc and port != 443:
         raise invalid("only the default port (443) is allowed")
@@ -271,13 +289,14 @@ def validate_cluster_uri(value: str, var: str = CLUSTER_URI_VAR) -> str:
     # azure-kusto-data's trusted-endpoint check, which exempts local addresses.
     if not parts.hostname or "." not in parts.hostname or not _DOMAIN_RE.fullmatch(parts.hostname):
         raise invalid("a fully qualified DNS host name is required")
-    if not host.endswith(_KUSTO_SUFFIXES):
+    if not is_workspace and not host.endswith(_KUSTO_SUFFIXES):
         raise invalid(
             "the host is not a Kusto cluster domain (such as *.kusto.windows.net). The Log "
             "Analytics / Application Insights / Azure Monitor ADX proxy and the Sentinel data "
-            "lake are not allowed because they bill per GB scanned"
+            "lake are not allowed because they bill per GB scanned, except for the URL of one "
+            f"workspace, {_WORKSPACE_URL_FORM}, whose queries pass the cost guard"
         )
-    return value.rstrip("/") if parts.path == "/" else value
+    return value.removesuffix("/")
 
 
 def validate_database(value: str, var: str = DATABASE_VAR) -> str:
@@ -347,3 +366,36 @@ def resolve_database(value: str | None = None) -> str | None:
     """Return the validated database (argument, else ``$ADX_DATABASE``), or None if unset."""
     resolved = from_env(value, DATABASE_VAR)
     return validate_database(resolved) if resolved is not None else None
+
+
+def workspace_of_cluster(cluster_uri: str) -> str | None:
+    """Return the workspace resource ID of a validated cluster URI, or None for a real cluster.
+
+    :func:`validate_cluster_uri` allows a path only on a workspace URL, where it is that ID.
+    """
+    return urlsplit(cluster_uri).path or None
+
+
+def resolve_adx_database(cluster_uri: str, value: str | None = None) -> str:
+    """Return the database to query on a validated cluster URI.
+
+    On a real cluster that is the argument, else ``$ADX_DATABASE``. A workspace URL has exactly
+    one database, the workspace itself, so neither is needed. Naming another one is an error: the
+    cost guard only knows the table plans of the workspace in the URL.
+
+    Raises:
+        ConfigurationError: A real cluster has no database set, the database is invalid, or it
+            is not the workspace in the URL.
+    """
+    resource_id = workspace_of_cluster(cluster_uri)
+    if resource_id is None:
+        return validate_database(require(value, DATABASE_VAR, "database"))
+    workspace = resource_id.rsplit("/", 1)[-1]
+    given = resolve_database(value)
+    if given is not None and given.lower() != workspace.lower():
+        raise ConfigurationError(
+            f"Invalid ${DATABASE_VAR}: {given!r} is not the workspace in ${CLUSTER_URI_VAR} "
+            f"({workspace!r}), the only one whose table plans the cost guard checks. Unset it or "
+            "set it to that name."
+        )
+    return workspace

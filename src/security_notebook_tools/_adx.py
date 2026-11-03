@@ -4,6 +4,10 @@ Handles both KQL queries and management commands (``.show ...``). Access is read
 reach the Sentinel data lake or Log Analytics workspaces (which bill per GB scanned): such cluster
 URIs are rejected on construction and ``cluster()``, ``external_table()``, ``externaldata`` and
 data-reading ``evaluate`` plugins are rejected in queries and commands.
+
+The exception is the URL of one Log Analytics workspace on the ADX proxy, for ADX features such as
+``render anomalychart``. Every query sent to it passes the Sentinel cost guard first
+(:mod:`._tablepolicy`): only Analytics-plan tables of that workspace may be read.
 """
 
 from __future__ import annotations
@@ -29,7 +33,13 @@ from azure.kusto.data.exceptions import (
 from azure.kusto.data.helpers import dataframe_from_result_table
 
 from ._auth import get_credential
-from ._config import DATABASE_VAR, require, resolve_cluster_uri, resolve_database, validate_database
+from ._config import (
+    resolve_adx_database,
+    resolve_cluster_uri,
+    resolve_database,
+    resolve_tenant_id,
+    workspace_of_cluster,
+)
 from ._errors import (
     TRANSIENT_STATUS,
     describe_network_error,
@@ -50,6 +60,7 @@ from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import dependency_call, fingerprint, mask_name
 from ._render import set_visualization
+from ._tablepolicy import batch_checked, check_sentinel_query, get_policy, note_batch_checked
 
 logger = logging.getLogger("security_notebook_tools.adx")
 
@@ -98,6 +109,9 @@ Properties = dict[str, Any] | ClientRequestProperties | None
 
 # Only read-only management commands are allowed; everything else is refused client-side.
 _SHOW_RE = re.compile(r"\.show(\s|$)", re.IGNORECASE)
+# On a workspace URL a command may not carry anything that could run a query after it (a pipe, a
+# second statement, a new line), because the cost guard cannot analyse commands.
+_PLAIN_SHOW_RE = re.compile(r"\.show(?:[ \t]+[A-Za-z0-9_.-]+)+", re.IGNORECASE | re.ASCII)
 # A server-side throttle can arrive as a KustoServiceError rather than a KustoThrottlingError.
 _THROTTLED_RE = re.compile(r"TooManyRequests|throttl", re.IGNORECASE)
 # Kusto's server-enforced read-only request option (the SDK has no constant for it).
@@ -111,21 +125,29 @@ def _status(exc: KustoServiceError) -> int | None:
 
 
 class ADXClient:
-    """Run KQL and ``.show`` management commands against an ADX cluster, strictly read-only."""
+    """Run KQL and ``.show`` commands against an ADX cluster or workspace URL, strictly read-only.
+
+    On a workspace URL every query must also pass the Sentinel cost guard.
+    """
 
     def __init__(
         self,
         cluster_uri: str | None = None,
         database: str | None = None,
         credential: AzureCliCredential | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> None:
         """Create a client.
 
         Args:
-            cluster_uri: Cluster URI (``https`` only). Defaults to ``$ADX_CLUSTER_URI``.
+            cluster_uri: Cluster URI (``https`` only) or workspace URL. Defaults to
+                ``$ADX_CLUSTER_URI``.
             database: Default database. Defaults to ``$ADX_DATABASE``; may be left unset if
-                every call passes a database.
+                every call passes a database, or on a workspace URL.
             credential: Credential to use. Defaults to :func:`get_credential`.
+            tenant_id: Tenant, used for the credential and the policy cache. Defaults to
+                ``$AZURE_TENANT_ID``.
 
         Raises:
             ConfigurationError: No cluster URI was given or set, or the cluster URI or
@@ -133,9 +155,11 @@ class ADXClient:
         """
         self.cluster_uri = resolve_cluster_uri(cluster_uri)
         self.database = resolve_database(database)
+        self.tenant_id = resolve_tenant_id(tenant_id)
+        self.workspace_resource_id = workspace_of_cluster(self.cluster_uri)
         host = mask_name(urlsplit(self.cluster_uri).hostname)
         with unexpected_errors(logger, "ADX client setup"):
-            self.credential = credential or get_credential()
+            self.credential = credential or get_credential(self.tenant_id)
             with dependency_call(logger, "Kusto client creation", host=host):
                 kcsb = KustoConnectionStringBuilder.with_azure_token_credential(
                     self.cluster_uri, self.credential
@@ -147,8 +171,37 @@ class ADXClient:
         logger.debug("ADX cluster_uri=%s database=%s", self.cluster_uri, self.database)
 
     def _db(self, database: str | None) -> str:
-        """Resolve the database: argument, then client default, then ``$ADX_DATABASE``."""
-        return validate_database(require(database or self.database, DATABASE_VAR, "database"))
+        """Resolve the database: argument, then client default, then ``$ADX_DATABASE``.
+
+        On a workspace URL it is always the workspace (see :func:`resolve_adx_database`).
+        """
+        return resolve_adx_database(self.cluster_uri, database or self.database)
+
+    def _check_workspace(self, kind: str, text: str) -> None:
+        """Apply the cost guard to a request for a workspace URL (no-op on a real cluster).
+
+        Inside a batch (see :func:`batch_check`) only the first window to be sent is checked.
+
+        Raises:
+            ConfigurationError: A command is more than plain words after ``.show``, or the cost
+                guard rejects the query.
+            QueryError: The table plans could not be verified, so the query must not be sent.
+        """
+        resource_id = self.workspace_resource_id
+        if resource_id is None:
+            return
+        if kind == "command":
+            if not _PLAIN_SHOW_RE.fullmatch(text.strip()):
+                raise ConfigurationError(
+                    "On a workspace URL a '.show' command can only be plain words (no pipe or "
+                    "second statement): anything else could read tables the cost guard cannot "
+                    "check. The request was not sent."
+                )
+            return
+        if not batch_checked(text, resource_id, None, self.tenant_id):
+            policy = get_policy(resource_id, None, self.credential, self.tenant_id)
+            check_sentinel_query(text, policy)
+            note_batch_checked(text, resource_id, None, self.tenant_id, policy)
 
     @staticmethod
     def _props(properties: Properties) -> ClientRequestProperties | None:
@@ -218,7 +271,8 @@ class ADXClient:
         """Run a ``"query"`` or ``"command"`` and return its primary result tables.
 
         Every request is sent with ``request_readonly`` set, commands must be ``.show``, and
-        text that could reach the data lake or other services is refused before any request.
+        text that could reach the data lake or other services is refused before any request. On
+        a workspace URL the cost guard runs too (see :meth:`_check_workspace`).
         """
         if kind == "command" and not _SHOW_RE.match(text.strip()):
             raise ConfigurationError(
@@ -226,6 +280,7 @@ class ADXClient:
             )
         reject_adx_constructs(text)
         db = self._db(database)
+        self._check_workspace(kind, text)
         props = self._props(properties) or ClientRequestProperties()
         props.set_option(_READONLY_OPTION, True)
         execute = self._client.execute_mgmt if kind == "command" else self._client.execute_query
@@ -264,11 +319,13 @@ class ADXClient:
             properties: Request options, as a dict or ``ClientRequestProperties``.
 
         Raises:
-            ConfigurationError: No database is available or it is invalid, or the KQL uses
+            ConfigurationError: No database is available or it is invalid, the KQL uses
                 ``cluster()``, ``external_table()``, ``externaldata`` or a blocked ``evaluate``
-                plugin (it could reach the Sentinel data lake or a workspace).
-            QueryError: The service returned an error. The message adds hints for the HTTP
-                status and the Kusto error code (``BadRequest_SyntaxError`` ...). An error
+                plugin (it could reach the Sentinel data lake or a workspace), or, on a workspace
+                URL, the database is not that workspace or the cost guard rejects the query.
+            QueryError: The table plans of a workspace URL could not be verified (the query is
+                then not sent), or the service returned an error. The message adds hints for the
+                HTTP status and the Kusto error code (``BadRequest_SyntaxError`` ...). An error
                 nobody anticipated is logged at ERROR with its traceback and raised as a
                 ``QueryError`` that chains the original.
             QueryConnectionError: The connection failed before a response arrived; it is a

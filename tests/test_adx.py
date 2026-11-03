@@ -27,6 +27,7 @@ from security_notebook_tools._exceptions import (
     QueryTimeoutError,
     QueryTransientError,
 )
+from security_notebook_tools._tablepolicy import TablePolicy
 
 
 @pytest.fixture
@@ -555,3 +556,168 @@ def test_kql_and_service_text_are_never_logged(patched, caplog, _log_file):
     for leak in LEAKS:
         assert leak not in logged
     assert "kql=hmac:" in logged
+
+
+# --- Workspace URL: every query passes the cost guard ---------------------------------------------
+
+RESOURCE_ID = (
+    "/subscriptions/22222222-2222-2222-2222-222222222222/resourcegroups/rg"
+    "/providers/microsoft.operationalinsights/workspaces/sentinel-ws"
+)
+WORKSPACE_URL = f"https://adx.monitor.azure.com{RESOURCE_ID}"
+POLICY = TablePolicy(
+    customer_id="11111111-1111-1111-1111-111111111111",
+    tables={
+        "signinlogs": ("SigninLogs", "Analytics"),
+        "aux_cl": ("Aux_CL", "Auxiliary"),
+        "basic_cl": ("Basic_CL", "Basic"),
+    },
+    functions={"savedparser": "SavedParser"},
+)
+
+
+@pytest.fixture
+def workspace(patched, monkeypatch):
+    monkeypatch.delenv("ADX_DATABASE", raising=False)
+    monkeypatch.delenv("AZURE_TENANT_ID", raising=False)
+    client, _, conv = patched
+    client.execute_query.return_value.primary_results = []
+    client.execute_query.return_value.tables = []
+    client.execute_mgmt.return_value.primary_results = []
+    client.execute_mgmt.return_value.tables = []
+    conv.side_effect = lambda t: t
+    with mock.patch("security_notebook_tools._adx.get_policy", return_value=POLICY) as get_policy:
+        yield client, get_policy
+
+
+def test_workspace_client_keeps_the_path_and_finds_the_workspace(patched, workspace):
+    _, kcsb, _ = patched
+    cred = mock.Mock()
+    c = ADXClient(WORKSPACE_URL, credential=cred)
+    kcsb.with_azure_token_credential.assert_called_once_with(WORKSPACE_URL, cred)
+    assert c.workspace_resource_id == RESOURCE_ID
+
+
+def test_workspace_query_reads_policy_with_tenant_and_uses_workspace_database(workspace):
+    client, get_policy = workspace
+    cred = mock.Mock()
+    ADXClient(WORKSPACE_URL, credential=cred, tenant_id="contoso.com").query_tables("SigninLogs")
+    get_policy.assert_called_once_with(RESOURCE_ID, None, cred, "contoso.com")
+    assert client.execute_query.call_args.args[0] == "sentinel-ws"
+
+
+@pytest.mark.parametrize(
+    "kql",
+    [
+        "Aux_CL | take 1",
+        "Basic_CL | take 1",
+        "SigninLogs | join (Aux_CL) on k",
+        "SigninLogs | where x in ((Basic_CL | project x))",
+        "let t = Aux_CL; t | take 1",
+        "union SigninLogs, Aux_CL",
+        "union *",
+        "union Aux*",
+        "search 'x'",
+        "find 'x'",
+        "table('Aux_CL')",
+        "SavedParser | take 1",
+        "SavedParser()",
+        "UnknownTable | take 1",
+        "workspace('other').SigninLogs",
+        "app('other').requests",
+        "resource('/subscriptions/x').T",
+        "adx('https://c.kusto.windows.net/db').T",
+        "database('other-workspace').SigninLogs",
+        "cluster('adx.monitor.azure.com').database('other').SigninLogs",
+        "external_table('Lake')",
+        "externaldata(a:string)[h@'https://x']",
+        "SigninLogs | evaluate http_request('https://x')",
+        "['Aux_CL'] | take 1",
+        "['table']('Aux_CL')",
+        ".show functions",  # a command sent as a query is analysed like any query
+    ],
+)
+def test_workspace_cost_guard_rejects_before_sending(workspace, kql):
+    client, _ = workspace
+    c = ADXClient(WORKSPACE_URL, credential=mock.Mock())
+    with pytest.raises(ConfigurationError):
+        c.query_tables(kql)
+    client.execute_query.assert_not_called()
+    client.execute_mgmt.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [QueryError("no ARM access"), QueryConnectionError("down")])
+def test_workspace_fails_closed_when_plans_cannot_be_read(workspace, error):
+    client, get_policy = workspace
+    get_policy.side_effect = error
+    c = ADXClient(WORKSPACE_URL, credential=mock.Mock())
+    with pytest.raises(QueryError):
+        c.query_tables("SigninLogs")
+    client.execute_query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ".show functions | join (Aux_CL) on x",
+        ".show tables | union Aux_CL",
+        ".show functions; Aux_CL",
+        ".show functions\nAux_CL",
+        ".show functions\r\nAux_CL",
+        ".show functions <| Aux_CL",
+        ".show function ['x']",
+        ".show",
+        ".show functions\x0bAux_CL",
+        ".show functions\u2028Aux_CL",
+    ],
+)
+def test_workspace_show_rejects_anything_but_plain_words(workspace, command):
+    client, _ = workspace
+    c = ADXClient(WORKSPACE_URL, credential=mock.Mock())
+    with pytest.raises(ConfigurationError):
+        c.show(command)
+    client.execute_mgmt.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ".show functions",
+        ".SHOW function my_func",
+        "  .show database sentinel-ws schema as json  ",
+    ],
+)
+def test_workspace_show_allows_the_documented_commands(workspace, command):
+    client, get_policy = workspace
+    c = ADXClient(WORKSPACE_URL, credential=mock.Mock())
+    assert c.show(command).empty
+    assert client.execute_mgmt.call_args.args[:2] == ("sentinel-ws", command)
+    get_policy.assert_not_called()
+
+
+def test_workspace_rejects_another_database_per_call(workspace):
+    client, get_policy = workspace
+    c = ADXClient(WORKSPACE_URL, credential=mock.Mock())
+    with pytest.raises(ConfigurationError, match="ADX_DATABASE"):
+        c.query_tables("SigninLogs", "other-workspace")
+    with pytest.raises(ConfigurationError, match="ADX_DATABASE"):
+        c.show(".show functions", "other-workspace")
+    client.execute_query.assert_not_called()
+    client.execute_mgmt.assert_not_called()
+    get_policy.assert_not_called()
+
+
+def test_workspace_rejects_another_default_database(workspace):
+    client, _ = workspace
+    c = ADXClient(WORKSPACE_URL, "other-workspace", credential=mock.Mock())
+    with pytest.raises(ConfigurationError, match="ADX_DATABASE"):
+        c.query_tables("SigninLogs")
+    client.execute_query.assert_not_called()
+
+
+def test_real_cluster_is_not_cost_checked(workspace):
+    client, get_policy = workspace
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    c.query_tables("Aux_CL | take 1")
+    get_policy.assert_not_called()
+    assert client.execute_query.call_args.args[0] == "db"
