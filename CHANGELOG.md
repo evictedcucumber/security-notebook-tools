@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `render_dataframe` draws charts in a dark theme with the Dracula colours instead of Plotly's
+  `plotly_dark`, and puts the legend underneath the chart. A template set in
+  `plotly.io.templates.default` still replaces the theme; the legend stays underneath with it.
+
 ## 7.4.0 - 2026-11-03
 
 ### Added

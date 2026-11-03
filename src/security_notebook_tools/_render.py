@@ -58,7 +58,52 @@ _LIMIT_KEYS = ("ymin", "ymax", "xmin", "xmax")
 _NUMERIC_KQL = {"int", "int32", "int64", "long", "real", "double", "decimal"}
 _STACK_KINDS = {"stacked", "stacked100"}
 MAX_TRACES = 100  # more series than this is unreadable and slow to draw: refuse, do not truncate
-DARK_TEMPLATE = "plotly_dark"
+# Dracula (https://draculatheme.com). The order keeps neighbours apart for colour-blind readers.
+_BACKGROUND, _CURRENT_LINE, _FOREGROUND, _COMMENT = "#282a36", "#44475a", "#f8f8f2", "#6272a4"
+_AXIS = {
+    "automargin": True,
+    "gridcolor": _CURRENT_LINE,
+    "linecolor": _COMMENT,
+    "zerolinecolor": _COMMENT,
+    "title": {"standoff": 15},
+}
+DRACULA_TEMPLATE = {
+    "layout": {
+        "colorway": ["#bd93f9", "#50fa7b", "#ff79c6", "#8be9fd", "#ffb86c", "#ff5555", "#f1fa8c"],
+        "paper_bgcolor": _BACKGROUND,
+        "plot_bgcolor": _BACKGROUND,
+        "font": {"color": _FOREGROUND},
+        "xaxis": _AXIS,
+        "yaxis": _AXIS,
+        "hoverlabel": {
+            "bgcolor": _CURRENT_LINE,
+            "bordercolor": _COMMENT,
+            "font": {"color": _FOREGROUND},
+        },
+    },
+    "data": {
+        "pie": [{"marker": {"line": {"color": _BACKGROUND, "width": 2}}}],
+        "table": [
+            {
+                "header": {"fill": {"color": _CURRENT_LINE}, "line": {"color": _COMMENT}},
+                "cells": {"fill": {"color": _BACKGROUND}, "line": {"color": _CURRENT_LINE}},
+            }
+        ],
+    },
+}
+# Measured from the figure's edge, so Plotly reserves room for it below the x axis title. Past
+# maxheight (a share of the figure) it scrolls, so many series cannot squash the plot; traceorder
+# keeps a stacked chart's entries in query order, which Plotly would reverse.
+LEGEND_BELOW = {
+    "orientation": "h",
+    "x": 0,
+    "xanchor": "left",
+    "y": 0,
+    "yanchor": "bottom",
+    "yref": "container",
+    "maxheight": 0.25,
+    "traceorder": "normal",
+}
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -173,11 +218,11 @@ def _load_plotly() -> Any:
     return go
 
 
-def _template() -> str | None:
-    """``"plotly_dark"`` unless the user changed Plotly's default template, then ``None``."""
+def _template() -> dict[str, Any] | None:
+    """The Dracula template unless the user changed Plotly's default template, then ``None``."""
     import plotly.io as pio
 
-    return DARK_TEMPLATE if pio.templates.default == "plotly" else None
+    return DRACULA_TEMPLATE if pio.templates.default == "plotly" else None
 
 
 def check_spec(df: Any) -> dict[str, Any]:
@@ -651,9 +696,10 @@ def render_dataframe(
     ``3Dchart``, ``treemap``, ``sankey``, ``plotly`` ...) is refused; figure JSON in the data is
     never interpreted.
 
-    Charts use Plotly's dark theme (``plotly_dark``). If ``plotly.io.templates.default`` has been
+    Charts use a dark theme with the Dracula colours. If ``plotly.io.templates.default`` has been
     changed from Plotly's own ``"plotly"``, that template is used instead; for one chart,
-    ``fig.update_layout(template="plotly")`` switches it back to light.
+    ``fig.update_layout(template="plotly")`` switches it back to light. The legend sits underneath
+    the chart whichever template is used; ``fig.update_layout(legend=...)`` moves it.
 
     ``hidden`` starts legend entries switched off: they are left out of the chart but stay in the
     legend, and clicking one draws it. Name an entry exactly as the legend shows it: a y column
@@ -738,6 +784,8 @@ def render_dataframe(
                 fig.update_layout(title={"text": _esc(spec["title"])})  # _style does the others
             if template := _template():
                 fig.update_layout(template=template)
+            if chart not in ("card", "table"):
+                fig.update_layout(legend=LEGEND_BELOW)
             dep["traces"] = len(fig.data)
         if keys:
             _hide(fig, chart, keys)

@@ -378,8 +378,10 @@ To start a legend entry switched off, name it in `hidden`, exactly as the legend
 `render_dataframe(df, hidden="fail")` or `hidden=["fail", "ok"]`. It stays in the legend, and
 clicking it draws it. A name the legend does not have warns and is otherwise ignored.
 
-Charts use Plotly's dark theme (`plotly_dark`). If you set `plotly.io.templates.default` yourself,
-your template is used instead; `fig.update_layout(template="plotly")` makes one chart light.
+Charts use a dark theme with the Dracula colours, with the legend underneath. If you set
+`plotly.io.templates.default` yourself, your template is used instead;
+`fig.update_layout(template="plotly")` makes one chart light, and `fig.update_layout(legend=...)`
+moves the legend.
 
 ### Pivot
 

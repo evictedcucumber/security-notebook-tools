@@ -1085,10 +1085,9 @@ def test_magic_falls_back_on_any_chart_exception(shell):
     "chart", ["timechart", "columnchart", "barchart", "piechart", "card", "table"]
 )
 def test_charts_are_dark_by_default(chart):
-    import plotly.io as pio
-
     fig = render_dataframe(_frame(_spec(chart)))
-    assert fig.layout.template == pio.templates["plotly_dark"]
+    assert fig.layout.template.layout.paper_bgcolor == "#282a36"
+    assert fig.layout.template.layout.colorway[0] == "#bd93f9"
 
 
 def test_a_template_the_user_chose_is_kept(monkeypatch):
@@ -1097,6 +1096,21 @@ def test_a_template_the_user_chose_is_kept(monkeypatch):
     monkeypatch.setattr(pio.templates, "default", "seaborn")
     fig = render_dataframe(_frame(_spec("timechart")))
     assert fig.layout.template == pio.templates["seaborn"]
+    assert fig.layout.legend.yref == "container"
+
+
+@pytest.mark.parametrize("chart", ["timechart", "columnchart", "barchart", "piechart"])
+def test_the_legend_sits_under_the_chart(chart):
+    legend = render_dataframe(_frame(_spec(chart))).layout.legend
+    assert legend.orientation == "h"
+    assert (legend.yref, legend.y, legend.yanchor) == ("container", 0, "bottom")
+    assert legend.maxheight == 0.25
+    assert legend.traceorder == "normal"
+
+
+@pytest.mark.parametrize("chart", ["card", "table"])
+def test_a_chart_with_no_legend_does_not_place_one(chart):
+    assert render_dataframe(_frame(_spec(chart))).layout.legend.orientation is None
 
 
 # --- hidden legend entries ----------------------------------------------------------------------
