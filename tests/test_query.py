@@ -9,6 +9,7 @@ import pytest
 
 import security_notebook_tools as snt
 from security_notebook_tools._exceptions import ConfigurationError
+from security_notebook_tools._tablepolicy import TablePolicy
 
 PUBLIC = {
     "clear_cache",
@@ -132,7 +133,9 @@ def test_adx_query_and_command(adx, monkeypatch):
     args, kwargs = cls.return_value.show.call_args
     assert args == ("  .show tables", "db2")
     assert kwargs["properties"].get_option("servertimeout", None) == timedelta(seconds=30)
-    cls.assert_called_once_with("https://env.kusto.windows.net", credential=mock.ANY)
+    cls.assert_called_once_with(
+        "https://env.kusto.windows.net", credential=mock.ANY, tenant_id=None
+    )
 
 
 def test_adx_missing_config(adx, monkeypatch):
@@ -2344,3 +2347,126 @@ def test_a_failed_batch_does_not_drop_earlier_windows_of_the_query(sentinel):
     sent = _sdk_calls(cls)
     snt.exec_batch_query(FILTER, D0, _days(2))
     assert _sdk_calls(cls) == sent  # windows 1-2 still stored
+
+
+# --- ADX on a workspace URL: the cost guard covers the whole public path --------------------------
+
+WORKSPACE_URL = (
+    "https://adx.monitor.azure.com/subscriptions/22222222-2222-2222-2222-222222222222"
+    "/resourcegroups/rg/providers/microsoft.operationalinsights/workspaces/sentinel-ws"
+)
+ANOMALY_KQL = (
+    "SigninLogs | where TimeGenerated > ago(7d)"
+    " | make-series n=count() on TimeGenerated step 1h"
+    " | extend (a, s, b) = series_decompose_anomalies(n)"
+    " | render anomalychart with (anomalycolumns=a)"
+)
+
+
+@pytest.fixture
+def workspace(monkeypatch):
+    """A real ADXClient on a workspace URL; only the SDK and the ARM policy read are mocked."""
+    monkeypatch.setenv("ADX_CLUSTER_URI", WORKSPACE_URL)
+    monkeypatch.delenv("ADX_DATABASE", raising=False)
+    monkeypatch.delenv("AZURE_TENANT_ID", raising=False)
+    policy = TablePolicy(
+        customer_id="11111111-1111-1111-1111-111111111111",
+        tables={
+            "signinlogs": ("SigninLogs", "Analytics"),
+            "aux_cl": ("Aux_CL", "Auxiliary"),
+        },
+    )
+    with (
+        mock.patch("security_notebook_tools._adx.KustoClient") as kusto,
+        mock.patch("security_notebook_tools._adx.KustoConnectionStringBuilder"),
+        mock.patch("security_notebook_tools._adx._table_to_df") as convert,
+        mock.patch("security_notebook_tools._adx.get_policy", return_value=policy) as get_policy,
+        mock.patch("security_notebook_tools._query.get_credential"),
+    ):
+        convert.side_effect = lambda _table: pd.DataFrame({"a": [1]})
+        client = kusto.return_value
+        client.execute_query.return_value.primary_results = ["t"]
+        client.execute_query.return_value.tables = []
+        client.execute_mgmt.return_value.primary_results = ["t"]
+        client.execute_mgmt.return_value.tables = []
+        yield client, get_policy
+
+
+def test_workspace_url_runs_anomaly_query_on_the_workspace(workspace):
+    client, get_policy = workspace
+    assert list(snt.exec_query(ANOMALY_KQL, target="adx").columns) == ["a"]
+    database, text, props = client.execute_query.call_args.args
+    assert (database, text) == ("sentinel-ws", ANOMALY_KQL)
+    assert props.get_option("request_readonly", None) is True
+    resource_id = WORKSPACE_URL.removeprefix("https://adx.monitor.azure.com")
+    get_policy.assert_called_once_with(resource_id, None, mock.ANY, None)
+
+
+def test_workspace_url_rejects_billed_table_end_to_end(workspace):
+    client, _ = workspace
+    with pytest.raises(ConfigurationError, match="Auxiliary"):
+        snt.exec_query("Aux_CL | take 1", target="adx")
+    client.execute_query.assert_not_called()
+
+
+def test_workspace_url_rejects_another_database_end_to_end(workspace, monkeypatch):
+    client, get_policy = workspace
+    monkeypatch.setenv("ADX_DATABASE", "other-workspace")
+    with pytest.raises(ConfigurationError, match="ADX_DATABASE"):
+        snt.exec_query("SigninLogs | take 1", target="adx")
+    client.execute_query.assert_not_called()
+    get_policy.assert_not_called()
+
+
+def test_workspace_url_database_mismatch_keeps_names_out_of_the_log(workspace, monkeypatch, caplog):
+    monkeypatch.setenv("ADX_DATABASE", "other-workspace")
+    with pytest.raises(ConfigurationError, match="sentinel-ws") as caught:
+        snt.exec_query("SigninLogs | take 1", target="adx")
+    assert "other-workspace" in str(caught.value)
+    logged = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert any("not the workspace" in message for message in logged)
+    assert not any("sentinel-ws" in m or "other-workspace" in m for m in logged)
+
+
+def test_workspace_url_accepts_database_naming_it(workspace, monkeypatch):
+    client, _ = workspace
+    monkeypatch.setenv("ADX_DATABASE", "SENTINEL-WS")
+    snt.exec_query("SigninLogs | take 1", target="adx")
+    assert client.execute_query.call_args.args[0] == "sentinel-ws"
+
+
+def test_workspace_url_show_is_not_cost_checked_but_must_be_plain(workspace):
+    client, get_policy = workspace
+    snt.exec_query(".show functions", target="adx")
+    assert client.execute_mgmt.call_args.args[:2] == ("sentinel-ws", ".show functions")
+    get_policy.assert_not_called()
+    client.execute_mgmt.reset_mock()
+    with pytest.raises(ConfigurationError, match="plain words"):
+        snt.exec_query(".show functions | join (Aux_CL) on x", target="adx")
+    client.execute_mgmt.assert_not_called()
+
+
+def test_workspace_url_batch_checks_the_guard_once(workspace):
+    client, get_policy = workspace
+    kql = "SigninLogs | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    snt.exec_batch_query(kql, D0, D0 + timedelta(days=2), target="adx", max_workers=1)
+    assert client.execute_query.call_count == 2
+    assert get_policy.call_count == 1
+
+
+def test_workspace_url_batch_rejects_billed_table_before_sending(workspace):
+    client, _ = workspace
+    kql = "Aux_CL | where TimeGenerated >= BatchStart and TimeGenerated < BatchEnd"
+    with pytest.raises(ConfigurationError, match="Auxiliary"):
+        snt.exec_batch_query(kql, D0, D0 + timedelta(days=2), target="adx")
+    client.execute_query.assert_not_called()
+
+
+def test_workspace_url_clear_cache_rereads_nothing_stale(workspace):
+    client, _ = workspace
+    snt.exec_query("SigninLogs | take 1", target="adx")
+    snt.exec_query("SigninLogs | take 1", target="adx")
+    assert client.execute_query.call_count == 1
+    snt.clear_cache()
+    snt.exec_query("SigninLogs | take 1", target="adx")
+    assert client.execute_query.call_count == 2

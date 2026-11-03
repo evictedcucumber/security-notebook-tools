@@ -14,7 +14,10 @@ sent.
 
 ADX access is read-only: only ``.show`` management commands are allowed and requests are sent
 with ``request_readonly``. The Sentinel data lake and Log Analytics proxy hosts are rejected as
-clusters, and ``cluster()``, ``external_table()`` and ``externaldata`` are rejected in KQL.
+clusters, and ``cluster()``, ``external_table()`` and ``externaldata`` are rejected in KQL. The one
+exception is ``ADX_CLUSTER_URI`` set to the URL of a single workspace on ``adx.monitor.azure.com``
+or ``ade.loganalytics.io``, which runs ADX-only KQL such as ``render anomalychart`` on Sentinel
+data; ``ADX_DATABASE`` is then not needed, and every query passes the Sentinel cost guard.
 Connection settings are validated and invalid ones raise an error.
 
 Public API:
@@ -65,7 +68,7 @@ from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 from ._render import render_dataframe
 
-__version__ = "7.2.1"
+__version__ = "7.3.0"
 
 __all__ = [
     "clear_cache",

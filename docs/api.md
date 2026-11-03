@@ -14,7 +14,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "7.2.1"
+security_notebook_tools.__version__  # "7.3.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -43,7 +43,7 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 
 | Name | Description |
 | --- | --- |
-| `kql` | The KQL query, a non-blank string. With `target="adx"`, text starting with `.` (after leading whitespace) is run as a management command, but only `.show` commands (such as `.show tables`, case-insensitive) are allowed; any other command raises `ConfigurationError` without contacting the service. Every ADX request is sent read-only (`request_readonly`), and ADX text using `cluster()`, `external_table()`, `externaldata` or a data-reading `evaluate` plugin (`sql_request`, `http_request`, `python`, `r` ...) is rejected, as is text with an unterminated string, control characters or non-ASCII characters outside strings and comments. With `target="sentinel"` it must pass the cost guard. |
+| `kql` | The KQL query, a non-blank string. With `target="adx"`, text starting with `.` (after leading whitespace) is run as a management command, but only `.show` commands (such as `.show tables`, case-insensitive) are allowed; any other command raises `ConfigurationError` without contacting the service. Every ADX request is sent read-only (`request_readonly`), and ADX text using `cluster()`, `external_table()`, `externaldata` or a data-reading `evaluate` plugin (`sql_request`, `http_request`, `python`, `r` ...) is rejected, as is text with an unterminated string, control characters or non-ASCII characters outside strings and comments. With `target="sentinel"` or a workspace URL it must pass the cost guard, and on a workspace URL a `.show` command may only be plain words (no pipe). |
 | `timespan` | Sentinel only. A `timedelta` (the period ending now), a `(start, end)` tuple of datetimes, or a `(start, timedelta)` tuple (positive length; a naive datetime is taken to be UTC). Passing it with `target="adx"` raises `ConfigurationError`; filter on time in the KQL instead. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds (default 300); must be a positive `int`. Applies to both targets. |
@@ -63,8 +63,8 @@ Read on every call (not cached), so changing `os.environ` takes effect immediate
 | `SENTINEL_SUBSCRIPTION_ID` | Subscription ID (a GUID) of the workspace (used by the cost guard) | `target="sentinel"` |
 | `SENTINEL_RESOURCE_GROUP` | Resource group name of the workspace (used by the cost guard) | `target="sentinel"` |
 | `SENTINEL_WORKSPACE_NAME` | Log Analytics workspace name (used by the cost guard) | `target="sentinel"` |
-| `ADX_CLUSTER_URI` | ADX cluster URI (`https://<host>`) | `target="adx"` |
-| `ADX_DATABASE` | ADX database | `target="adx"` |
+| `ADX_CLUSTER_URI` | ADX cluster URI (`https://<host>`), or the URL of one workspace (see below) | `target="adx"` |
+| `ADX_DATABASE` | ADX database; not needed on a workspace URL | `target="adx"` on a cluster |
 | `AZURE_TENANT_ID` | Tenant for the Azure CLI credential (GUID or domain name) | No (defaults to the CLI's current tenant) |
 
 [notebook-setup.md](notebook-setup.md) shows Azure CLI commands that print every value.
@@ -80,19 +80,39 @@ An empty variable counts as unset. Values are validated on every call; an invali
   same workspace as `SENTINEL_WORKSPACE_ID` (checked against the workspace's `customerId`).
 - Tenant ID: a GUID, or a DNS-style domain (dot-separated labels of letters, digits and `-`).
 - Cluster URI: scheme exactly `https`, a DNS host name, no user info, no port other than 443,
-  no query, fragment or path (a trailing `/` is dropped). The host must end in a Kusto
+  no query or fragment, and no path except on a workspace URL (a trailing `/` is dropped). The
+  host must end in a Kusto
   cluster domain, taken from `azure-kusto-data`'s trusted endpoints: `.kusto.windows.net`,
   `.kustomfa.windows.net`, `.kusto.azuresynapse.net`, `.kusto.fabric.microsoft.com`,
   `.kusto.data.microsoft.com`, and the US government, China, and other sovereign-cloud Kusto
   domains. The Sentinel data lake (`*.securityplatform.microsoft.com`) and the Log Analytics /
   Application Insights / Azure Monitor ADX proxy (`ade.loganalytics.io`,
   `ade.applicationinsights.io`, `adx.*`) are therefore rejected: they bill per GB scanned.
+- Workspace URL, the one exception: `https://adx.monitor.azure.com` or `https://ade.loganalytics.io`
+  followed by the path of a single workspace,
+  `https://adx.monitor.azure.com/subscriptions/<GUID>/resourcegroups/<group>/providers/microsoft.operationalinsights/workspaces/<name>`
+  (path matched case-insensitively). It lets ADX-only KQL such as `render anomalychart` run on
+  Sentinel data with `target="adx"`. Bare proxy hosts, URLs for a whole subscription or resource
+  group, other proxy hosts and the sovereign-cloud proxies (`adx.monitor.azure.us`, `.cn`) are
+  still rejected. On this route:
+  - `ADX_DATABASE` is not needed; the database is the workspace name from the URL. If it is set,
+    it must name that workspace (case-insensitive), otherwise `ConfigurationError`.
+  - The `SENTINEL_*` variables are not used; `AZURE_TENANT_ID` applies as usual.
+  - Every query passes the same cost guard as `target="sentinel"` (see below), needs the same ARM
+    permissions (`tables/read`, `savedSearches/read`) and is not sent if the plans cannot be read.
+  - A `.show` command may be plain words only (no pipe, second statement or new line), or
+    `ConfigurationError` is raised before sending. The service documents only `.show functions`,
+    `.show function <name>` and `.show database <name> schema as json` on the proxy.
+  - `timespan` is still rejected, so filter on time in the KQL. There is no 1-day default, and
+    the partial-result and retention-warning behaviour of `target="sentinel"` does not apply.
 - Database: not blank and no control characters; otherwise any name.
 
 Clients are created on first use and cached per
 workspace/cluster and tenant.
 
 ### Cost guard (Sentinel only)
+
+The same guard also checks every `target="adx"` query sent to a workspace URL.
 
 Basic, Auxiliary and Sentinel data lake tables bill per GB scanned, and the Log Analytics query
 API cannot refuse them, so a Sentinel query may only read tables on the **Analytics** plan
@@ -923,7 +943,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"7.2.1"`.
+The installed version string, e.g. `"7.3.0"`.
 
 ### Debug output in the cell
 

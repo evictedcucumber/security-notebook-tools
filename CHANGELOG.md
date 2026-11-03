@@ -8,6 +8,29 @@
   legend, and clicking one draws it. Works for every chart with a legend, including slices of a
   `piechart`. A name the legend does not have warns and is otherwise ignored.
 
+## 7.3.0 - 2026-11-03
+
+### Added
+
+- `ADX_CLUSTER_URI` may be the URL of one Sentinel / Log Analytics workspace
+  (`https://adx.monitor.azure.com/subscriptions/<GUID>/resourcegroups/<group>/providers/microsoft.operationalinsights/workspaces/<name>`,
+  or the same path on `https://ade.loganalytics.io`), so ADX-only features such as
+  `render anomalychart` run on Sentinel data with `target="adx"`. `ADX_DATABASE` is not needed
+  (the database is the workspace name; if set, it must name that workspace). Every query passes
+  the same cost guard as `target="sentinel"`. `.show` commands there may be plain words only.
+  `timespan` is still rejected.
+
+### Security
+
+- The ADX proxy block is loosened for a single-workspace URL only, and every query sent to it
+  passes the cost guard (Analytics-plan tables only, fail closed). Bare proxy hosts, URLs for a
+  whole subscription or resource group, other proxy hosts, sovereign-cloud proxies and the
+  Sentinel data lake are still rejected.
+
+### Docs
+
+- README, API reference and notebook setup describe the workspace URL option.
+
 ## 7.2.1 - 2026-10-30
 
 ### Fixed

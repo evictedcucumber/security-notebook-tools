@@ -292,3 +292,97 @@ def test_resolve_resource_id_ignores_old_variable(monkeypatch):
     monkeypatch.setenv("SENTINEL_WORKSPACE_" + "RESOURCE_ID", RID)  # removed variable
     with pytest.raises(ConfigurationError, match="SENTINEL_SUBSCRIPTION_ID"):
         config.resolve_workspace_resource_id()
+
+
+# --- Workspace URLs on the ADX proxy --------------------------------------------------------------
+
+WS_GUID = "22222222-2222-2222-2222-222222222222"
+WS_PATH = (
+    f"/subscriptions/{WS_GUID}/resourcegroups/rg"
+    "/providers/microsoft.operationalinsights/workspaces/sentinel-ws"
+)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        f"https://adx.monitor.azure.com{WS_PATH}",
+        f"https://ade.loganalytics.io{WS_PATH}",
+        f"https://ADX.Monitor.Azure.com{WS_PATH}",
+        f"https://adx.monitor.azure.com:443{WS_PATH}",
+        f"https://adx.monitor.azure.com/subscriptions/{WS_GUID}/resourceGroups/my_rg.(1)"
+        "/providers/Microsoft.OperationalInsights/workspaces/sentinel-ws",
+    ],
+)
+def test_cluster_uri_accepts_a_workspace_url(uri):
+    assert config.validate_cluster_uri(f"  {uri}/  ") == uri
+
+
+def _ws(path, host="adx.monitor.azure.com"):
+    return f"https://{host}{path}"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        # Not one workspace: the guard would not know which table plans apply.
+        _ws(f"/subscriptions/{WS_GUID}"),
+        _ws(f"/subscriptions/{WS_GUID}/resourcegroups/rg"),
+        _ws(f"{WS_PATH}/tables/Aux_CL"),
+        _ws(f"{WS_PATH}/v2/rest/query"),
+        _ws(f"{WS_PATH}//"),
+        _ws(f"/{WS_PATH}"),
+        _ws(WS_PATH.replace("workspaces", "clusters")),
+        _ws(WS_PATH.replace("microsoft.operationalinsights", "microsoft.insights")),
+        _ws(WS_PATH.replace(WS_GUID, "not-a-guid")),
+        # The path may not smuggle another location past the check.
+        _ws(WS_PATH.replace("/rg/", "/rg/../other/")),
+        _ws(WS_PATH.replace("/rg/", "/rg%2F..%2Fother/")),
+        _ws(WS_PATH.replace("sentinel-ws", "sentinel-ws%2Fx")),
+        _ws(f"{WS_PATH};x=1"),
+        _ws(f"{WS_PATH}?x=1"),
+        _ws(f"{WS_PATH}#x"),
+        _ws(WS_PATH.replace("sentinel-ws", "sent\u0456nel-ws")),
+        # Other hosts: no guard for sovereign clouds, Application Insights, or anything else.
+        _ws(WS_PATH, "adx.monitor.azure.us"),
+        _ws(WS_PATH, "adx.monitor.azure.cn"),
+        _ws(WS_PATH, "adx.loganalytics.azure.com"),
+        _ws(WS_PATH, "ade.applicationinsights.io"),
+        _ws(WS_PATH, "adx.int.monitor.azure.com"),
+        _ws(WS_PATH, "api.securityplatform.microsoft.com"),
+        _ws(WS_PATH, "c.kusto.windows.net"),
+        _ws(WS_PATH, "adx.monitor.azure.com.evil.net"),
+        _ws(WS_PATH, "evil.net"),
+        _ws(WS_PATH, "adx.monitor.azure.com:8443"),
+        _ws(WS_PATH, "user@adx.monitor.azure.com"),
+        f"http://adx.monitor.azure.com{WS_PATH}",
+    ],
+)
+def test_cluster_uri_rejects_anything_but_one_workspace(uri):
+    with pytest.raises(ConfigurationError, match="ADX_CLUSTER_URI"):
+        config.validate_cluster_uri(uri)
+
+
+def test_workspace_of_cluster():
+    assert config.workspace_of_cluster(_ws(WS_PATH)) == WS_PATH
+    assert config.workspace_of_cluster("https://c.kusto.windows.net") is None
+
+
+def test_resolve_adx_database_on_a_real_cluster(monkeypatch):
+    monkeypatch.delenv("ADX_DATABASE", raising=False)
+    with pytest.raises(ConfigurationError, match="ADX_DATABASE"):
+        config.resolve_adx_database("https://c.kusto.windows.net")
+    assert config.resolve_adx_database("https://c.kusto.windows.net", " db ") == "db"
+    monkeypatch.setenv("ADX_DATABASE", "env-db")
+    assert config.resolve_adx_database("https://c.kusto.windows.net") == "env-db"
+
+
+def test_resolve_adx_database_on_a_workspace_url(monkeypatch):
+    monkeypatch.delenv("ADX_DATABASE", raising=False)
+    assert config.resolve_adx_database(_ws(WS_PATH)) == "sentinel-ws"
+    assert config.resolve_adx_database(_ws(WS_PATH), "SENTINEL-WS") == "sentinel-ws"
+    with pytest.raises(ConfigurationError, match="not the workspace"):
+        config.resolve_adx_database(_ws(WS_PATH), "other-ws")
+    monkeypatch.setenv("ADX_DATABASE", "other-ws")
+    with pytest.raises(ConfigurationError, match="not the workspace"):
+        config.resolve_adx_database(_ws(WS_PATH))

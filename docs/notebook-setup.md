@@ -17,7 +17,7 @@ is less strict, because tags can be moved, and an install without a ref is the l
 takes whatever `main` is):
 
 ```sh
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v7.2.1
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v7.3.0
 ```
 
 The project needs Python 3.14 or newer. Other install options (latest main, editable local
@@ -83,6 +83,7 @@ az account set --subscription <name-or-id>
 | `SENTINEL_WORKSPACE_ID` | `az monitor log-analytics workspace show -g <rg> -n <workspace-name> --query customerId -o tsv` |
 | `ADX_CLUSTER_URI` | `az kusto cluster list --query "[].{name:name, resourceGroup:resourceGroup, uri:uri}" -o table`, or `az kusto cluster show -g <rg> -n <cluster> --query uri -o tsv` |
 | `ADX_DATABASE` | `az kusto database list -g <rg> --cluster-name <cluster> --query "[].name" -o tsv` |
+| `ADX_CLUSTER_URI` for one Sentinel workspace (instead of the two rows above) | `echo "https://adx.monitor.azure.com$(az monitor log-analytics workspace show -g <rg> -n <name> --query id -o tsv)"` |
 
 Notes:
 
@@ -104,7 +105,12 @@ echo "SENTINEL_RESOURCE_GROUP=$RG"
 echo "SENTINEL_WORKSPACE_NAME=$WS"
 ```
 
-For ADX, add `ADX_CLUSTER_URI` and `ADX_DATABASE` from the last two rows of the table.
+For ADX, add `ADX_CLUSTER_URI` and `ADX_DATABASE` from the `az kusto` rows of the table.
+
+To run ADX-only KQL (such as `render anomalychart`) on Sentinel data instead, set `ADX_CLUSTER_URI`
+to the workspace URL from the last row and leave `ADX_DATABASE` unset (a value must name that
+workspace). Queries use `target="adx"` and pass the cost guard, so the identity needs Log Analytics
+Reader or equivalent. See "ADX features on Sentinel data" in the README.
 
 **Option A: `.env` file.** Create `.env` in the project root (add it to `.gitignore`):
 

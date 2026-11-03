@@ -338,7 +338,7 @@ def clear_policy_cache() -> None:
 
 def get_policy(
     resource_id: str,
-    workspace_id: str,
+    workspace_id: str | None,
     credential: AzureCliCredential,
     tenant_id: str | None = None,
 ) -> TablePolicy:
@@ -350,7 +350,8 @@ def get_policy(
 
     Args:
         resource_id: ARM resource ID of the Log Analytics workspace (validated by the caller).
-        workspace_id: The workspace GUID the query will be sent to.
+        workspace_id: The workspace GUID the query will be sent to, or None if it is sent to
+            ``resource_id`` itself (a workspace URL through the ADX proxy), so they cannot differ.
         credential: Credential for ``https://management.azure.com/.default``.
         tenant_id: Tenant, used only as part of the cache key.
 
@@ -413,7 +414,7 @@ def get_policy(
             fetched = time.monotonic()
             policy = replace(policy, fetched_at=fetched)
             _cache[key] = (fetched, policy)
-    if policy.customer_id.lower() != workspace_id.lower():
+    if workspace_id is not None and policy.customer_id.lower() != workspace_id.lower():
         raise ConfigurationError(
             f"$SENTINEL_WORKSPACE_ID ({workspace_id}) does not match the workspace behind "
             f"$SENTINEL_SUBSCRIPTION_ID / $SENTINEL_RESOURCE_GROUP / $SENTINEL_WORKSPACE_NAME "
@@ -532,12 +533,14 @@ def batch_check(kql: str, head: re.Pattern[str]) -> Iterator[None]:
         _batch.reset(token)
 
 
-def _batch_key(resource_id: str, workspace_id: str, tenant_id: str | None) -> tuple:
+def _batch_key(resource_id: str, workspace_id: str | None, tenant_id: str | None) -> tuple:
     """The workspace a batch's check holds for (case-insensitive, like :func:`get_policy`)."""
-    return (resource_id.lower(), workspace_id.lower(), tenant_id)
+    return (resource_id.lower(), workspace_id and workspace_id.lower(), tenant_id)
 
 
-def batch_checked(kql: str, resource_id: str, workspace_id: str, tenant_id: str | None) -> bool:
+def batch_checked(
+    kql: str, resource_id: str, workspace_id: str | None, tenant_id: str | None
+) -> bool:
     """Whether ``kql`` is a window of the running batch that already passed for this workspace.
 
     True means the cost guard may be skipped for ``kql``. Outside :func:`batch_check`, or for
@@ -561,7 +564,11 @@ def batch_checked(kql: str, resource_id: str, workspace_id: str, tenant_id: str 
 
 
 def note_batch_checked(
-    kql: str, resource_id: str, workspace_id: str, tenant_id: str | None, policy: TablePolicy
+    kql: str,
+    resource_id: str,
+    workspace_id: str | None,
+    tenant_id: str | None,
+    policy: TablePolicy,
 ) -> None:
     """Record that ``kql`` passed the cost guard, so the batch's other windows skip it.
 

@@ -22,13 +22,11 @@ from azure.kusto.data import ClientRequestProperties
 from ._adx import ADXClient
 from ._auth import clear_credential_cache, get_credential
 from ._config import (
-    DATABASE_VAR,
-    require,
+    resolve_adx_database,
     resolve_cluster_uri,
     resolve_tenant_id,
     resolve_workspace_id,
     resolve_workspace_resource_id,
-    validate_database,
 )
 from ._errors import public_call, unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
@@ -103,7 +101,7 @@ def _adx_client(cluster_uri: str, tenant_id: str | None) -> ADXClient:
     # The database is chosen per call, so one client serves every database on the cluster.
     with unexpected_errors(logger, "ADX client setup"):
         credential = get_credential(tenant_id)
-    return ADXClient(cluster_uri, credential=credential)
+    return ADXClient(cluster_uri, credential=credential, tenant_id=tenant_id)
 
 
 def _client_for(factory, *args):
@@ -185,8 +183,9 @@ def window_key(target: Target, kql: str, timespan: Timespan | None, timeout: int
             timespan,
             timeout,
         )
-    database = validate_database(require(None, DATABASE_VAR, "database"))
-    return ("adx", resolve_cluster_uri(), resolve_tenant_id(), database, kql, timeout)
+    cluster_uri = resolve_cluster_uri()
+    database = resolve_adx_database(cluster_uri)
+    return ("adx", cluster_uri, resolve_tenant_id(), database, kql, timeout)
 
 
 class BatchRun:
@@ -389,7 +388,7 @@ def _query_adx(
     """
     tenant_id = resolve_tenant_id()
     cluster_uri = resolve_cluster_uri()
-    database = validate_database(require(None, DATABASE_VAR, "database"))
+    database = resolve_adx_database(cluster_uri)
     args = (cluster_uri, tenant_id, database, kql, timeout)
     return _flag_partial(_cached_call(_adx_tables, args, cache=cache, batch=batch), False)
 
@@ -441,14 +440,20 @@ def exec_query(
     * Sentinel: ``SENTINEL_WORKSPACE_ID``, ``SENTINEL_SUBSCRIPTION_ID``,
       ``SENTINEL_RESOURCE_GROUP`` and ``SENTINEL_WORKSPACE_NAME`` (the last three locate the
       workspace in Azure for the cost guard below).
-    * ADX: ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``.
+    * ADX: ``ADX_CLUSTER_URI`` and ``ADX_DATABASE``. To use ADX features on a Sentinel workspace
+      (such as ``render anomalychart``, which Log Analytics does not offer), set
+      ``ADX_CLUSTER_URI`` to the workspace URL, ``https://adx.monitor.azure.com/subscriptions/
+      <GUID>/resourcegroups/<group>/providers/microsoft.operationalinsights/workspaces/<name>``
+      (or the same path on ``https://ade.loganalytics.io``). ``ADX_DATABASE`` is then not needed
+      and, if set, must name that workspace. These queries pass the cost guard below and need its
+      ARM permissions; the ``SENTINEL_*`` variables are not used.
     * Both: ``AZURE_TENANT_ID`` (optional; defaults to the Azure CLI's current tenant).
 
-    Cost guard (Sentinel only): Basic, Auxiliary and Sentinel data lake tables bill per GB
-    scanned, so a query may only read tables on the Log Analytics Analytics plan (this includes
-    Defender XDR tables streamed into the workspace). Before each query the table plans and
-    saved functions of the workspace are read from Azure Resource Manager (cached for 5
-    minutes; needs ``tables/read`` and ``savedSearches/read``, e.g. Log Analytics Reader) and
+    Cost guard (Sentinel, and ADX on a workspace URL): Basic, Auxiliary and Sentinel data lake
+    tables bill per GB scanned, so a query may only read tables on the Log Analytics Analytics
+    plan (this includes Defender XDR tables streamed into the workspace). Before each query the
+    table plans and saved functions of the workspace are read from Azure Resource Manager (cached
+    for 5 minutes; needs ``tables/read`` and ``savedSearches/read``, e.g. Log Analytics Reader) and
     the KQL is checked client-side; a query that fails the check is never sent. Rejected:
 
     * Any table that is not on the Analytics plan, wherever its name appears, and unknown names.
@@ -519,8 +524,9 @@ def exec_query(
             read-only (``request_readonly``), so the server also refuses writes. ADX text
             using ``cluster()``, ``external_table()``, ``externaldata`` or a data-reading
             ``evaluate`` plugin is rejected too, and the cluster URI may not be the Sentinel
-            data lake or the Log Analytics proxy. With ``target="sentinel"`` the query must
-            pass the cost guard above.
+            data lake or the Log Analytics proxy, other than the URL of one workspace. With
+            ``target="sentinel"`` or a workspace URL the query must pass the cost guard above; on
+            a workspace URL a ``.show`` command may only be plain words (no pipe).
         timespan: Sentinel only. A ``timedelta`` (the period ending now), a
             ``(start, end)`` tuple of datetimes, or a ``(start, timedelta)`` tuple. See the
             time range rules above. Passing it with ``target="adx"`` raises an error; filter
@@ -570,13 +576,14 @@ def exec_query(
             is combined with ``target="adx"``, a required environment variable is unset or
             invalid (workspace ID not a GUID, workspace resource ID not an
             ``/subscriptions/.../workspaces/<name>`` ID, tenant not a GUID or domain name,
-            cluster URI not a plain ``https://host`` URI on a Kusto cluster domain, blank
-            database), the workspace ID and resource ID name different workspaces, an ADX
-            management command is not ``.show``, ADX KQL uses ``cluster()``,
-            ``external_table()``, ``externaldata`` or a data-reading plugin, or the Sentinel
-            cost guard rejects the query. It is also a ``ValueError``.
+            cluster URI not a plain ``https://host`` URI on a Kusto cluster domain or the URL
+            of one workspace, blank database, ``ADX_DATABASE`` not the workspace in that URL),
+            the workspace ID and resource ID name different workspaces, an ADX management
+            command is not ``.show``, ADX KQL uses ``cluster()``, ``external_table()``,
+            ``externaldata`` or a data-reading plugin, or the cost guard rejects the query. It
+            is also a ``ValueError``.
         QueryError: The service rejected or failed the query (bad KQL, authorisation, ...), or
-            the Sentinel table plans could not be verified (the query was then not sent).
+            the workspace's table plans could not be verified (the query was then not sent).
             The message adds a hint for common HTTP statuses (401, 403, 504, ...). Subclasses
             mark failures that may succeed if retried: ``QueryThrottledError`` (HTTP 429) and
             ``QueryConnectionError`` (the connection failed before a response arrived: reset,
@@ -597,6 +604,14 @@ def exec_query(
         >>> df = exec_query("SigninLogs | take 100", timedelta(days=7))  # explicit range
         >>> df = exec_query("Events | take 100", target="adx", timeout=600)
         >>> tables = exec_query(".show tables", target="adx")  # management command
+        >>> # With $ADX_CLUSTER_URI set to a workspace URL:
+        >>> df = exec_query(
+        ...     "SigninLogs | where TimeGenerated > ago(7d)"
+        ...     " | make-series n=count() on TimeGenerated step 1h"
+        ...     " | extend (a, s, b) = series_decompose_anomalies(n)"
+        ...     " | render anomalychart with (anomalycolumns=a)",
+        ...     target="adx",
+        ... )
     """
     with public_call(
         logger,
