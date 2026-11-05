@@ -1,3 +1,4 @@
+import logging
 import math
 import re
 from datetime import UTC, datetime, timedelta
@@ -6,7 +7,12 @@ import pandas as pd
 import pytest
 
 from security_notebook_tools import pivot_dataframe
-from security_notebook_tools._format import KQL_TYPES_ATTR, PIVOT_TOTALS_ATTR, format_dataframe
+from security_notebook_tools._format import (
+    KQL_TYPES_ATTR,
+    PIVOT_TOTALS_ATTR,
+    format_dataframe,
+    format_dataframe_by,
+)
 
 
 def _typed(values, kql_type, name="c"):
@@ -474,3 +480,118 @@ def test_plain_ampersand_header_not_double_escaped():
     assert "x&amp;y" in out
     assert "n&amp;m" in out
     assert "&amp;amp;" not in out
+
+
+def _sections(result):
+    """Return ``[(heading, [cell, ...]), ...]`` from a ``format_dataframe_by`` result."""
+    parts = re.split(r"<h3>(.*?)</h3>", result.to_html())[1:]
+    return [
+        (heading, re.findall(r"<td[^>]*>(.*?)</td>", table))
+        for heading, table in zip(parts[::2], parts[1::2], strict=True)
+    ]
+
+
+def test_by_one_table_per_value_without_key_in_first_seen_order():
+    df = pd.DataFrame({"k": ["b", "a", "b"], "x": ["1", "2", "3"], "y": ["p", "q", "r"]})
+    result = format_dataframe_by(df, "k")
+    assert _sections(result) == [("b", ["1", "p", "3", "r"]), ("a", ["2", "q"])]
+    assert ">k</th>" not in result.to_html()
+    assert result._repr_html_() == result.to_html()
+
+
+def test_by_columns_selects_and_orders():
+    df = pd.DataFrame({"k": ["a"], "x": ["1"], "y": ["2"], "z": ["3"]})
+    assert _sections(format_dataframe_by(df, "k", columns=["z", "x"])) == [("a", ["3", "1"])]
+    assert _sections(format_dataframe_by(df, "k", columns="y")) == [("a", ["2"])]
+
+
+def test_by_tables_keep_kql_types_and_heading_uses_key_type():
+    df = pd.DataFrame({"k": [1000, 1000], "n": [1.0, float("nan")], "b": [1, 0]})
+    df.attrs[KQL_TYPES_ATTR] = {"k": "long", "n": "long", "b": "bool"}
+    assert _sections(format_dataframe_by(df, "k")) == [("1 000", ["1", "true", "", "false"])]
+
+
+def test_by_keeps_null_and_empty_keys_apart():
+    df = pd.DataFrame({"k": [None, "", "a", float("nan")], "x": ["1", "2", "3", "4"]})
+    assert _sections(format_dataframe_by(df, "k")) == [
+        ("(null)", ["1", "4"]),
+        ("(empty)", ["2"]),
+        ("a", ["3"]),
+    ]
+
+
+def test_by_unhashable_dynamic_key():
+    df = pd.DataFrame({"k": [{"a": 1}, {"a": 1}, [2]], "x": ["1", "2", "3"]})
+    df.attrs[KQL_TYPES_ATTR] = {"k": "dynamic"}
+    assert _sections(format_dataframe_by(df, "k")) == [
+        ("{&quot;a&quot;: 1}", ["1", "2"]),
+        ("[2]", ["3"]),
+    ]
+
+
+def test_by_escapes_heading():
+    df = pd.DataFrame({"k": ["<script>alert(1)</script>"], "x": ["1"]})
+    html = format_dataframe_by(df, "k").to_html()
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_by_max_rows_applies_per_table():
+    df = pd.DataFrame({"k": ["a", "a", "a", "b"], "x": ["1", "2", "3", "4"]})
+    result = format_dataframe_by(df, "k", max_rows=2)
+    assert _sections(result) == [("a", ["1", "2"]), ("b", ["4"])]
+    assert "Showing the first 2 of 3 rows." in result.to_html()
+
+
+def test_by_table_ids_are_unique():
+    df = pd.DataFrame({"k": list(range(50)), "x": list(range(50))})
+    ids = re.findall(r'<table id="(T_[^"]+)"', format_dataframe_by(df, "k").to_html())
+    assert len(ids) == len(set(ids)) == 50
+
+
+def test_by_no_rows_and_only_key_column():
+    assert format_dataframe_by(pd.DataFrame({"k": [], "x": []}), "k").to_html() == "<p>No rows.</p>"
+    assert [h for h, _ in _sections(format_dataframe_by(pd.DataFrame({"k": ["a"]}), "k"))] == ["a"]
+
+
+def test_by_does_not_modify_df():
+    df = pd.DataFrame({"k": ["a", "b"], "x": [1, 2]})
+    before = df.copy()
+    format_dataframe_by(df, "k")
+    pd.testing.assert_frame_equal(df, before)
+
+
+@pytest.mark.parametrize(
+    ("df", "args", "kwargs"),
+    [
+        ("not a frame", ("k",), {}),
+        (pd.DataFrame({"k": [1]}), ("missing",), {}),
+        (pd.DataFrame([[1, 2]], columns=["k", "k"]), ("k",), {}),
+        (pd.DataFrame({"k": [1]}), (["k"],), {}),
+        (pd.DataFrame({"k": [1], "x": [1]}), ("k",), {"columns": ["missing"]}),
+        (pd.DataFrame({"k": [1], "x": [1]}), ("k",), {"columns": ["x", "x"]}),
+        (pd.DataFrame({"k": [1], "x": [1]}), ("k",), {"columns": 5}),
+        (pd.DataFrame({"k": [1]}), ("k",), {"max_rows": 0}),
+        (pd.DataFrame({"k": [1]}), ("k",), {"debug": "yes"}),
+    ],
+)
+def test_by_rejects_invalid_arguments(df, args, kwargs):
+    with pytest.raises(ValueError):
+        format_dataframe_by(df, *args, **kwargs)
+
+
+def test_by_logs_one_summary_not_one_per_table():
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    package_logger = logging.getLogger("security_notebook_tools")
+    package_logger.addHandler(handler)
+    try:
+        format_dataframe_by(pd.DataFrame({"k": list(range(20)), "x": list(range(20))}), "k")
+    finally:
+        package_logger.removeHandler(handler)
+    messages = [r.getMessage() for r in records if r.levelno >= logging.INFO]
+    assert len(messages) == 2
+    assert messages[0].startswith("format_dataframe_by: started")
+    assert messages[1].startswith("format_dataframe_by: finished")
+    assert "tables=20" in messages[1]

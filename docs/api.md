@@ -7,6 +7,7 @@ from security_notebook_tools import (
     exec_query,
     exec_batch_query,
     format_dataframe,
+    format_dataframe_by,
     pivot_dataframe,
     merge_dataframe,
     render_dataframe,
@@ -552,6 +553,49 @@ format_dataframe(df)  # at most 1000 rows, with a caption
 format_dataframe(df, max_rows=None)  # every row
 ```
 
+## format_dataframe_by
+
+```python
+format_dataframe_by(
+    df: pandas.DataFrame,
+    key,
+    *,
+    columns: str | Sequence[str] | None = None,
+    max_rows: int | None = 1000,
+    debug: bool = False,
+) -> SplitTables
+```
+
+Show one headed, formatted table per distinct value of a column, in one notebook cell output.
+Jupyter renders the returned object when it is the last expression in a cell; elsewhere, pass it
+to `display`. `to_html()` returns the HTML.
+
+Each heading is the value, rendered like a cell of its KQL type and HTML-escaped. Each table holds
+that value's rows without the `key` column, formatted as by `format_dataframe`. Values appear in
+order of first appearance, so a query's `order by` decides the order, and row order is kept. Rows
+with a null `key` are grouped under `(null)` and empty strings under `(empty)`, so no row is
+dropped. A `df` with no rows renders as `No rows.`. The DataFrame is not modified.
+
+| Name | Description |
+| --- | --- |
+| `df` | The DataFrame to split, usually the result of `exec_query`. |
+| `key` | The column to split on. |
+| `columns` | The column name(s) to show in each table, in this order. `None` (default) shows every column but `key`. |
+| `max_rows` | Show at most this many rows per table (default 1000), with a caption giving that table's total. `None` shows every row. |
+| `debug` | Same as for [`format_dataframe`](#format_dataframe). |
+
+`columns`, `max_rows` and `debug` are keyword-only. `ValueError` is raised if `df` is not a
+DataFrame, `key` or a name in `columns` does not name exactly one column, a name in `columns` is
+repeated, `debug` is not a bool, or `max_rows` is not a positive integer or `None`.
+
+```python
+from security_notebook_tools import exec_query, format_dataframe_by
+
+df = exec_query("SigninLogs | project ResultType, UserPrincipalName, AppDisplayName")
+format_dataframe_by(df, "ResultType")
+format_dataframe_by(df, "ResultType", columns=["UserPrincipalName"])
+```
+
 ## render_dataframe
 
 ```python
@@ -903,7 +947,7 @@ query. The records come from these loggers:
 | `security_notebook_tools.config` | Where each setting came from (DEBUG only; never the value) |
 | `security_notebook_tools.timerange` | Time range decisions ("set in query", default, both applied) |
 | `security_notebook_tools.tablepolicy` | Cost guard: Azure Resource Manager requests (method, host, path), table plan fetch with page count, tables read by an accepted query |
-| `security_notebook_tools.format` | `format_dataframe` entry and summary, the pandas Styler |
+| `security_notebook_tools.format` | `format_dataframe` and `format_dataframe_by` entry and summary, the pandas Styler |
 | `security_notebook_tools.pivot` | `pivot_dataframe` entry and summary, the pandas steps |
 | `security_notebook_tools.merge` | `merge_dataframe` entry and summary, the pandas steps |
 | `security_notebook_tools.magic` | `%%kql` runs, argument parsing, extension loading |
@@ -955,8 +999,8 @@ The installed version string, e.g. `"7.6.0"`.
 
 ### Debug output in the cell
 
-`exec_query`, `exec_batch_query`, `format_dataframe`, `pivot_dataframe` and `merge_dataframe`
-take a keyword-only `debug=False`, and `%%kql` takes `--debug`. With it, the package's log records at DEBUG and above
+`exec_query`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`, `pivot_dataframe` and
+`merge_dataframe` take a keyword-only `debug=False`, and `%%kql` takes `--debug`. With it, the package's log records at DEBUG and above
 are also printed to that notebook cell's output for as long as the call runs, in the same format
 as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
 output is not written to the file; be careful when sharing a notebook saved with debug output:

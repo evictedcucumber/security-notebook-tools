@@ -56,6 +56,7 @@ from security_notebook_tools import (
     exec_query,
     exec_batch_query,
     format_dataframe,
+    format_dataframe_by,
     pivot_dataframe,
     merge_dataframe,
     clear_cache,
@@ -340,6 +341,14 @@ format_dataframe(df, max_rows=None)  # every row
 Column headers, index labels and index names are HTML-escaped like cell values, so a value
 that became a header through `pivot_dataframe` cannot run script in the notebook output.
 
+`format_dataframe_by(df, key)` splits a result into one table per distinct value of `key`, in one
+cell output. Each value becomes a heading above a table of its rows, without the `key` column:
+
+```python
+format_dataframe_by(df, "ResultType")
+format_dataframe_by(df, "ResultType", columns=["UserPrincipalName", "AppDisplayName"])
+```
+
 The full rules are in [docs/api.md](docs/api.md).
 
 ### Charts
@@ -484,7 +493,8 @@ same caveat. `notebooks.log` is unchanged.
 ### Debug output in the cell
 
 To see what a call does, pass `debug=True` (`--debug` in `%%kql`) to `exec_query`,
-`exec_batch_query`, `format_dataframe`, `pivot_dataframe` or `merge_dataframe`. While that call
+`exec_batch_query`, `format_dataframe`, `format_dataframe_by`, `pivot_dataframe` or
+`merge_dataframe`. While that call
 runs, the package's log records at DEBUG and above are also printed to the cell's output, in the
 same line format as the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
 
@@ -541,8 +551,8 @@ notebook saved with debug output, because notebooks are saved with their outputs
   non-blank without control characters.
 - **Logs are off by default.** When enabled, INFO logs include the first 200 characters of each
   KQL query, which may contain sensitive indicators. Treat log output accordingly.
-- **Output is escaped.** `format_dataframe` HTML-escapes cell values, column headers (all
-  `MultiIndex` levels), index labels and index and column names, because telemetry can control
+- **Output is escaped.** `format_dataframe` and `format_dataframe_by` HTML-escape cell values,
+  headings, column headers (all `MultiIndex` levels), index labels and index and column names, because telemetry can control
   them (for example a value that becomes a header through `pivot_dataframe`). `notebooks.log`
   shows control and bidirectional override characters as escapes, and is set to 0600.
 - **Partial results are marked.** Every frame has `df.attrs["partial"]`, and batch frames have

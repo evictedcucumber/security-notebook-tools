@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `format_dataframe_by(df, key, columns=None, max_rows=1000)` shows one headed, formatted table per
+  distinct value of `key`, without the `key` column, as one notebook cell output.
+
 ## 7.6.0 - 2026-11-03
 
 ### Added

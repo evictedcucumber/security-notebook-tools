@@ -25,6 +25,7 @@ Public API:
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
+* ``format_dataframe_by``: display one headed, formatted table per distinct value of a column.
 * ``merge_dataframe``: group a DataFrame (or several) by key columns and aggregate columns.
 * ``pivot_dataframe``: pivot a result into one row per key and one column per value of another.
 * ``render_dataframe``: draw the chart a query asked for with ``| render <charttype>`` (Plotly,
@@ -42,9 +43,10 @@ the project root (see ``security_notebook_tools._log`` for the levels), and so a
 above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
 redacted: KQL text, result values, environment variable values, tokens and URL query strings are
 never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``format_dataframe``,
-``merge_dataframe``, ``pivot_dataframe`` and ``render_dataframe`` take ``debug=True``
-(``%%kql`` takes ``--debug``): for that call, and everything it calls, the records at DEBUG and
-above are also printed to the cell's output, unredacted (raw KQL, workspace IDs, cluster URIs).
+``format_dataframe_by``, ``merge_dataframe``, ``pivot_dataframe`` and ``render_dataframe`` take
+``debug=True`` (``%%kql`` takes ``--debug``): for that call, and everything it calls, the records
+at DEBUG and above are also printed to the cell's output, unredacted (raw KQL, workspace IDs,
+cluster URIs).
 DEBUG records are never written to the file. The ``security_notebook_tools`` logger does not
 propagate to the root logger (a ``logging.basicConfig`` handler does not see these records); a
 handler you attach to it sees every record, DEBUG included, unredacted. Control and bidirectional
@@ -61,7 +63,7 @@ Use ``help(function)`` for details. Submodules are private and may change.
 import logging
 
 from ._batch import exec_batch_query
-from ._format import format_dataframe
+from ._format import format_dataframe, format_dataframe_by
 from ._log import describe_exception
 from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
@@ -75,6 +77,7 @@ __all__ = [
     "exec_batch_query",
     "exec_query",
     "format_dataframe",
+    "format_dataframe_by",
     "merge_dataframe",
     "pivot_dataframe",
     "render_dataframe",

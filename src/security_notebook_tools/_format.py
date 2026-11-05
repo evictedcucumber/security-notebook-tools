@@ -12,10 +12,11 @@ import json
 import logging
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -30,6 +31,8 @@ logger = logging.getLogger("security_notebook_tools.format")
 KQL_TYPES_ATTR = "kql_types"
 PIVOT_TOTALS_ATTR = "pivot_totals"
 _TOTAL_LABEL = "Total"
+_NULL_HEADING = "(null)"
+_EMPTY_HEADING = "(empty)"
 DEFAULT_MAX_ROWS = 1000
 
 _INTEGER_TYPES = {"int", "int32", "int64", "long"}
@@ -232,6 +235,85 @@ def _pivot_totals(df: pd.DataFrame, view: pd.DataFrame) -> tuple[list[Any], Any]
     return columns, row if found else None
 
 
+def _kql_type(frame: pd.DataFrame, position: int, name: Any, recorded: dict[Any, Any]) -> str:
+    """Return a column's lowercase KQL type: the recorded one, else inferred from its values."""
+    kql_type = recorded.get(name)
+    if not isinstance(kql_type, str):
+        kql_type = _infer_type(frame.iloc[:, position])
+    return kql_type.lower()
+
+
+def _check_format_args(df: Any, max_rows: Any, debug: Any) -> None:
+    """Raise ``ValueError`` for an invalid ``df``, ``max_rows`` or ``debug``."""
+    if not isinstance(df, pd.DataFrame):
+        raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
+    if not isinstance(debug, bool):
+        raise ValueError(f"debug must be a bool, got {debug!r}.")
+    if max_rows is not None and (
+        isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
+    ):
+        raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
+
+
+def _style_dataframe(
+    df: pd.DataFrame, max_rows: int | None, *, log_level: int = logging.INFO
+) -> Styler:
+    """Build the ``Styler`` for validated arguments; see :func:`format_dataframe`."""
+    view = df if max_rows is None or len(df) <= max_rows else df.head(max_rows)
+    recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
+
+    kql_types: list[str] = []
+    for position, name in enumerate(view.columns):
+        kql_types.append(_kql_type(view, position, name, recorded))
+
+    with dependency_call(
+        logger, "pandas Styler", level=log_level, rows=len(view), columns=len(view.columns)
+    ):
+        styler = view.style
+        numeric: list[Any] = []
+        for name, kql_type in zip(view.columns, kql_types, strict=True):
+            styler = styler.format(_cell_formatter(kql_type), subset=[name])
+            if kql_type in _NUMERIC_TYPES:
+                numeric.append(name)
+
+        # Headers and index names come from untrusted data (pivoted cell values, dynamic
+        # keys); Styler renders them raw unless told to escape.
+        styler = (
+            styler.format_index(escape="html", axis=0)
+            .format_index(escape="html", axis=1)
+            .format_index_names(escape="html", axis=0)
+            .format_index_names(escape="html", axis=1)
+        )
+
+        styler = styler.set_table_styles(_TABLE_STYLES).set_table_styles(
+            {
+                name: [{"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")]
+                for name in numeric
+            },
+            overwrite=False,
+        )
+        total_columns, total_row = _pivot_totals(df, view)
+        if total_columns:
+            styler = styler.set_table_styles(
+                {
+                    name: [{"selector": sel, "props": _TOTAL_COLUMN_CSS} for sel in ("th", "td")]
+                    for name in total_columns
+                },
+                overwrite=False,
+            )
+        if total_row is not None:
+            styler = styler.set_table_styles(
+                {total_row: [{"selector": "td", "props": _TOTAL_ROW_CSS}]},
+                axis=1,
+                overwrite=False,
+            )
+        if all(name is None for name in df.index.names):
+            styler = styler.hide(axis="index")
+        if len(view) < len(df):
+            styler = styler.set_caption(f"Showing the first {len(view):,} of {len(df):,} rows.")
+    return styler
+
+
 def format_dataframe(
     df: pd.DataFrame,
     *,
@@ -300,68 +382,122 @@ def format_dataframe(
         columns=shape[1] if shape else None,
         max_rows=max_rows,
     ) as call:
-        if not isinstance(df, pd.DataFrame):
-            raise ValueError(f"df must be a pandas DataFrame, got {type(df).__name__}.")
-        if not isinstance(debug, bool):
-            raise ValueError(f"debug must be a bool, got {debug!r}.")
-        if max_rows is not None and (
-            isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0
-        ):
-            raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
-        view = df if max_rows is None or len(df) <= max_rows else df.head(max_rows)
-        recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
-
-        kql_types: list[str] = []
-        for position, name in enumerate(view.columns):
-            kql_type = recorded.get(name)
-            if not isinstance(kql_type, str):
-                kql_type = _infer_type(view.iloc[:, position])
-            kql_types.append(kql_type.lower())
-
-        with dependency_call(logger, "pandas Styler", rows=len(view), columns=len(view.columns)):
-            styler = view.style
-            numeric: list[Any] = []
-            for name, kql_type in zip(view.columns, kql_types, strict=True):
-                styler = styler.format(_cell_formatter(kql_type), subset=[name])
-                if kql_type in _NUMERIC_TYPES:
-                    numeric.append(name)
-
-            # Headers and index names come from untrusted data (pivoted cell values, dynamic
-            # keys); Styler renders them raw unless told to escape.
-            styler = (
-                styler.format_index(escape="html", axis=0)
-                .format_index(escape="html", axis=1)
-                .format_index_names(escape="html", axis=0)
-                .format_index_names(escape="html", axis=1)
-            )
-
-            styler = styler.set_table_styles(_TABLE_STYLES).set_table_styles(
-                {
-                    name: [{"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")]
-                    for name in numeric
-                },
-                overwrite=False,
-            )
-            total_columns, total_row = _pivot_totals(df, view)
-            if total_columns:
-                styler = styler.set_table_styles(
-                    {
-                        name: [
-                            {"selector": sel, "props": _TOTAL_COLUMN_CSS} for sel in ("th", "td")
-                        ]
-                        for name in total_columns
-                    },
-                    overwrite=False,
-                )
-            if total_row is not None:
-                styler = styler.set_table_styles(
-                    {total_row: [{"selector": "td", "props": _TOTAL_ROW_CSS}]},
-                    axis=1,
-                    overwrite=False,
-                )
-            if all(name is None for name in df.index.names):
-                styler = styler.hide(axis="index")
-            if len(view) < len(df):
-                styler = styler.set_caption(f"Showing the first {len(view):,} of {len(df):,} rows.")
-        call.update(shown_rows=len(view))
+        _check_format_args(df, max_rows, debug)
+        styler = _style_dataframe(df, max_rows)
+        call.update(shown_rows=len(styler.data))
         return styler
+
+
+class SplitTables:
+    """The tables of :func:`format_dataframe_by`, rendered by Jupyter as one cell output."""
+
+    def __init__(self, html_text: str) -> None:
+        """Hold the already escaped HTML of the headings and tables."""
+        self._html = html_text
+
+    def to_html(self) -> str:
+        """Return the headings and tables as HTML."""
+        return self._html
+
+    def _repr_html_(self) -> str:
+        return self._html
+
+
+def _shown_positions(names: list[Any], key: Any, columns: Any) -> list[int]:
+    """Return the positions of the columns to show, by default all but ``key``."""
+    if columns is None:
+        return [position for position, name in enumerate(names) if name != key]
+    try:
+        requested = [columns] if isinstance(columns, str) else list(columns)
+    except TypeError:
+        raise ValueError(
+            f"columns must be a column name or a list of them, got {columns!r}."
+        ) from None
+    invalid = [n for n in requested if names.count(n) != 1 or requested.count(n) != 1]
+    if invalid:
+        raise ValueError(f"columns must each name one column of df, once; not {invalid!r}.")
+    return [names.index(name) for name in requested]
+
+
+def format_dataframe_by(
+    df: pd.DataFrame,
+    key: Any,
+    *,
+    columns: str | Sequence[str] | None = None,
+    max_rows: int | None = DEFAULT_MAX_ROWS,
+    debug: bool = False,
+) -> SplitTables:
+    """Show one headed, formatted table per distinct value of a column, in one cell output.
+
+    Each heading is the value, rendered like a cell of its KQL type. Each table holds that value's
+    rows without the ``key`` column, formatted as by :func:`format_dataframe`. Values appear in
+    order of first appearance, so a query's ``order by`` decides the order; row order is kept.
+    Rows with a null ``key`` are grouped under ``(null)`` and empty strings under ``(empty)``, so
+    no row is dropped. Headings are HTML-escaped.
+
+    Args:
+        df: The DataFrame to split, usually the result of :func:`exec_query`. It is not modified.
+        key: The column to split on.
+        columns: The column name(s) to show in each table, in this order. ``None`` (default) shows
+            every column but ``key``.
+        max_rows: Show at most this many rows per table (default 1000), with a caption giving that
+            table's total; ``None`` shows every row.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs. Default false. The lines are printed unredacted
+            (debug output is not written to the file; be careful when sharing a notebook saved
+            with debug output). See the
+            logging section of the README.
+
+    Returns:
+        An object Jupyter renders as the headings and tables when it is the last expression in a
+        cell (elsewhere, pass it to ``display``). ``to_html()`` returns the HTML. A ``df`` with no
+        rows renders as ``No rows.``.
+
+    Raises:
+        ValueError: ``df`` is not a DataFrame, ``key`` or a name in ``columns`` does not name
+            exactly one column, a name in ``columns`` is repeated, ``debug`` is not a bool, or
+            ``max_rows`` is not a positive integer or ``None``.
+
+    Example:
+        >>> df = exec_query("SigninLogs | project ResultType, UserPrincipalName, AppDisplayName")
+        >>> format_dataframe_by(df, "ResultType")
+        >>> format_dataframe_by(df, "ResultType", columns=["UserPrincipalName"])
+    """
+    shape = getattr(df, "shape", None)
+    with public_call(
+        logger,
+        "format_dataframe_by",
+        rejected=(ValueError,),
+        debug=debug,
+        rows=shape[0] if shape else None,
+        columns=shape[1] if shape else None,
+        key=key,
+        max_rows=max_rows,
+    ) as call:
+        _check_format_args(df, max_rows, debug)
+        names = df.columns.tolist()
+        if names.count(key) != 1:
+            raise ValueError(f"key must name exactly one column of df, got {key!r}.")
+        shown = _shown_positions(names, key, columns)
+        key_position = names.index(key)
+        recorded = df.attrs.get(KQL_TYPES_ATTR) or {}
+        render_cell = _cell_formatter(_kql_type(df, key_position, key, recorded))
+
+        groups: dict[str, list[int]] = {}
+        for row, value in enumerate(df.iloc[:, key_position]):
+            heading = render_cell(value) or (_NULL_HEADING if _is_null(value) else _EMPTY_HEADING)
+            groups.setdefault(heading, []).append(row)
+
+        parts: list[str] = []
+        for heading, rows in groups.items():
+            # Styler's default 5-hex-digit ids could collide within one output and mix tables' CSS.
+            table = df.iloc[rows, shown]
+            styler = _style_dataframe(table, max_rows, log_level=logging.DEBUG).set_uuid(
+                uuid4().hex
+            )
+            with dependency_call(
+                logger, "pandas Styler to_html", level=logging.DEBUG, rows=len(rows)
+            ):
+                parts.append(f"<h3>{heading}</h3>{styler.to_html()}")
+        call.update(tables=len(groups))
+        return SplitTables("".join(parts) or "<p>No rows.</p>")
