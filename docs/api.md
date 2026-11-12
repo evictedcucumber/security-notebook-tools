@@ -16,7 +16,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "7.8.0"
+security_notebook_tools.__version__  # "8.1.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -474,7 +474,7 @@ after the first window, so a typo fails before the other windows run.
 | `agg_column` | Column name or names to aggregate. Give it together with `merge_on`. |
 | `agg_func` | How to aggregate every `agg_column` (default `"sum"`): a pandas `GroupBy.agg` function name (`"sum"`, `"min"`, `"max"`, `"mean"`, `"count"`, `"first"`, `"last"` ...) or a callable. An error without `agg_column`. |
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
-| `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a window whose result is partial (the service returned some data and an error) fails the batch with `PartialResultError` naming the window; it is not retried or split. Default false: the partial data is kept, the frame is marked (see Returns) and one warning summarises the partial windows. |
+| `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a window whose result is partial (the service returned some data and an error) fails the batch with `PartialResultError` naming the window; it is not retried or split. Default false: the partial data is kept, the frame is marked (see Returns) and one notice summarises the partial windows. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (every window, also those run on worker threads). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
 
 ### Returns
@@ -497,8 +497,9 @@ result, so the rows (and any totals from `merge_on`/`agg_column`) may be incompl
 otherwise, including on ADX. `df.attrs["partial_windows"]` is the list of `(start, end)` datetime
 tuples (UTC, in time order) of those windows, empty if none; a window that was split after a
 timeout is listed by its halves. Both are set on the aggregated frame too. After the batch one
-`UserWarning` states how many windows were partial and which (the first five are named), instead
-of one warning per window.
+notice states how many windows were partial and which (the first five are named), instead of one
+per window. In IPython it is written to the cell's stderr as plain text, without the file, line
+and source echo of a warning; elsewhere it is a `UserWarning`.
 
 ### Raises
 
@@ -1045,7 +1046,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"7.8.0"`.
+The installed version string, e.g. `"8.1.0"`.
 
 ### Debug output in the cell
 

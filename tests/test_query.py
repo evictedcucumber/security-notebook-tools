@@ -2033,6 +2033,7 @@ def test_raise_on_partial_must_be_a_bool(sentinel):
 
 def test_batch_partial_windows_are_summarised_and_marked(monkeypatch):
     stack, sdk = _partial_sentinel(monkeypatch)
+    monkeypatch.setattr("security_notebook_tools._batch._in_ipython", lambda: False)
     with stack, warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("default")  # the default filter dedupes repeats
         df = snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=3))
@@ -2041,15 +2042,33 @@ def test_batch_partial_windows_are_summarised_and_marked(monkeypatch):
     assert df.attrs["partial_windows"] == [
         (D0 + timedelta(days=i), D0 + timedelta(days=i + 1)) for i in range(3)
     ]
-    summary = [str(w.message) for w in caught if "Batch query returned partial" in str(w.message)]
+    summary = [str(w.message) for w in caught if str(w.message).startswith("Partial results:")]
     assert len(summary) == 1
     assert "3 of 3 windows" in summary[0]
+    assert "  2026-01-01 00:00 to 2026-01-02 00:00 UTC\n" in summary[0]
+
+
+def test_batch_partial_summary_in_ipython_is_plain_text(monkeypatch, capsys):
+    stack, _ = _partial_sentinel(monkeypatch)
+    monkeypatch.setattr("security_notebook_tools._batch._in_ipython", lambda: True)
+    with stack, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        snt.exec_batch_query(FILTER, D0, D0 + timedelta(days=7))
+    assert not [w for w in caught if str(w.message).startswith("Partial results:")]
+    err = capsys.readouterr().err
+    assert err.startswith("Partial results: 7 of 7 windows returned incomplete data,\n")
+    assert "UserWarning" not in err
+    assert "  ... and 2 more\n" in err
+    assert err.endswith(
+        'Windows: df.attrs["partial_windows"]. Pass raise_on_partial=True to fail instead.\n'
+    )
 
 
 def test_batch_partial_survives_aggregation(monkeypatch):
     from azure.monitor.query import LogsQueryPartialResult, LogsTable
 
     stack, sdk = _partial_sentinel(monkeypatch)
+    monkeypatch.setattr("security_notebook_tools._batch._in_ipython", lambda: False)
     table = LogsTable(
         name="T", columns=["k", "n"], columns_types=["string", "long"], rows=[["x", 2]]
     )

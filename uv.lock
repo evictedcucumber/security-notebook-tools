@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "security-notebook-tools"
-version = "7.8.0"
+version = "8.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "azure-identity" },

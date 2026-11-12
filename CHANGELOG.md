@@ -1,11 +1,20 @@
 # Changelog
 
-## 7.8.0 - 2026-11-12
+## 8.1.0 - 2026-11-12
 
 ### Added
 
 - `exec_query_file(path, timespan=None, *, ...)` runs the KQL in a `.kql` file with `exec_query`,
   taking the same arguments, so validation, the cost guard and caching are the same.
+
+## 8.0.0 - 2026-11-12
+
+### Breaking
+
+- In IPython, `exec_batch_query` writes its partial-results summary to the cell's stderr as a
+  short multi-line notice instead of issuing a `UserWarning`, so it no longer shows the file, line
+  and source echo of a warning. `warnings` filters no longer apply to it there. Outside IPython it
+  is still a `UserWarning`, with the new text.
 
 ## 7.7.0 - 2026-11-05
 
