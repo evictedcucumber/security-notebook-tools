@@ -70,7 +70,7 @@ from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query
 from ._render import render_dataframe
 
-__version__ = "7.7.0"
+__version__ = "8.0.0"
 
 __all__ = [
     "clear_cache",
