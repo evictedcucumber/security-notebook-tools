@@ -5,6 +5,7 @@ The public API is exactly these names, importable from `security_notebook_tools`
 ```python
 from security_notebook_tools import (
     exec_query,
+    exec_query_file,
     exec_batch_query,
     format_dataframe,
     format_dataframe_by,
@@ -322,6 +323,55 @@ df = exec_query("SigninLogs | take 100", timedelta(days=7))  # explicit range
 df = exec_query("SigninLogs | take 100", (datetime(2026, 10, 1), timedelta(hours=6)))
 df = exec_query("Events | take 100", target="adx", timeout=600)
 df = exec_query(".show tables", target="adx")  # management command
+```
+
+## exec_query_file
+
+```python
+exec_query_file(
+    path: str | os.PathLike[str],
+    timespan: Timespan | None = None,
+    *,
+    target: Literal["sentinel", "adx"] = "sentinel",
+    timeout: int = 300,
+    cache: bool = True,
+    raise_on_partial: bool = False,
+    debug: bool = False,
+) -> pandas.DataFrame
+```
+
+Run the KQL in a `.kql` file with `exec_query`. The file is read as UTF-8 on every call (a leading
+byte order mark is dropped and line endings become LF), and its text is passed to `exec_query` with
+the other arguments, so validation, the [cost guard](#cost-guard-sentinel-only), time range rules
+and caching are the same. The cache is keyed by the KQL text, so an edited file runs as a new query.
+
+### Parameters
+
+| Name | Description |
+| --- | --- |
+| `path` | Path to the file, a `str` or `os.PathLike`. Its suffix must be `.kql` (case-insensitive). A relative path is resolved against the current working directory (the notebook's folder in Jupyter). |
+
+`timespan`, `target`, `timeout`, `cache`, `raise_on_partial` and `debug` are as for
+[`exec_query`](#exec_query), and `target` onward are keyword-only.
+
+### Returns
+
+The DataFrame `exec_query` returns for the file's text.
+
+### Raises
+
+- `ConfigurationError` (also a `ValueError`): `path` is not a `str` or `os.PathLike`, does not end
+  in `.kql`, cannot be read (missing, a directory, no permission) or is not valid UTF-8, or
+  `exec_query` raises it for the file's text or the other arguments.
+- `QueryError` and `PartialResultError`: as for [`exec_query`](#exec_query).
+
+### Examples
+
+```python
+from security_notebook_tools import exec_query_file
+
+df = exec_query_file("queries/failed_signins.kql")
+df = exec_query_file("queries/events.kql", target="adx")
 ```
 
 ## exec_batch_query
@@ -999,9 +1049,9 @@ The installed version string, e.g. `"7.7.0"`.
 
 ### Debug output in the cell
 
-`exec_query`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`, `pivot_dataframe` and
-`merge_dataframe` take a keyword-only `debug=False`, and `%%kql` takes `--debug`. With it, the package's log records at DEBUG and above
-are also printed to that notebook cell's output for as long as the call runs, in the same format
+`exec_query`, `exec_query_file`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`,
+`pivot_dataframe` and `merge_dataframe` take a keyword-only `debug=False`, and `%%kql` takes
+`--debug`. With it, the package's log records at DEBUG and above are also printed to that notebook cell's output for as long as the call runs, in the same format
 as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
 output is not written to the file; be careful when sharing a notebook saved with debug output:
 

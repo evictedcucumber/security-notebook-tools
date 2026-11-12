@@ -15,6 +15,7 @@ PUBLIC = {
     "clear_cache",
     "exec_batch_query",
     "exec_query",
+    "exec_query_file",
     "format_dataframe",
     "format_dataframe_by",
     "merge_dataframe",

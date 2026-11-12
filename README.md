@@ -54,6 +54,7 @@ The public API is these names, all importable from the top-level package:
 ```python
 from security_notebook_tools import (
     exec_query,
+    exec_query_file,
     exec_batch_query,
     format_dataframe,
     format_dataframe_by,
@@ -121,7 +122,12 @@ df = exec_query("SigninLogs | take 100", (datetime(2026, 10, 1), datetime(2026, 
 # Azure Data Explorer (timespan isn't supported; filter on time in the KQL).
 df = exec_query("Events | take 100", target="adx")
 df = exec_query(".show tables", target="adx")  # only .show commands are allowed
+
+df = exec_query_file("queries/failed_signins.kql")  # KQL from a .kql file
 ```
+
+`exec_query_file(path, timespan=None, *, ...)` takes the same arguments as `exec_query` and runs the
+text of a `.kql` file (UTF-8, read on every call). A bad path or file raises `ConfigurationError`.
 
 `exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True,
 raise_on_partial=False, debug=False)` returns the
@@ -493,8 +499,8 @@ same caveat. `notebooks.log` is unchanged.
 ### Debug output in the cell
 
 To see what a call does, pass `debug=True` (`--debug` in `%%kql`) to `exec_query`,
-`exec_batch_query`, `format_dataframe`, `format_dataframe_by`, `pivot_dataframe` or
-`merge_dataframe`. While that call
+`exec_query_file`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`,
+`pivot_dataframe` or `merge_dataframe`. While that call
 runs, the package's log records at DEBUG and above are also printed to the cell's output, in the
 same line format as the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
 

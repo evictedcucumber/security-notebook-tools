@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `exec_query_file(path, timespan=None, *, ...)` runs the KQL in a `.kql` file with `exec_query`,
+  taking the same arguments, so validation, the cost guard and caching are the same.
+
 ## 7.7.0 - 2026-11-05
 
 ### Added

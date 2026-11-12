@@ -1,4 +1,4 @@
-"""The public ``exec_query`` entry point.
+"""The public ``exec_query`` and ``exec_query_file`` entry points.
 
 Reads connection settings from the environment on every call and dispatches to the Sentinel or
 ADX client. Clients are created on first use and cached per workspace/cluster and tenant. Results
@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import threading
 import warnings
 from collections import OrderedDict
 from datetime import timedelta
 from functools import cache, lru_cache
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -649,3 +651,75 @@ def exec_query(
         df.attrs.setdefault("partial", False)
         call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
         return df
+
+
+def exec_query_file(
+    path: str | os.PathLike[str],
+    timespan: Timespan | None = None,
+    *,
+    target: Target = "sentinel",
+    timeout: int = DEFAULT_TIMEOUT,
+    cache: bool = True,
+    raise_on_partial: bool = False,
+    debug: bool = False,
+) -> pd.DataFrame:
+    """Run the KQL in a ``.kql`` file with ``exec_query``.
+
+    The file is read as UTF-8 on every call (a leading byte order mark is dropped and line endings
+    become LF), and its text is passed to ``exec_query`` with the other arguments, so the same
+    validation, cost guard, time range rules and caching apply. The result cache is keyed by the
+    KQL text, so an edited file runs as a new query.
+
+    Args:
+        path: Path to the file, a ``str`` or ``os.PathLike``. Its suffix must be ``.kql``
+            (case-insensitive). A relative path is resolved against the current working
+            directory (the notebook's folder in Jupyter).
+        timespan: As for ``exec_query``.
+        target: As for ``exec_query``.
+        timeout: As for ``exec_query``.
+        cache: As for ``exec_query``.
+        raise_on_partial: As for ``exec_query``.
+        debug: As for ``exec_query``.
+
+    Returns:
+        The DataFrame ``exec_query`` returns for the file's text.
+
+    Raises:
+        ConfigurationError: ``path`` is not a ``str`` or ``os.PathLike``, does not end in
+            ``.kql``, cannot be read (missing, a directory, no permission) or is not valid
+            UTF-8, or ``exec_query`` raises it for the file's text or the other arguments. It is
+            also a ``ValueError``.
+        QueryError: As for ``exec_query``.
+        PartialResultError: As for ``exec_query``.
+
+    Example:
+        >>> from security_notebook_tools import exec_query_file
+        >>> df = exec_query_file("queries/failed_signins.kql")
+        >>> df = exec_query_file("queries/events.kql", target="adx")
+    """
+    with public_call(logger, "exec_query_file", target=target, debug=debug):
+        if not isinstance(path, (str, os.PathLike)):
+            raise ConfigurationError(
+                f"path must be a str or os.PathLike, got {type(path).__name__}."
+            )
+        file = Path(path)
+        if file.suffix.lower() != ".kql":
+            raise ConfigurationError(f"path must be a .kql file, got {file.name!r}.")
+        logger.debug("Reading KQL from %s", file)
+        try:
+            kql = file.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ConfigurationError(f"{file.name!r} is not valid UTF-8.") from exc
+        except OSError as exc:
+            raise ConfigurationError(
+                f"Could not read {file.name!r}: {exc.strerror or type(exc).__name__}."
+            ) from exc
+        return exec_query(
+            kql,
+            timespan,
+            target=target,
+            timeout=timeout,
+            cache=cache,
+            raise_on_partial=raise_on_partial,
+            debug=debug,
+        )

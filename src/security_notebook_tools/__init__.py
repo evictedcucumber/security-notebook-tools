@@ -23,6 +23,7 @@ Connection settings are validated and invalid ones raise an error.
 Public API:
 
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
+* ``exec_query_file``: run the KQL in a ``.kql`` file with ``exec_query``.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
 * ``format_dataframe_by``: display one headed, formatted table per distinct value of a column.
@@ -42,11 +43,11 @@ Logging: every record at INFO and above from every module is appended to ``noteb
 the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
 above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
 redacted: KQL text, result values, environment variable values, tokens and URL query strings are
-never written. Gitignore the file. ``exec_query``, ``exec_batch_query``, ``format_dataframe``,
-``format_dataframe_by``, ``merge_dataframe``, ``pivot_dataframe`` and ``render_dataframe`` take
-``debug=True`` (``%%kql`` takes ``--debug``): for that call, and everything it calls, the records
-at DEBUG and above are also printed to the cell's output, unredacted (raw KQL, workspace IDs,
-cluster URIs).
+never written. Gitignore the file. ``exec_query``, ``exec_query_file``, ``exec_batch_query``,
+``format_dataframe``, ``format_dataframe_by``, ``merge_dataframe``, ``pivot_dataframe`` and
+``render_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``): for that call, and
+everything it calls, the records at DEBUG and above are also printed to the cell's output,
+unredacted (raw KQL, workspace IDs, cluster URIs).
 DEBUG records are never written to the file. The ``security_notebook_tools`` logger does not
 propagate to the root logger (a ``logging.basicConfig`` handler does not see these records); a
 handler you attach to it sees every record, DEBUG included, unredacted. Control and bidirectional
@@ -67,7 +68,7 @@ from ._format import format_dataframe, format_dataframe_by
 from ._log import describe_exception
 from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
-from ._query import clear_cache, exec_query
+from ._query import clear_cache, exec_query, exec_query_file
 from ._render import render_dataframe
 
 __version__ = "7.7.0"
@@ -76,6 +77,7 @@ __all__ = [
     "clear_cache",
     "exec_batch_query",
     "exec_query",
+    "exec_query_file",
     "format_dataframe",
     "format_dataframe_by",
     "merge_dataframe",
