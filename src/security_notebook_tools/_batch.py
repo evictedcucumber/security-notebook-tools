@@ -6,6 +6,7 @@ import copy
 import logging
 import random
 import re
+import sys
 import threading
 import time
 import warnings
@@ -206,16 +207,40 @@ def _set_partial(df: pd.DataFrame, windows: list[tuple[datetime, datetime]]) -> 
     df.attrs[PARTIAL_WINDOWS_ATTR] = list(windows)
 
 
+def _span(start: datetime, end: datetime) -> str:
+    """``start`` to ``end`` in UTC, with seconds only if either has them and one date if shared."""
+    fmt = "%Y-%m-%d %H:%M:%S" if start.second or end.second else "%Y-%m-%d %H:%M"
+    end_fmt = fmt.removeprefix("%Y-%m-%d ") if start.date() == end.date() else fmt
+    return f"{start:{fmt}} to {end:{end_fmt}} UTC"
+
+
+def _in_ipython() -> bool:
+    """Whether an IPython shell (a notebook kernel) is running, without importing IPython."""
+    get_ipython = getattr(sys.modules.get("IPython"), "get_ipython", None)
+    return get_ipython is not None and get_ipython() is not None
+
+
 def _warn_partial(windows: list[tuple[datetime, datetime]], total: int) -> None:
-    """Warn once that ``windows`` returned partial results, so no repeat is hidden by dedupe."""
-    shown = "; ".join(f"{a:%Y-%m-%d %H:%M:%S} to {b:%Y-%m-%d %H:%M:%S} UTC" for a, b in windows[:5])
-    more = f"; and {len(windows) - 5} more" if len(windows) > 5 else ""
-    warnings.warn(
-        f"Batch query returned partial results for {len(windows)} of {total} windows ({shown}"
-        f"{more}). The result is incomplete and any totals are undercounted; see "
-        'df.attrs["partial_windows"], or pass raise_on_partial=True to fail instead.',
-        stacklevel=3,
+    """Say once that ``windows`` returned partial results, so no repeat is hidden by dedupe.
+
+    In IPython the notice is written to the cell's stderr, without the file, line and source
+    echo of a warning; elsewhere it is a ``UserWarning``.
+    """
+    lines = [
+        f"Partial results: {len(windows)} of {total} windows returned incomplete data,",
+        "so rows and any totals are undercounted.",
+        *(f"  {_span(a, b)}" for a, b in windows[:5]),
+    ]
+    if len(windows) > 5:
+        lines.append(f"  ... and {len(windows) - 5} more")
+    lines.append(
+        'Windows: df.attrs["partial_windows"]. Pass raise_on_partial=True to fail instead.'
     )
+    message = "\n".join(lines)
+    if _in_ipython():
+        sys.stderr.write(message + "\n")
+    else:
+        warnings.warn(message, stacklevel=3)
 
 
 def _names(value: str | Sequence[str], label: str) -> list[str]:
@@ -879,7 +904,7 @@ def exec_batch_query(
         raise_on_partial: Sentinel only. If true, a window whose result is partial (the service
             returned some data and an error) fails the batch with ``PartialResultError`` naming
             the window; it is not retried or split. Default false: the partial data is kept, the
-            frame is marked (see Returns) and one warning summarises the partial windows.
+            frame is marked (see Returns) and one notice summarises the partial windows.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs, including the calls it makes (every window,
             also those run on worker threads). Default false. The lines are printed unredacted
@@ -903,8 +928,9 @@ def exec_batch_query(
         incomplete; False otherwise, including on ADX. ``df.attrs["partial_windows"]`` is the
         list of ``(start, end)`` datetime tuples (UTC, in time order) of those windows, empty if
         none; a window that was split after a timeout is listed by its halves. Both are set on
-        the aggregated frame too. After the batch one ``UserWarning`` states how many windows
-        were partial and which (the first five are named).
+        the aggregated frame too. After the batch one notice states how many windows were
+        partial and which (the first five are named). In IPython it is written to the cell's
+        stderr as plain text; elsewhere it is a ``UserWarning``.
 
         With ``merge_on`` and ``agg_column``: one row per distinct key sorted by the keys, with
         the ``merge_on`` columns then the ``agg_column`` columns and a fresh index (unless every
