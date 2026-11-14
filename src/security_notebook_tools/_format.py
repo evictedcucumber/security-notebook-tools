@@ -129,7 +129,7 @@ def _fmt_dynamic(value: Any) -> str:
     if isinstance(value, str):
         try:
             value = json.loads(value)
-        except ValueError:
+        except ValueError, RecursionError:
             return value
     return json.dumps(value, ensure_ascii=False, default=str)
 

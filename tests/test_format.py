@@ -110,6 +110,11 @@ def test_dynamic():
     ]
 
 
+def test_dynamic_too_deeply_nested_is_shown_as_text():
+    deep = "[" * 100_000 + "]" * 100_000
+    assert _cells(_typed([deep], "dynamic")) == [deep]
+
+
 def test_dynamic_single_line():
     cell = _cells(_typed(['{\n  "a": 1,\n  "b": 2\n}'], "dynamic"))[0]
     assert "\n" not in cell
