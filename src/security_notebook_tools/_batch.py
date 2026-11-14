@@ -71,6 +71,8 @@ _ARITHMETIC = frozenset("+-*/%")
 # wait counts against the timeout; more workers than that gain nothing. ADX shares its limit
 # with everyone using the cluster.
 MAX_WORKERS = 5
+# Most windows one batch may be cut into: a tiny ``interval`` over a long range is a mistake.
+MAX_WINDOWS = 10_000
 # A window that fails transiently (throttled, connection dropped) is retried this many times,
 # waiting a random time (full jitter) between 0 and
 # min(_BACKOFF_CAP, _BACKOFF_BASE * 2 ** retries_so_far) seconds.
@@ -686,14 +688,54 @@ def _operator(tokens: list[Token], i: int, step: int) -> str:
     return "".join(chars if step > 0 else reversed(chars))
 
 
+def _is_filter_condition(tokens: list[Token], i: int) -> bool:
+    """Whether token ``i`` is a condition of a ``where``/``filter`` clause.
+
+    Only there does a comparison restrict the rows: in ``extend``, under ``or`` or inside a
+    function call such as ``not(...)`` or ``iff(...)``, every window could return rows of the
+    others.
+    """
+    depth = 0
+    for tok in tokens[i + 1 :]:  # to the end of the clause
+        if tok.is_p("("):
+            depth += 1
+        elif tok.is_p(")"):
+            depth = max(depth - 1, 0)
+        elif depth == 0 and tok.is_p("|", ";"):
+            break
+        elif depth == 0 and tok.is_kw("or"):
+            return False
+    depth = 0
+    for j in range(i - 1, -1, -1):  # back to the operator of the clause
+        tok = tokens[j]
+        if tok.is_p(")"):
+            depth += 1
+        elif tok.is_p("(") and depth:
+            depth -= 1
+        elif tok.is_p("("):
+            before = tokens[j - 1] if j else None
+            if before and before.kind == "id" and not before.is_kw("and", "where", "filter"):
+                return False  # a function call
+        elif depth == 0 and tok.is_kw("or"):
+            return False
+        elif depth == 0 and tok.is_p("|"):
+            return tokens[j + 1].is_kw("where", "filter")
+        elif depth == 0 and tok.is_p(";"):
+            return False
+    return False
+
+
 def _check_batch_filter(kql: str) -> None:
     """Check that the user's KQL filters on the window as ``x >= BatchStart`` and ``x < BatchEnd``.
 
     Only the user's own text is checked, never the ``let`` prefix. A comparison is a use of
     ``BatchStart`` or ``BatchEnd`` right next to ``<``, ``>``, ``<=``, ``>=``, ``==``, ``!=``,
-    ``<>``, ``=~`` or ``!~``, or inside ``between (...)``. Other uses (``extend W = BatchStart``,
-    ``bin(x, 1h)`` arguments) are not judged. A variable followed by arithmetic
-    (``x >= BatchStart - 1h``) is part of an expression: it neither satisfies nor violates the rule.
+    ``<>``, ``=~`` or ``!~``, or inside ``between (...)``. A required comparison counts only as a
+    condition of a ``where``/``filter`` clause, not under ``or`` or in a function call (see
+    :func:`_is_filter_condition`); the clause may be in a subquery. Other uses
+    (``extend W = BatchStart``, ``bin(x, 1h)`` arguments) are not judged. A variable followed by
+    arithmetic (``x >= BatchStart - 1h``) is part of an expression: it neither satisfies nor
+    violates the rule.
     Comments and strings are ignored because the tokenizer drops or isolates them.
 
     Raises:
@@ -703,6 +745,7 @@ def _check_batch_filter(kql: str) -> None:
     """
     tokens = tokenize(kql)
     found: set[str] = set()
+    misplaced = False
     for i, tok in enumerate(tokens):
         if tok.low == "between" and tok.kind == "id" and not tok.quoted:
             depth = 0
@@ -739,7 +782,10 @@ def _check_batch_filter(kql: str) -> None:
             continue  # part of an expression (BatchEnd - BatchStart), not the bound itself
         if before_op in _COMPARISONS:
             if before_op == (">=" if is_start else "<"):
-                found.add(tok.text)
+                if _is_filter_condition(tokens, i):
+                    found.add(tok.text)
+                else:
+                    misplaced = True
                 continue
             raise ConfigurationError(
                 f"`... {before_op} {tok.text}` is not allowed; {_EXPECTED} (the window is "
@@ -747,7 +793,10 @@ def _check_batch_filter(kql: str) -> None:
             )
         if after_op in _COMPARISONS:
             if after_op == ("<=" if is_start else ">"):
-                found.add(tok.text)
+                if _is_filter_condition(tokens, i):
+                    found.add(tok.text)
+                else:
+                    misplaced = True
                 continue
             raise ConfigurationError(
                 f"`{tok.text} {after_op} ...` is not allowed; {_EXPECTED} (the window is "
@@ -759,9 +808,15 @@ def _check_batch_filter(kql: str) -> None:
         if name not in found
     ]
     if missing:
+        hint = (
+            " A comparison counts only as a condition of a `where`, not under `or`, in a function "
+            "call such as `not(...)` or in another operator such as `extend`."
+            if misplaced
+            else ""
+        )
         raise ConfigurationError(
             f"The KQL must compare with {' and '.join(missing)}, so that a row on a window "
-            f"boundary is counted once: {_EXPECTED}. The query was not sent."
+            f"boundary is counted once: {_EXPECTED}.{hint} The query was not sent."
         )
 
 
@@ -870,7 +925,8 @@ def exec_batch_query(
             aligns the windows to ``interval`` as described above.
         end: The end of the period (exclusive); defaults to now in UTC. A naive datetime is
             taken to be UTC.
-        interval: The length of each window (default 1 day); must be positive.
+        interval: The length of each window (default 1 day); must be positive and give at most
+            10,000 windows.
         min_interval: Split a window that times out instead of failing. ``None`` (default)
             keeps the behaviour: a window that times out fails the batch. With a value, a window
             that fails with a timeout (HTTP 504/408 or a timeout error code on either
@@ -945,7 +1001,8 @@ def exec_batch_query(
             ``timedelta``, ``min_interval`` is not a positive ``timedelta`` or is longer than
             ``interval``, ``timeout`` is not a positive integer, ``cache``, ``raise_on_partial`` or
             ``debug`` is not a bool, ``max_workers`` is not an
-            integer from 1 to 5, ``start`` is not before ``end``, ``target`` is unknown, the ADX
+            integer from 1 to 5, ``start`` is not before ``end``, ``interval`` cuts the range
+            into more than 10,000 windows, ``target`` is unknown, the ADX
             KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
             ``< BatchEnd`` (checked before any query, on both targets), defines ``BatchStart`` or
             ``BatchEnd``, compares them in any other form,
@@ -1042,6 +1099,12 @@ def exec_batch_query(
         start_utc = end_utc - start if isinstance(start, timedelta) else _utc(start)
         if start_utc >= end_utc:
             raise ConfigurationError(f"start ({start_utc}) must be before end ({end_utc}).")
+        count = -((start_utc - end_utc) // interval)  # rounded up
+        if count > MAX_WINDOWS:
+            raise ConfigurationError(
+                f"interval ({interval}) cuts {start_utc} to {end_utc} into {count} windows; the "
+                f"most is {MAX_WINDOWS}. Use a longer interval or a shorter range."
+            )
 
         if target == "adx" and kql.lstrip().startswith("."):
             raise ConfigurationError(

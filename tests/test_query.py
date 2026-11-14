@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import time
 import warnings
 from datetime import UTC, date, datetime, timedelta
 from unittest import mock
@@ -8,6 +9,7 @@ import pandas as pd
 import pytest
 
 import security_notebook_tools as snt
+from security_notebook_tools import _query
 from security_notebook_tools._exceptions import ConfigurationError
 from security_notebook_tools._tablepolicy import TablePolicy
 
@@ -121,6 +123,61 @@ def test_sentinel_changed_resource_var_gets_new_client(sentinel, monkeypatch, va
     monkeypatch.setenv(var, value)
     snt.exec_query("T")
     assert cls.call_count == 2
+
+
+def _adx_options(call):
+    return call.kwargs["properties"]._options
+
+
+def test_adx_query_asks_for_untruncated_results_but_a_command_does_not(adx):
+    cls, _ = adx
+    snt.exec_query("T", target="adx")
+    options = _adx_options(cls.return_value.query_tables.call_args)
+    assert options["truncationmaxrecords"] == 10_000_000
+    assert options["truncationmaxsize"] == 2 * 1024**3
+    assert "notruncation" not in options
+    snt.exec_query(".show tables", target="adx")
+    assert set(_adx_options(cls.return_value.show.call_args)) == {"servertimeout"}
+
+
+def test_adx_workspace_url_gets_the_same_options(adx, monkeypatch):
+    cls, _ = adx
+    monkeypatch.setenv("ADX_CLUSTER_URI", WORKSPACE_URL)
+    monkeypatch.delenv("ADX_DATABASE")
+    monkeypatch.setattr(_query, "_cleared_at", None)
+    snt.exec_query("T", target="adx")
+    assert set(_adx_options(cls.return_value.query_tables.call_args)) == {
+        "servertimeout",
+        "truncationmaxrecords",
+        "truncationmaxsize",
+        "query_results_cache_max_age",
+    }
+
+
+def test_adx_server_results_cache_never_predates_clear_cache(adx, monkeypatch):
+    cls, _ = adx
+    age = "query_results_cache_max_age"
+    query_tables = cls.return_value.query_tables
+    monkeypatch.setattr(_query, "_cleared_at", None)  # a new kernel
+    snt.exec_query("A", target="adx")
+    assert _adx_options(query_tables.call_args)[age] == timedelta(minutes=5)
+
+    monkeypatch.setattr(_query, "_cleared_at", time.monotonic() - 90)
+    snt.exec_query("B", target="adx")
+    assert timedelta(seconds=90) <= _adx_options(query_tables.call_args)[age] < timedelta(minutes=2)
+
+    snt.clear_cache()
+    snt.exec_query("C", target="adx")
+    assert age not in _adx_options(query_tables.call_args)
+
+
+def test_adx_cache_false_skips_the_server_results_cache(adx, monkeypatch):
+    cls, _ = adx
+    monkeypatch.setattr(_query, "_cleared_at", None)
+    snt.exec_query("T", target="adx", cache=False)
+    options = _adx_options(cls.return_value.query_tables.call_args)
+    assert "query_results_cache_max_age" not in options
+    assert options["truncationmaxrecords"] == 10_000_000
 
 
 def test_adx_query_and_command(adx, monkeypatch):
@@ -337,6 +394,12 @@ _ACCEPTED = [
     FILTER + " // where x > BatchStart or x == BatchEnd",
     FILTER + " | where s == 'x <= BatchEnd'",
     "T | where ['x'] >= BatchStart and ['x'] < BatchEnd",
+    "T | where (x >= BatchStart and x < BatchEnd) and isnotempty(y)",
+    "T | where isnotempty(y) and ((x >= BatchStart) and x < BatchEnd)",
+    "T | filter x >= BatchStart and x < BatchEnd",
+    "union (A | where x >= BatchStart and x < BatchEnd), (B | where y == 1 or y == 2)",
+    "let base = T | where x >= BatchStart and x < BatchEnd; base | where a == 1 or b == 2",
+    "A | join (B | where x >= BatchStart and x < BatchEnd) on k",
 ]
 
 
@@ -377,6 +440,14 @@ _REJECTED = [
     ('T | where s == "x >= BatchStart" and x < BatchEnd', "BatchStart"),
     ("T | where x >= BatchStart - 1h and x < BatchEnd", "BatchStart"),
     ("T | extend a = BatchStart, b = BatchEnd", "BatchStart"),
+    ("T | extend ok = x >= BatchStart and x < BatchEnd", "counts only as a condition"),
+    ("T | summarize countif(x >= BatchStart and x < BatchEnd)", "counts only as a condition"),
+    ("T | where x >= BatchStart or x < BatchEnd", "counts only as a condition"),
+    ("T | where y == 1 or (x >= BatchStart and x < BatchEnd)", "counts only as a condition"),
+    ("T | where (x >= BatchStart and x < BatchEnd) or y == 1", "counts only as a condition"),
+    ("T | where not(x >= BatchStart and x < BatchEnd)", "counts only as a condition"),
+    ("T | where iff(y, x >= BatchStart and x < BatchEnd, true)", "counts only as a condition"),
+    ("T | where x >= BatchStart | extend b = x < BatchEnd", "BatchEnd.*counts only"),
 ]
 
 
@@ -385,6 +456,13 @@ def test_batch_filter_rejected(either, kql, match):
     target, query_tables = either
     with pytest.raises(ConfigurationError, match=match):
         snt.exec_batch_query(kql, D0, _days(2), target=target)
+    query_tables.assert_not_called()
+
+
+def test_batch_rejects_too_many_windows(either):
+    target, query_tables = either
+    with pytest.raises(ConfigurationError, match="525600 windows; the most is 10000"):
+        snt.exec_batch_query(FILTER, D0, _days(365), interval=timedelta(minutes=1), target=target)
     query_tables.assert_not_called()
 
 
@@ -508,7 +586,6 @@ def test_batch_prefix_passes_cost_guard():
 
 import errno  # noqa: E402
 import threading  # noqa: E402
-import time  # noqa: E402
 
 from security_notebook_tools import _batch  # noqa: E402
 from security_notebook_tools._exceptions import (  # noqa: E402
@@ -1007,6 +1084,12 @@ def test_cache_false_bypasses_and_keeps_cache(fixture, request):
     assert _sdk_calls(cls) == 3
     snt.exec_query("T", **kw)  # the first result is still cached
     assert _sdk_calls(cls) == 3
+
+
+def test_cache_false_skips_the_defensive_copy(sentinel):
+    with mock.patch.object(snt._query, "_copies") as copies:
+        snt.exec_query("T", cache=False)
+    copies.assert_not_called()
 
 
 def test_cache_false_does_not_store(sentinel):

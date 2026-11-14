@@ -11,6 +11,7 @@ import copy
 import logging
 import os
 import threading
+import time
 import warnings
 from collections import OrderedDict
 from datetime import timedelta
@@ -50,9 +51,26 @@ BATCH_CACHE_SIZE = 4
 _batch_results: OrderedDict[tuple, dict[tuple, tuple[pd.DataFrame, ...]]] = OrderedDict()
 _batch_lock = threading.Lock()
 
-# Set by the cached fetch functions when they actually run, so the caller can tell a hit from a
-# miss without racing on ``cache_info()``.
+# ``ran`` is set by the cached fetch functions when they actually run, so the caller can tell a
+# hit from a miss without racing on ``cache_info()``. ``fresh`` is set by the caller for
+# ``cache=False``: the fetch must not accept a result cached by the service either.
 _fetch = threading.local()
+
+# Oldest result (seconds) the ADX query results cache may answer with. See _server_cache_age.
+SERVER_CACHE_MAX_AGE = 300
+# Most an ADX result may hold (the service default is 500,000 rows and 64 MB).
+ADX_MAX_ROWS = 10_000_000
+ADX_MAX_BYTES = 2 * 1024**3
+_cleared_at: float | None = None  # time.monotonic() of the last clear_cache()
+
+
+def _server_cache_age() -> int:
+    """Seconds of age the ADX results cache may serve: never a result from before `clear_cache`."""
+    if getattr(_fetch, "fresh", True):
+        return 0
+    if _cleared_at is None:
+        return SERVER_CACHE_MAX_AGE
+    return min(SERVER_CACHE_MAX_AGE, int(time.monotonic() - _cleared_at))
 
 
 class _PartialResult(Exception):  # noqa: N818 - internal control flow, not an error
@@ -151,7 +169,12 @@ def _sentinel_tables(
 def _adx_tables(
     cluster_uri: str, tenant_id: str | None, database: str, kql: str, timeout: int
 ) -> tuple[pd.DataFrame, ...]:
-    """Fetch (and cache) all result tables of an ADX query or ``.show`` command."""
+    """Fetch (and cache) all result tables of an ADX query or ``.show`` command.
+
+    A query is sent with the result limit raised to :data:`ADX_MAX_ROWS` rows and
+    :data:`ADX_MAX_BYTES` bytes and, unless the caller asked for fresh data, with
+    ``query_results_cache_max_age`` (see :func:`_server_cache_age`).
+    """
     _fetch.ran = True
     logger.info("Result cache miss; running the query on ADX")
     client = _client_for(_adx_client, cluster_uri, tenant_id)
@@ -161,6 +184,10 @@ def _adx_tables(
     )
     if kql.lstrip().startswith("."):
         return (client.show(kql, database, properties=props),)
+    props.set_option("truncationmaxrecords", ADX_MAX_ROWS)
+    props.set_option("truncationmaxsize", ADX_MAX_BYTES)
+    if age := _server_cache_age():
+        props.set_option("query_results_cache_max_age", timedelta(seconds=age))
     return tuple(client.query_tables(kql, database, properties=props))
 
 
@@ -302,9 +329,10 @@ def _cached_call(
     queries are kept, however many there are, so a re-run after a failure or interrupt finds all
     the windows that succeeded.
     """
+    _fetch.fresh = not cache
     if not cache:
         logger.info("Result cache bypassed (cache=False); running the query")
-        return _copies(fetch.__wrapped__(*args))
+        return list(fetch.__wrapped__(*args))  # fresh and unshared, so no copy is needed
     if batch is not None:
         tables = _batch_lookup(batch, args)
         if tables is not None:
@@ -406,6 +434,8 @@ def clear_cache() -> None:
         >>> from security_notebook_tools import clear_cache
         >>> clear_cache()
     """
+    global _cleared_at
+    _cleared_at = time.monotonic()
     results = _sentinel_tables.cache_info().currsize + _adx_tables.cache_info().currsize
     _sentinel_tables.cache_clear()
     _adx_tables.cache_clear()
@@ -513,10 +543,16 @@ def exec_query(
     is dropped), keyed by target, connection settings, exact KQL text, resolved time range and
     timeout. A relative time range (a ``timedelta``, including the default 1 day) is not
     re-evaluated on a hit, so the data is from when the query first ran. Failures and partial
-    results are not cached, and a copy is returned each time. On a hit no request is sent, so
-    the cost guard check is not re-run and nothing is billed. Use ``cache=False`` or
-    ``clear_cache()`` for fresh data. The windows of ``exec_batch_query`` are cached apart from
-    these 32 (see there).
+    results are not cached, and a copy is returned each time. On a hit no query is sent, so
+    the cost guard check is not re-run and nothing is billed (on Sentinel the retention
+    warning is still checked, which re-reads the table plans once they are 5 minutes old). Use
+    ``cache=False`` or ``clear_cache()`` for fresh data. The windows of ``exec_batch_query`` are
+    cached apart from these 32 (see there).
+
+    An ADX query may return up to 10,000,000 rows and 2 GB (the service default is 500,000
+    rows and 64 MB), and with ``cache=True`` the service may answer from its own query results
+    cache: at most 5 minutes old, never from before the last ``clear_cache()``. Sentinel results
+    are limited by the service to 500,000 rows and 64 MB.
 
     Args:
         kql: The KQL query, a non-blank string. With ``target="adx"``, text starting with ``.``
