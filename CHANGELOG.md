@@ -1,5 +1,58 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- `exec_batch_query` counts the `>= BatchStart` and `< BatchEnd` comparisons only when each is a
+  condition of a `where` (or `filter`), not under `or`, inside a function call such as `not(...)`
+  or `iff(...)`, or in another operator such as `extend`. Such a query passed the check but did
+  not restrict the rows to the window, so on ADX every window returned rows of the others. It is
+  now rejected with a `ConfigurationError` before any query is sent.
+- `exec_batch_query` raises a `ConfigurationError` when `interval` would cut the range into more
+  than 10,000 windows, instead of building them all.
+- ADX queries use the service's query results cache with `cache=True` (the default): a query
+  first run in a new kernel may return a result the service cached up to 5 minutes ago. A
+  result from before the last `clear_cache()` is never accepted, and `cache=False` does not use
+  the cache. `target="sentinel"` is unchanged.
+- pandas 3.0 or later is required. The package already failed on pandas 2.x
+  (`render_dataframe` uses `Styler.format_index_names`), so the declared `pandas>=2.2` was wrong.
+
+### Changed
+
+- ADX queries ask for a result limit of 10,000,000 rows and 2 GB instead of the default 500,000
+  rows and 64 MB, so a query that failed on the default limit now returns its rows.
+- `cache=False` results are returned without the extra deep copy of `dynamic` cells: nothing else
+  holds them, so the copy only cost time.
+- Reading the table plans of one workspace no longer blocks cost guard checks for other
+  workspaces in other threads.
+
+### Fixed
+
+- Sentinel: connections send TCP keepalive probes while a query runs, so a firewall, NAT or load
+  balancer that drops silent connections no longer cuts a long query off before `timeout`.
+- ADX: an error is treated as throttling only by its type, HTTP 429 or service error code, no
+  longer by its message. A permanent error that named a column such as `ThrottledCount` was
+  retried by `exec_batch_query` as if it were throttling.
+- Sentinel: a `datetime` column holding a value that cannot be parsed no longer fails the whole
+  query; the column is returned as received and a WARNING is logged. A repeated column name with
+  a `datetime` type no longer fails either.
+- `format_dataframe` no longer raises `RecursionError` on very deeply nested JSON text in a
+  `dynamic` column; the text is shown as is.
+
+### Security
+
+- The error raised when the table plans cannot be read passes the underlying message through the
+  log redaction (quoted text and secrets removed), and the workspace mismatch error shows only the
+  first four characters of the two workspace IDs. Both messages are also written to
+  `notebooks.log`.
+
+### Docs
+
+- A result cache hit sends no query, but on Sentinel the retention warning may still re-read the
+  table plans from ARM. The README, `docs/api.md` and the `exec_query` docstring said no request
+  was sent.
+
 ## 8.1.0 - 2026-11-12
 
 ### Added

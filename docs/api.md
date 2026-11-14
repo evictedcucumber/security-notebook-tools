@@ -439,7 +439,8 @@ BatchEnd = datetime("...");` added in front of your KQL. The window is half-open
 filter with `TimeGenerated >= BatchStart and TimeGenerated < BatchEnd` (any column or expression
 instead of `TimeGenerated`; `BatchStart <= x` and `BatchEnd > x` also work), which counts a
 boundary row once. This is checked on both targets before any query is sent: both comparisons
-must appear (outside comments and strings), and any other comparison of `BatchStart` or
+must appear (outside comments and strings) as conditions of a `where`, not under `or`, inside a
+function call such as `not(...)` or in another operator such as `extend`, and any other comparison of `BatchStart` or
 `BatchEnd` (`>`, `<=`, `==`, `!=`, `between`, or the wrong variable) is rejected, as is defining
 either name yourself. Other uses, such as `extend WindowStart = BatchStart`, are fine. On Sentinel
 each window is also sent as the API time range, so the 1-day default and the "set in query" rules
@@ -465,7 +466,7 @@ after the first window, so a typo fails before the other windows run.
 | `kql` | The KQL query, a non-blank string. Do not define `BatchStart` or `BatchEnd` yourself. It must filter with `>= BatchStart` and `< BatchEnd` (see above), and with `target="adx"` it may not start with `.` (management commands). |
 | `start` | A `datetime` (start of the period), or a `timedelta` meaning that long before `end`. Naive datetimes are taken to be UTC. |
 | `end` | A `datetime` (end of the period, exclusive) or `None`; defaults to now in UTC. Naive datetimes are taken to be UTC. |
-| `interval` | Window length, a `timedelta` (default 1 day); must be positive. |
+| `interval` | Window length, a `timedelta` (default 1 day); must be positive and give at most 10,000 windows. |
 | `min_interval` | `None` (default): a window that times out fails the batch. A `timedelta`: split a window that times out into two halves, recursively, until a half would be shorter than this; then fail, naming the smallest window tried. Must be positive and not longer than `interval`. |
 | `target` | `"sentinel"` (default) or `"adx"`. |
 | `timeout` | Server-side timeout in seconds for each window (default 300); must be a positive `int`. |
@@ -507,7 +508,7 @@ and source echo of a warning; elsewhere it is a `UserWarning`.
   timedelta, `end` is not a datetime or `None`, `interval` is not a positive `timedelta`,
   `min_interval` is not a positive `timedelta` or is longer than `interval`,
   `timeout` is not a positive integer, `cache`, `raise_on_partial` or `debug` is not a bool, `max_workers` is not an integer
-  from 1 to 5, `start` is not before `end`,
+  from 1 to 5, `start` is not before `end`, `interval` cuts the range into more than 10,000 windows,
   `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
   `< BatchEnd`, compares them in another form or defines them (checked before any query),
   `merge_on`/`agg_column` are not given together, empty, not column names, repeated or
@@ -928,13 +929,28 @@ below).
   is resolved when the query first runs; a hit returns the data from then, not from now. Pass
   absolute datetimes, or `cache=False`, when you need current data.
 - **Not cached:** failures and partial Sentinel results. ADX `.show` commands are cached.
+- **ADX service cache.** With `cache=True` an ADX query is also sent with
+  `query_results_cache_max_age`, so the service may answer from its own
+  [query results cache](https://learn.microsoft.com/kusto/query/query-results-cache), for example
+  when a batch is re-run in a new kernel. It accepts a result at most 5 minutes old and never one
+  from before the last `clear_cache()`; `cache=False` does not use it. `target="sentinel"` has no
+  such option.
+- **Row limits.** An ADX query asks for up to 10,000,000 rows and 2 GB (`truncationmaxrecords`,
+  `truncationmaxsize`) instead of the default 500,000 rows and 64 MB; past that the query fails.
+  A workspace URL may still apply its own lower limit. A `target="sentinel"` query is limited by
+  the service to 500,000 rows and 64 MB compressed; past that the result is partial. Use
+  `exec_batch_query` to get more.
+- **Long queries.** Sentinel connections send TCP keepalive probes every 30 seconds while they
+  wait, so a firewall, NAT or load balancer does not drop a query that runs for the full
+  `timeout` (up to the service maximum of 600 seconds). The ADX SDK does the same.
 - **Copies:** each call gets its own copy, including nested `dynamic` dicts and lists, so changing
   the returned DataFrame does not affect the cache.
 - **Not keyed on the account.** The key has no signed-in `az` account in it. After `az login` as a
   different account, or a change to your permissions, call `clear_cache()`, or a hit returns data
   fetched under the earlier access.
-- **A hit sends no request**, so nothing is billed and the cost guard check is not needed. An
-  INFO log line says the result came from the cache.
+- **A hit sends no query**, so nothing is billed and the cost guard check is not needed. An
+  INFO log line says the result came from the cache. On Sentinel the retention warning is still
+  checked, which re-reads the table plans (an ARM read, not billed) once they are 5 minutes old.
 - **Batch:** each window is cached separately, so re-running `exec_batch_query` after a failure
   or an interrupt (including `KeyboardInterrupt`) reuses the windows that already succeeded and
   runs only the rest: all of them with the same absolute `start` and `end`, and with a range
@@ -952,7 +968,7 @@ everything. Large results stay in memory until evicted or cleared, so use `cache
 
 ```python
 df = exec_query("SigninLogs | take 100")  # runs the query
-df = exec_query("SigninLogs | take 100")  # served from the cache, no request
+df = exec_query("SigninLogs | take 100")  # served from the cache, no query
 df = exec_query("SigninLogs | take 100", cache=False)  # runs again
 ```
 

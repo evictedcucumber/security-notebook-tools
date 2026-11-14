@@ -217,7 +217,7 @@ df = exec_batch_query(
 ```
 
 Each window's bounds are available to the query as `BatchStart` and `BatchEnd`; filter with
-`x >= BatchStart and x < BatchEnd` (half-open, so boundary rows aren't counted twice). This is
+`x >= BatchStart and x < BatchEnd` in a `where` (half-open, so boundary rows aren't counted twice). This is
 checked on both targets before any query is sent; other comparisons of the two names (`>`, `<=`,
 `==`, `between` ...) are rejected. On Sentinel each window is also sent as the API time range. The
 cost guard applies to every window: as the windows differ only in their bounds, it checks the
@@ -268,7 +268,7 @@ df = exec_batch_query(
 ### Caching
 
 Results are cached in memory by default (up to 32 distinct queries, least recently used dropped
-first), so repeating a query in a notebook sends no request and costs nothing. A relative range
+first), so repeating a query in a notebook sends no query and costs nothing. A relative range
 (a `timedelta`, including the default last 1 day) is not re-evaluated on a hit, so you get the
 data from when the query first ran. Failures and partial results are not cached, and each call
 gets its own copy (nested `dynamic` dicts and lists included), so changing a returned frame never
@@ -280,6 +280,9 @@ them for the same absolute `start` and `end`, and for a range relative to now (`
 `timedelta`, no `end`) every window but the first and last, because those windows are cut on a
 fixed `interval` grid (midnight UTC for the default 1 day). Batch windows do not count against
 the 32: every window of the 4 most recently run batch queries is kept, however many there are.
+
+ADX queries also use the service's results cache and a higher row limit; see
+[docs/api.md](docs/api.md#caching).
 
 ```python
 df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call (`--no-cache` in %%kql)
