@@ -235,8 +235,8 @@ def azure_error_codes(exc: BaseException) -> list[str]:
         return []
 
 
-def kusto_error_codes(exc: BaseException) -> list[str]:
-    """The ``OneApiError`` codes of a ``KustoApiError`` or ``KustoMultiApiError``."""
+def kusto_error_codes(exc: BaseException, attr: str = "code") -> list[str]:
+    """The ``OneApiError`` codes (or another ``attr``) of a Kusto API error."""
     try:
         if hasattr(exc, "get_api_errors"):
             errors = list(exc.get_api_errors())
@@ -244,7 +244,7 @@ def kusto_error_codes(exc: BaseException) -> list[str]:
             errors = [exc.get_api_error()]
         else:
             return []
-        codes = [getattr(e, "code", None) for e in errors]
+        codes = [getattr(e, attr, None) for e in errors]
         return list(dict.fromkeys(c for c in codes if isinstance(c, str) and c))
     except Exception:
         return []

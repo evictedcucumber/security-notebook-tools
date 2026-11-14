@@ -114,8 +114,21 @@ _SHOW_RE = re.compile(r"\.show(\s|$)", re.IGNORECASE)
 _PLAIN_SHOW_RE = re.compile(r"\.show(?:[ \t]+[A-Za-z0-9_.-]+)+", re.IGNORECASE | re.ASCII)
 # A server-side throttle can arrive as a KustoServiceError rather than a KustoThrottlingError.
 _THROTTLED_RE = re.compile(r"TooManyRequests|throttl", re.IGNORECASE)
+_TOO_MANY_REQUESTS = 429
 # Kusto's server-enforced read-only request option (the SDK has no constant for it).
 _READONLY_OPTION = "request_readonly"
+
+
+def _throttled(exc: KustoError, status: int | None, codes: list[str]) -> bool:
+    """Whether the service throttled the request, judged by status and error codes only.
+
+    The message is not searched: it echoes query text, so a column named ``ThrottledCount`` in a
+    semantic error would make a permanent failure look retryable.
+    """
+    if isinstance(exc, KustoThrottlingError) or status == _TOO_MANY_REQUESTS:
+        return True
+    names = [*codes, *kusto_error_codes(exc, "type")]
+    return any(_THROTTLED_RE.search(name) for name in names)
 
 
 def _status(exc: KustoServiceError) -> int | None:
@@ -240,7 +253,7 @@ class ADXClient:
             status = _status(exc) if isinstance(exc, KustoServiceError) else None
             codes = kusto_error_codes(exc)
             message = f"ADX {kind} failed: {exc}{hints_for(status, codes)}"
-            if isinstance(exc, KustoThrottlingError) or _THROTTLED_RE.search(str(exc)):
+            if _throttled(exc, status, codes):
                 error = QueryThrottledError
             elif status in TRANSIENT_STATUS:
                 error = QueryTransientError

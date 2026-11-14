@@ -101,9 +101,17 @@ def test_service_error(patched):
     "error",
     [
         KustoThrottlingError("Too many requests"),
-        KustoServiceError("Query execution has exceeded the allowed limits: TooManyRequests"),
-        KustoServiceError("Request was throttled (QueryThrottledException)"),
-        KustoServiceError("the request is THROTTLED"),
+        KustoApiError({"error": {"code": "TooManyRequests", "message": "m", "@message": "d"}}),
+        KustoApiError(
+            {
+                "error": {
+                    "code": "LimitsExceeded",
+                    "message": "m",
+                    "@message": "d",
+                    "@type": "Kusto.DataNode.Exceptions.QueryThrottledException",
+                }
+            }
+        ),
     ],
 )
 def test_throttling_maps_to_query_throttled_error(patched, error):
@@ -119,9 +127,26 @@ def test_throttling_maps_to_query_throttled_error(patched, error):
         c.show(".show tables")
 
 
-def test_other_service_errors_are_not_throttling(patched):
+def test_http_429_is_throttling(patched):
     client, _, _ = patched
-    client.execute_query.side_effect = KustoServiceError("Semantic error: Failed to resolve T")
+    client.execute_query.side_effect = KustoServiceError("busy", mock.Mock(status_code=429))
+    with pytest.raises(QueryThrottledError):
+        _adx().query("T")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Semantic error: Failed to resolve T",
+        "Semantic error: Failed to resolve column 'ThrottledCount'",
+        "Semantic error: 'TooManyRequests' is not a table",
+    ],
+)
+def test_other_service_errors_are_not_throttling(patched, message):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {"error": {"code": "SEM0100", "message": "m", "@message": message}}
+    )
     c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
     with pytest.raises(QueryError) as ei:
         c.query("T")
