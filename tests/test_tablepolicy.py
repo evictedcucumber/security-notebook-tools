@@ -121,8 +121,22 @@ def test_paging_follows_next_link():
 
 
 def test_customer_id_mismatch(arm):
-    with pytest.raises(ConfigurationError, match="does not match"):
+    with pytest.raises(ConfigurationError, match="does not match") as info:
         tp.get_policy(RID, "33333333-3333-3333-3333-333333333333", mock.Mock())
+    assert "(3333…)" in str(info.value) and "(customerId 1111…)" in str(info.value)
+    assert WS not in str(info.value) and "33333333-" not in str(info.value)
+
+
+def test_fetch_error_detail_is_redacted():
+    exc = ValueError("bad value 'SecretTable | where x == 1' in response")
+    with (
+        mock.patch.object(tp, "_get_json", side_effect=exc),
+        mock.patch.object(tp, "_arm_client"),
+        pytest.raises(QueryError, match="Could not verify") as info,
+    ):
+        tp.get_policy(RID, WS, mock.Mock())
+    assert "ValueError: bad value" in str(info.value)
+    assert "SecretTable" not in str(info.value)
 
 
 def test_customer_id_compared_case_insensitively_and_on_cache_hit(arm):
@@ -222,6 +236,32 @@ def test_cache_is_per_tenant_and_clearable(arm):
     tp.clear_policy_cache()
     tp.get_policy(RID, WS, mock.Mock(), "tenant-a")
     assert len(arm.calls) == 9
+
+
+def test_fetch_does_not_hold_the_cache_lock(arm):
+    # A slow fetch for one workspace must not block cached reads for another.
+    held = []
+    real = tp._fetch_policy
+
+    def fetch(*args):
+        held.append(tp._lock.locked())
+        return real(*args)
+
+    with mock.patch.object(tp, "_fetch_policy", fetch):
+        tp.get_policy(RID, WS, mock.Mock())
+    assert held == [False]
+
+
+def test_policy_fetched_across_a_clear_is_not_cached(arm):
+    real = tp._fetch_policy
+
+    def fetch(*args):
+        tp.clear_policy_cache()
+        return real(*args)
+
+    with mock.patch.object(tp, "_fetch_policy", fetch):
+        tp.get_policy(RID, WS, mock.Mock())
+    assert not tp._cache
 
 
 def test_next_link_must_stay_on_arm():

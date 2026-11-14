@@ -59,7 +59,15 @@ from ._kql import (
     skip_params,
     tokenize,
 )
-from ._log import SafeText, dependency_call, mark_failure_logged, mask_name, redact
+from ._log import (
+    SafeText,
+    dependency_call,
+    describe_exception,
+    mark_failure_logged,
+    mask_id,
+    mask_name,
+    redact,
+)
 
 logger = logging.getLogger("security_notebook_tools.tablepolicy")
 
@@ -326,14 +334,18 @@ def _fetch_policy(
 # --- Cache -------------------------------------------------------------------------------------
 
 _cache: dict[tuple[str, str | None], tuple[float, TablePolicy]] = {}
-_lock = threading.Lock()
+_lock = threading.Lock()  # guards _cache, _key_locks and _generation
+_key_locks: dict[tuple[str, str | None], threading.Lock] = {}  # one fetch at a time per workspace
+_generation = 0  # bumped by clear_policy_cache so a fetch in flight is not stored after it
 
 
 def clear_policy_cache() -> None:
     """Forget every cached table policy so the next query fetches it again."""
+    global _generation
     with _lock:
         logger.debug("Clearing %d cached table policy(ies)", len(_cache))
         _cache.clear()
+        _generation += 1
 
 
 def get_policy(
@@ -367,7 +379,12 @@ def get_policy(
     key = (resource_id.lower(), tenant_id)
     workspace = mask_name(resource_id.rsplit("/", 1)[-1])  # not the subscription or group
     with _lock:
-        cached = _cache.get(key)
+        key_lock = _key_locks.setdefault(key, threading.Lock())
+    # Only callers for the same workspace wait for a fetch; _lock is never held across it.
+    with key_lock:
+        with _lock:
+            cached = _cache.get(key)
+            generation = _generation
         if cached is not None and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
             logger.debug("Reusing cached table policy for workspace %s", workspace)
             policy = cached[1]
@@ -392,11 +409,7 @@ def get_policy(
                 if not known:
                     log_unexpected(logger, "reading table plans", exc)
                 error = QueryConnectionError if is_network else QueryError
-                detail = (
-                    describe_network_error(exc)
-                    if is_network
-                    else f"{type(exc).__name__}: {str(exc)[:300]}"
-                )
+                detail = describe_network_error(exc) if is_network else describe_exception(exc)
                 report = (
                     ""
                     if known
@@ -413,13 +426,15 @@ def get_policy(
                 raise failure from exc
             fetched = time.monotonic()
             policy = replace(policy, fetched_at=fetched)
-            _cache[key] = (fetched, policy)
+            with _lock:
+                if generation == _generation:  # not cleared while fetching
+                    _cache[key] = (fetched, policy)
     if workspace_id is not None and policy.customer_id.lower() != workspace_id.lower():
         raise ConfigurationError(
-            f"$SENTINEL_WORKSPACE_ID ({workspace_id}) does not match the workspace behind "
-            f"$SENTINEL_SUBSCRIPTION_ID / $SENTINEL_RESOURCE_GROUP / $SENTINEL_WORKSPACE_NAME "
-            f"(customerId {policy.customer_id}). They must name the same workspace. The query "
-            "was not sent."
+            f"$SENTINEL_WORKSPACE_ID ({mask_id(workspace_id)}) does not match the workspace "
+            "behind $SENTINEL_SUBSCRIPTION_ID / $SENTINEL_RESOURCE_GROUP / "
+            f"$SENTINEL_WORKSPACE_NAME (customerId {mask_id(policy.customer_id)}). They must "
+            "name the same workspace. The query was not sent."
         )
     return policy
 
