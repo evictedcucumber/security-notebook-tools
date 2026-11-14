@@ -1,5 +1,6 @@
 import errno
 import logging
+import socket
 import threading
 import time
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from azure.monitor.query import (
     LogsTable,
 )
 
+from security_notebook_tools import _sentinel
 from security_notebook_tools._exceptions import (
     ConfigurationError,
     PartialResultError,
@@ -55,6 +57,35 @@ def _table(name="T"):
         columns_types=["datetime", "string"],
         rows=[["2024-01-01T00:00:00Z", "hi"], ["2024-01-02T00:00:00Z", "yo"]],
     )
+
+
+def test_client_keeps_idle_connections_alive():
+    with mock.patch("security_notebook_tools._sentinel.LogsQueryClient") as sdk:
+        SentinelClient(WS, credential=mock.Mock(), resource_id=RID)
+    session = sdk.call_args.kwargs["transport"].session
+    for scheme in ("https://", "http://"):
+        adapter = session.get_adapter(scheme + "api.loganalytics.io")
+        options = adapter.poolmanager.connection_pool_kw["socket_options"]
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
+        assert (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) in options  # urllib3's default is kept
+        assert adapter.max_retries.total is False
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        assert (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30) in options
+
+
+def test_keepalive_is_set_on_a_real_connection():
+    server = socket.create_server(("127.0.0.1", 0))
+    try:
+        transport = _sentinel._keepalive_transport()
+        url = f"http://127.0.0.1:{server.getsockname()[1]}/"
+        pool = transport.session.get_adapter(url).poolmanager.connection_from_url(url)
+        conn = pool._new_conn()
+        conn.connect()
+        assert conn.sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == 1
+        conn.close()
+        transport.close()
+    finally:
+        server.close()
 
 
 @pytest.fixture
@@ -407,6 +438,31 @@ def test_table_to_df_records_kql_types():
     df = _table_to_df(table)
     assert df.attrs["kql_types"] == {"A": "datetime", "B": "long", "C": "string"}
     assert df["A"].dt.tz is not None
+
+
+def test_table_to_df_keeps_a_datetime_column_that_cannot_be_parsed():
+    from security_notebook_tools._sentinel import _table_to_df
+
+    when = datetime(2024, 1, 1, tzinfo=UTC)
+    table = LogsTable(
+        name="T", columns=["A", "B"], columns_types=["datetime", "long"], rows=[[when, 1], ["?", 2]]
+    )
+    df = _table_to_df(table)
+    assert list(df["A"]) == [when, "?"]
+    assert df.attrs["kql_types"]["A"] == "datetime"
+
+
+def test_table_to_df_parses_datetime_columns_with_a_repeated_name():
+    from security_notebook_tools._sentinel import _table_to_df
+
+    table = LogsTable(
+        name="T",
+        columns=["A", "A"],
+        columns_types=["datetime", "datetime"],
+        rows=[["2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z"]],
+    )
+    df = _table_to_df(table)
+    assert [str(dtype.tz) for dtype in df.dtypes] == ["UTC", "UTC"]
 
 
 def _coded_error(status, code, inner=None):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import threading
 import time
 import warnings
@@ -16,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
+import requests
 from azure.core.exceptions import (
     AzureError,
     ClientAuthenticationError,
@@ -27,6 +29,7 @@ from azure.core.exceptions import (
     ServiceResponseTimeoutError,
     TooManyRedirectsError,
 )
+from azure.core.pipeline.transport import RequestsTransport
 from azure.identity import AzureCliCredential, CredentialUnavailableError
 from azure.monitor.query import (
     LogsQueryClient,
@@ -35,6 +38,9 @@ from azure.monitor.query import (
     LogsQueryStatus,
     LogsTable,
 )
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection
+from urllib3.util.retry import Retry
 
 from ._auth import get_credential
 from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_resource_id
@@ -82,6 +88,54 @@ _TOO_MANY_REQUESTS = 429
 # Extra seconds the HTTP read waits beyond ``server_timeout``, so the server's own timeout
 # error arrives before the socket gives up (azure-core's default read timeout is 300 s).
 _CLIENT_SERVER_DELTA = 30
+
+
+# A long query leaves the connection silent until the answer; a firewall, NAT or load balancer
+# drops silent connections after a few minutes (Azure's default is 4). Probe well inside that.
+_KEEPALIVE_IDLE = 30
+_KEEPALIVE_INTERVAL = 30
+_KEEPALIVE_PROBES = 8
+
+
+def _keepalive_options() -> list[tuple[int, int, int]]:
+    """Socket options that turn TCP keepalive on, with the timings the platform lets us set."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    idle = "TCP_KEEPIDLE" if hasattr(socket, "TCP_KEEPIDLE") else "TCP_KEEPALIVE"  # macOS
+    for name, value in (
+        (idle, _KEEPALIVE_IDLE),
+        ("TCP_KEEPINTVL", _KEEPALIVE_INTERVAL),
+        ("TCP_KEEPCNT", _KEEPALIVE_PROBES),
+    ):
+        if hasattr(socket, name):
+            options.append((socket.IPPROTO_TCP, getattr(socket, name), value))
+    return options
+
+
+class _KeepAliveAdapter(HTTPAdapter):
+    """A requests adapter whose connections send TCP keepalive probes while they wait."""
+
+    def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+        """Create the pool with the keepalive options and azure-core's read block size."""
+        kwargs["socket_options"] = [*HTTPConnection.default_socket_options, *_keepalive_options()]
+        kwargs["blocksize"] = 32768
+        super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy: str, **kwargs: Any) -> Any:
+        """Give connections to a proxy the same keepalive options."""
+        kwargs["socket_options"] = [*HTTPConnection.default_socket_options, *_keepalive_options()]
+        return super().proxy_manager_for(proxy, **kwargs)
+
+
+def _keepalive_transport() -> RequestsTransport:
+    """The azure-core transport, on a session that keeps idle connections alive."""
+    session = requests.Session()
+    # Like azure-core's own session: its pipeline retries, not urllib3.
+    adapter = _KeepAliveAdapter(
+        max_retries=Retry(total=False, redirect=False, raise_on_status=False)
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return RequestsTransport(session=session)
 
 
 def _deadline_for(server_timeout: int | None) -> float | None:
@@ -151,10 +205,16 @@ def _table_to_df(table: LogsTable) -> pd.DataFrame:
     """
     df = pd.DataFrame([list(row) for row in table.rows], columns=list(table.columns))
     kql_types = {}
-    for name, typ in zip(table.columns, table.columns_types, strict=False):
+    columns = zip(table.columns, table.columns_types, strict=False)
+    for position, (name, typ) in enumerate(columns):
         kql_types[name] = str(typ).lower()
-        if kql_types[name] == "datetime":
-            df[name] = pd.to_datetime(df[name], utc=True)
+        if kql_types[name] != "datetime":
+            continue
+        try:  # by position: a repeated column name would select a frame
+            df.isetitem(position, pd.to_datetime(df.iloc[:, position], utc=True))
+        except ValueError:  # a value the SDK and pandas cannot parse: keep the rows
+            logger.warning("A datetime column could not be parsed; its values are left as returned")
+            logger.debug("Unparsed datetime column %r", name, exc_info=True)
     df.attrs[KQL_TYPES_ATTR] = kql_types
     return df
 
@@ -192,7 +252,7 @@ class SentinelClient:
         with unexpected_errors(logger, "Sentinel client setup"):
             self.credential = credential or get_credential(self.tenant_id)
             with dependency_call(logger, "LogsQueryClient creation"):
-                self._client = LogsQueryClient(self.credential)
+                self._client = LogsQueryClient(self.credential, transport=_keepalive_transport())
         logger.info("Sentinel client ready for workspace %s", mask_id(self.workspace_id))
         logger.debug(
             "Sentinel client workspace_id=%s resource_id=%s", self.workspace_id, self.resource_id
