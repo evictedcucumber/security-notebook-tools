@@ -1187,7 +1187,7 @@ requires-dist = [
     { name = "ipykernel", marker = "extra == 'notebook'" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "nbformat", marker = "extra == 'charts'", specifier = ">=4.2.0" },
-    { name = "pandas", specifier = ">=2.2" },
+    { name = "pandas", specifier = ">=3.0" },
     { name = "plotly", marker = "extra == 'charts'", specifier = ">=7.1.0" },
 ]
 provides-extras = ["notebook", "charts"]
