@@ -53,17 +53,23 @@ returned only a partial result); pass ``raise_on_partial=True`` to raise ``Parti
 If the query ends in ``| render <charttype>``, ``attrs["visualization"]`` holds the render spec for
 ``render_dataframe``.
 
+In a notebook, importing the package makes every displayed DataFrame (``display(df)``, or ``df`` as
+the last expression of a cell) show its row count above the table.
+
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
 from ._batch import exec_batch_query
-from ._format import format_dataframe, format_dataframe_by
+from ._format import format_dataframe, format_dataframe_by, show_row_counts
 from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query, exec_query_file
 from ._render import render_dataframe
 
 __version__ = "10.1.0"
+
+show_row_counts()
+del show_row_counts
 
 __all__ = [
     "clear_cache",

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- In a notebook, importing the package makes every displayed DataFrame (`display(df)`, or `df` as
+  the last expression of a cell) show its row count above the table, such as `1,234 rows`.
+- `format_dataframe` and each table of `format_dataframe_by` show the row count in a caption above
+  the table. A table cut by `max_rows` keeps its `Showing the first N of M rows.` caption.
+
 ## 10.1.0 - 2026-11-16
 
 ### Added

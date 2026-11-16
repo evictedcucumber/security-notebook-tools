@@ -317,6 +317,10 @@ df = exec_query("SigninLogs | take 100", profile=True)
 
 ### Display
 
+Once the package is imported in a notebook, `display(df)` (or `df` as the last expression of a
+cell) shows the row count above the table, for every DataFrame. `format_dataframe` and
+`format_dataframe_by` show it as a caption above each table.
+
 `format_dataframe(df)` returns a styled table for a notebook cell. Values are shown the way
 Kusto returns them (by KQL type), nulls are blank, and it shows at most 1000 rows unless you
 pass `max_rows=None`. Numbers have their digits grouped with spaces (`1 000 000 000.00000`).
