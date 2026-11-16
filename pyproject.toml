@@ -28,7 +28,6 @@ charts = [
 
 [dependency-groups]
 dev = [
-    "ipython",
     "nbformat>=4.2.0",
     "plotly>=7.1.0",
     "pytest",
