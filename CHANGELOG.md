@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- The `%%kql` cell magic and `load_ipython_extension` (`%load_ext security_notebook_tools`) are
+  removed, along with the `security_notebook_tools.magic` logger. Use `exec_query` with
+  `format_dataframe` or `render_dataframe` instead.
+
 ## 9.0.0 - 2026-11-14
 
 ### Breaking

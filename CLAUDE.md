@@ -13,7 +13,7 @@ Version 9.0.0. MIT licence.
 - `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_batch.py`,
   `_pivot.py`, `_merge.py`, `_log.py`, `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`,
   `_auth.py`, `_exceptions.py`, `_errors.py`, `_kql.py`, `_tablepolicy.py`, `_format.py`,
-  `_render.py`, `_magic.py`). `_magic.py` is the `%%kql` cell magic, registered by `load_ipython_extension` in `__init__.py`.
+  `_render.py`).
 - `_kql.py` (tokenizer) and `_tablepolicy.py` (ARM table-plan check) are the cost guard: Sentinel
   queries may only read Analytics-plan tables. They fail closed; treat any loosening as a
   security change and add a regression test for every bypass.
@@ -67,7 +67,7 @@ the `__init__.py` module docstring, and `CHANGELOG.md`. Do not commit unless ask
 ## Versioning
 
 Semantic Versioning, judged against the public API (`__all__`, function signatures, raised
-exception types, `%%kql` flags, environment variables, `notebooks.log` location and format):
+exception types, environment variables, `notebooks.log` location and format):
 
 - MAJOR: anything that can break an existing notebook: a removed or renamed function, argument,
   flag or environment variable, a changed default or return shape, a newly raised error, or the

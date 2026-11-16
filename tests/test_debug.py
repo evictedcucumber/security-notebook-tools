@@ -198,46 +198,6 @@ def test_nested_debug_true_keeps_the_outer_stream(capsys):
     assert out.count("inner: started") == 1  # one line, not one per scope
 
 
-def test_magic_debug_covers_exec_query_and_format_dataframe(sentinel, capsys):
-    pytest.importorskip("IPython")
-    from IPython.core.interactiveshell import InteractiveShell
-
-    shell = InteractiveShell.instance()
-    snt.load_ipython_extension(shell)
-    shell.run_cell_magic("kql", "--debug", "T | take 1")
-    text = capsys.readouterr().out
-    for expected in (
-        "%%kql: started",
-        "IPython argument parsing: calling",
-        "exec_query: started",
-        "exec_query: finished",
-        "format_dataframe: started",
-        "pandas Styler: calling",
-        "format_dataframe: finished",
-        "%%kql: finished",
-    ):
-        assert expected in text, expected
-    assert not _log.debug_active()
-    shell.run_cell_magic("kql", "--no-cache", "T | take 1")
-    assert capsys.readouterr().out == ""
-
-
-def test_magic_without_debug_prints_nothing_even_when_rejected(capsys):
-    pytest.importorskip("IPython")
-    from IPython.core.error import UsageError
-    from IPython.core.interactiveshell import InteractiveShell
-
-    shell = InteractiveShell.instance()
-    snt.load_ipython_extension(shell)
-    capsys.readouterr()
-    with pytest.raises(UsageError):
-        shell.run_cell_magic("kql", "", "  ")
-    assert capsys.readouterr().out == ""
-    with pytest.raises(UsageError):
-        shell.run_cell_magic("kql", "--debug", "  ")
-    assert "%%kql: rejected after" in capsys.readouterr().out
-
-
 # --- threads ------------------------------------------------------------------------------------
 
 

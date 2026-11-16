@@ -456,7 +456,6 @@ def test_logger_names_cover_every_module():
     import security_notebook_tools as pkg
 
     names = set()
-    pytest.importorskip("IPython")  # _magic needs it
     for info in pkgutil.iter_modules(pkg.__path__):
         module = importlib.import_module(f"security_notebook_tools.{info.name}")
         names.add((info.name, getattr(module, "logger", None)))
