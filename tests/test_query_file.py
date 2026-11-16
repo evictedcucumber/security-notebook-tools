@@ -60,6 +60,7 @@ def test_forwards_arguments(tmp_path):
             cache=False,
             raise_on_partial=True,
             debug=True,
+            profile=True,
         )
     assert result is eq.return_value
     eq.assert_called_once_with(
@@ -70,6 +71,7 @@ def test_forwards_arguments(tmp_path):
         cache=False,
         raise_on_partial=True,
         debug=True,
+        profile=True,
     )
 
 
@@ -84,6 +86,7 @@ def test_default_arguments_forwarded(tmp_path):
     assert kwargs["cache"] is True
     assert kwargs["raise_on_partial"] is False
     assert kwargs["debug"] is False
+    assert kwargs["profile"] is False
 
 
 @pytest.mark.parametrize("name", ["q.txt", "q", "q.kql.txt", "q.kqlx"])

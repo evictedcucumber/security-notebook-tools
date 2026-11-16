@@ -219,6 +219,7 @@ def test_adx_missing_config(adx, monkeypatch):
         ({"timeout": -1}, "timeout"),
         ({"cache": 1}, "cache must be a bool"),
         ({"debug": "yes"}, "debug must be a bool"),
+        ({"profile": "yes"}, "profile must be a bool"),
         ({"timespan": [datetime(2026, 1, 1), datetime(2026, 1, 2)]}, "timespan"),
         ({"timespan": timedelta(0)}, "timespan"),
         ({"timespan": (datetime(2026, 1, 1),)}, "timespan"),
@@ -2574,3 +2575,111 @@ def test_workspace_url_clear_cache_rereads_nothing_stale(workspace):
     snt.clear_cache()
     snt.exec_query("SigninLogs | take 1", target="adx")
     assert client.execute_query.call_count == 2
+
+
+def test_profile_runs_fresh_and_shows_statistics(sentinel, monkeypatch):
+    _, _ = sentinel
+    cls = sentinel[0]
+    stats = {"query": {"executionTime": 0.5}}
+
+    def tables(*args, profile=False, **kwargs):
+        df = pd.DataFrame({"a": [1]})
+        if profile:
+            df.attrs["_statistics"] = stats
+        return [df]
+
+    cls.return_value.query_tables.side_effect = tables
+    shown = []
+    monkeypatch.setattr(_query, "show_profile", shown.append)
+    plain = snt.exec_query("T | take 1")
+    assert snt.exec_query("T | take 1") is not None
+    assert cls.return_value.query_tables.call_count == 1  # second call was cached
+    df = snt.exec_query("T | take 1", profile=True)
+    assert cls.return_value.query_tables.call_count == 2
+    assert len(shown) == 1
+    assert "query.executionTime" in set(shown[0]["Metric"])
+    pd.testing.assert_frame_equal(df, plain)
+    assert "_statistics" not in df.attrs
+    assert "profile" not in plain.attrs
+    assert list(df.attrs["profile"]) == ["client_elapsed_seconds", "query.executionTime"]
+    assert df.attrs["profile"]["query.executionTime"] == 0.5
+    snt.exec_query("T | take 1", profile=True)
+    assert cls.return_value.query_tables.call_count == 3
+
+
+def test_profile_false_shows_nothing(sentinel, monkeypatch):
+    shown = []
+    monkeypatch.setattr(_query, "show_profile", shown.append)
+    snt.exec_query("T | take 1")
+    assert shown == []
+
+
+def test_profile_adx_without_statistics_still_shows(adx, capsys, monkeypatch):
+    monkeypatch.setattr("security_notebook_tools._profile._in_ipython", lambda: False)
+    snt.exec_query("T | take 1", target="adx", profile=True)
+    err = capsys.readouterr().err
+    assert "Query profile" in err
+    assert "no statistics" in err
+
+
+def _stats_tables(cls, stats_for):
+    """Make the mocked client return one row per call, with statistics when profiling."""
+
+    def tables(kql, *args, profile=False, **kwargs):
+        df = pd.DataFrame({"a": [1]})
+        if profile:
+            df.attrs["_statistics"] = stats_for()
+        return [df]
+
+    cls.return_value.query_tables.side_effect = tables
+
+
+def _batch_stats():
+    return {"rows": 2, "cpu": "00:00:01", "peakMem": 5}
+
+
+def test_batch_profile_lists_windows_and_shows_the_total(sentinel, monkeypatch):
+    cls, _ = sentinel
+    peaks = iter([5, 9])
+    _stats_tables(cls, lambda: {"rows": 2, "cpu": "00:00:01", "peakMem": next(peaks)})
+    shown = []
+    monkeypatch.setattr(
+        "security_notebook_tools._batch.show_profile",
+        lambda frame, caption: shown.append(
+            (caption, dict(zip(frame["Metric"], frame["Value"], strict=True)))
+        ),
+    )
+    df = snt.exec_batch_query(FILTER, D0, _days(2), profile=True)
+    entries = df.attrs["profile"]
+    assert [e["window_start"] for e in entries] == [D0, _days(1)]
+    assert entries[0]["window_end"] == _days(1)
+    assert entries[0]["rows"] == 2
+    assert len(shown) == 1
+    caption, table = shown[0]
+    assert caption == "Query profile (2 windows)"
+    assert table["windows"] == "2"
+    assert table["rows"] == "4"
+    assert table["cpu"] == "00:00:02"
+    assert table["peakMem"] == "9"
+    assert "client_elapsed_seconds" in table
+
+
+def test_batch_profile_forces_fresh_runs(sentinel, monkeypatch):
+    cls, _ = sentinel
+    _stats_tables(cls, _batch_stats)
+    monkeypatch.setattr("security_notebook_tools._batch.show_profile", lambda *a: None)
+    snt.exec_batch_query(FILTER, D0, _days(2))
+    assert cls.return_value.query_tables.call_count == 2
+    snt.exec_batch_query(FILTER, D0, _days(2), profile=True)
+    assert cls.return_value.query_tables.call_count == 4
+
+
+def test_batch_profile_must_be_a_bool(sentinel):
+    with pytest.raises(ConfigurationError, match="profile must be a bool"):
+        snt.exec_batch_query(FILTER, D0, _days(2), profile="yes")
+
+
+def test_batch_without_profile_has_no_attr_and_shows_nothing(sentinel, capsys):
+    df = snt.exec_batch_query(FILTER, D0, _days(2))
+    assert "profile" not in df.attrs
+    assert "Query profile" not in capsys.readouterr().err

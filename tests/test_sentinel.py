@@ -710,3 +710,33 @@ def test_batch_policy_failure_is_not_remembered(client):
         client.query(_window(kql, 3))
     assert client._get_policy.call_count == 2
     assert client._mock.query_workspace.call_count == 2
+
+
+def test_profile_requests_and_attaches_statistics(client):
+    stats = {"query": {"executionTime": 0.1}}
+    client._mock.query_workspace.return_value = LogsQueryResult(
+        tables=[_table(), _table("U")], statistics=stats
+    )
+    tables = client.query_tables("T", profile=True)
+    assert client._mock.query_workspace.call_args.kwargs["include_statistics"] is True
+    assert tables[0].attrs["_statistics"] == stats
+    assert "_statistics" not in tables[1].attrs
+
+
+def test_profile_partial_attaches_statistics(client):
+    stats = {"query": {"executionTime": 0.1}}
+    client._mock.query_workspace.return_value = LogsQueryPartialResult(
+        partial_data=[_table()], partial_error="boom", statistics=stats
+    )
+    with pytest.warns(UserWarning, match="partial"):
+        tables = client.query_tables("T", profile=True)
+    assert tables[0].attrs["_statistics"] == stats
+
+
+def test_no_profile_does_not_request_statistics(client):
+    client._mock.query_workspace.return_value = LogsQueryResult(
+        tables=[_table()], statistics={"query": {}}
+    )
+    tables = client.query_tables("T")
+    assert client._mock.query_workspace.call_args.kwargs["include_statistics"] is False
+    assert "_statistics" not in tables[0].attrs

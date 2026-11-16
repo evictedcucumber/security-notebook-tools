@@ -39,6 +39,13 @@ from ._log import (
     mark_failure_logged,
     redact_exception_text,
 )
+from ._profile import (
+    PROFILE_ATTR,
+    _in_ipython,
+    profile_frame,
+    show_profile,
+    total_profile,
+)
 from ._query import (
     DEFAULT_TIMEOUT,
     BatchRun,
@@ -170,6 +177,7 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
     for df in results:
         for name, kql_type in df.attrs.get("kql_types", {}).items():
             types.setdefault(name, kql_type)
+    profiles = [entry for df in results for entry in df.attrs.pop(PROFILE_ATTR, [])]
     non_empty = [df for df in results if not df.empty]
     with dependency_call(logger, "pandas merge", windows=len(results)) as call:
         if non_empty:
@@ -181,6 +189,8 @@ def _merge(results: list[pd.DataFrame]) -> pd.DataFrame:
         call["rows"] = len(merged)
     if types:
         merged.attrs["kql_types"] = types
+    if profiles:
+        merged.attrs[PROFILE_ATTR] = sorted(profiles, key=lambda entry: entry["window_start"])
     # A frame from exec_query has "partial" only; one from a batch window has both keys.
     merged.attrs[PARTIAL_ATTR] = any(df.attrs.get(PARTIAL_ATTR) for df in results)
     # Keep the render spec only if every window that returned a table has the same one.
@@ -214,12 +224,6 @@ def _span(start: datetime, end: datetime) -> str:
     fmt = "%Y-%m-%d %H:%M:%S" if start.second or end.second else "%Y-%m-%d %H:%M"
     end_fmt = fmt.removeprefix("%Y-%m-%d ") if start.date() == end.date() else fmt
     return f"{start:{fmt}} to {end:{end_fmt}} UTC"
-
-
-def _in_ipython() -> bool:
-    """Whether an IPython shell (a notebook kernel) is running, without importing IPython."""
-    get_ipython = getattr(sys.modules.get("IPython"), "get_ipython", None)
-    return get_ipython is not None and get_ipython() is not None
 
 
 def _warn_partial(windows: list[tuple[datetime, datetime]], total: int) -> None:
@@ -353,6 +357,7 @@ def _attempt_window(
     stop: threading.Event,
     raise_on_partial: bool = False,
     run: BatchRun | None = None,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run one window, retrying transient failures; wrap a failure with the window's name.
 
@@ -370,6 +375,8 @@ def _attempt_window(
             ``attrs["partial_windows"]``.
         run: The batch run; with ``cache`` the window is served from and kept in its store
             rather than the result cache of ``exec_query``.
+        profile: Keep the window's statistics in ``attrs["profile"]``, as a one-entry list with
+            the window bounds.
 
     Raises:
         PartialResultError: ``raise_on_partial`` and the window's result was partial.
@@ -398,9 +405,12 @@ def _attempt_window(
                     raise_on_partial=raise_on_partial,
                     warn_partial=False,
                     batch=batch,
+                    profile=profile,
                 )
             else:
-                tables = _query_adx(prefix + kql, timeout, cache=cache, batch=batch)
+                tables = _query_adx(
+                    prefix + kql, timeout, cache=cache, batch=batch, profile=profile
+                )
             break
         except SecurityNotebookToolsError as exc:
             elapsed = _clock() - attempt_start
@@ -482,6 +492,10 @@ def _attempt_window(
             mark_failure_logged(failure)
             raise failure from exc
     df = tables[0] if tables else pd.DataFrame()
+    if profile:
+        df.attrs[PROFILE_ATTR] = [
+            {"window_start": w_start, "window_end": w_end, **df.attrs.get(PROFILE_ATTR, {})}
+        ]
     is_partial = bool(df.attrs.get(PARTIAL_ATTR))
     _set_partial(df, [bounds] if is_partial else [])
     if is_partial:
@@ -501,6 +515,7 @@ def _run_or_split(
     min_interval: timedelta | None,
     raise_on_partial: bool = False,
     run: BatchRun | None = None,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run a window; if it times out and ``min_interval`` is set, run its two halves instead.
 
@@ -541,7 +556,7 @@ def _run_or_split(
     else:
         try:
             return _attempt_window(
-                label, bounds, kql, target, timeout, cache, stop, raise_on_partial, run
+                label, bounds, kql, target, timeout, cache, stop, raise_on_partial, run, profile
             )
         except _WindowTimeout as exc:
             if key is not None:
@@ -598,6 +613,7 @@ def _run_or_split(
                 min_interval,
                 raise_on_partial,
                 run,
+                profile,
             )
         )
     return _merge(parts)
@@ -615,6 +631,7 @@ def _run_window(
     min_interval: timedelta | None = None,
     raise_on_partial: bool = False,
     run: BatchRun | None = None,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run window ``index`` of ``total``: retry transient failures, split on a timeout.
 
@@ -631,6 +648,7 @@ def _run_window(
         min_interval,
         raise_on_partial,
         run,
+        profile,
     )
 
 
@@ -836,6 +854,7 @@ def exec_batch_query(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run the same KQL once per consecutive time window and merge the results.
 
@@ -967,6 +986,13 @@ def exec_batch_query(
             (debug output is not written to the file; be careful when sharing a notebook saved
             with debug output). See the logging
             section of the README.
+        profile: If true, run every window fresh (as with ``cache=False``) and collect each
+            query's performance statistics (see ``exec_query``). ``df.attrs["profile"]`` is
+            then a list with one dict per window that returned a result (split halves count
+            separately), sorted by start: ``{"window_start", "window_end", "client_elapsed_seconds",
+            <service metrics>}``. One total table is shown in the cell: the window count, the
+            wall time of the whole call, and each metric summed over the windows (timespans as
+            durations; ``peak`` metrics take the maximum). Default false.
 
     Returns:
         The window results concatenated in window order with a fresh index. Windows with no
@@ -999,8 +1025,8 @@ def exec_batch_query(
         ConfigurationError: ``kql`` is not a string or is blank, ``start`` is not a datetime or
             timedelta, ``end`` is not a datetime or ``None``, ``interval`` is not a positive
             ``timedelta``, ``min_interval`` is not a positive ``timedelta`` or is longer than
-            ``interval``, ``timeout`` is not a positive integer, ``cache``, ``raise_on_partial`` or
-            ``debug`` is not a bool, ``max_workers`` is not an
+            ``interval``, ``timeout`` is not a positive integer, ``cache``, ``raise_on_partial``,
+            ``debug`` or ``profile`` is not a bool, ``max_workers`` is not an
             integer from 1 to 5, ``start`` is not before ``end``, ``interval`` cuts the range
             into more than 10,000 windows, ``target`` is unknown, the ADX
             KQL is a management command, the KQL does not filter with ``>= BatchStart`` and
@@ -1054,10 +1080,12 @@ def exec_batch_query(
         cache=cache,
         raise_on_partial=raise_on_partial,
         debug=debug,
+        profile=profile,
         merge_on=merge_on,
         agg_column=agg_column,
         kql=fingerprint(kql),
     ) as call:
+        started = time.perf_counter()
         now = datetime.now(UTC)
         _check_kql(kql)
         validate_window_args(start, end, interval)
@@ -1076,6 +1104,7 @@ def exec_batch_query(
         _check_bool("cache", cache)
         _check_bool("raise_on_partial", raise_on_partial)
         _check_bool("debug", debug)
+        _check_bool("profile", profile)
         if (
             isinstance(max_workers, bool)
             or not isinstance(max_workers, int)
@@ -1121,6 +1150,7 @@ def exec_batch_query(
         windows = _windows(start_utc, end_utc, interval, aligned=aligned)
         total = len(windows)
 
+        cache = cache and not profile
         stop = threading.Event()
         run = BatchRun(target, kql, timeout) if cache else None
         jobs = [
@@ -1137,6 +1167,7 @@ def exec_batch_query(
                 min_interval,
                 raise_on_partial,
                 run,
+                profile,
             )
             for index, bounds in enumerate(windows, start=1)
         ]
@@ -1161,6 +1192,7 @@ def exec_batch_query(
         if run is not None:
             run.keep_only_used()  # a failed run keeps every window for the re-run
         merged = _merge(results)
+        window_profiles = merged.attrs.get(PROFILE_ATTR)
         partial_windows = list(merged.attrs[PARTIAL_WINDOWS_ATTR])
         logger.info("Batch finished: %d windows, total rows=%d", total, len(merged))
         if keys and len(merged.columns):
@@ -1177,6 +1209,12 @@ def exec_batch_query(
         _set_partial(merged, partial_windows)  # concat and groupby do not carry attrs reliably
         if partial_windows:
             _warn_partial(partial_windows, total)
+        if profile:
+            merged.attrs[PROFILE_ATTR] = window_profiles or []
+            total_stats = total_profile(merged.attrs[PROFILE_ATTR], time.perf_counter() - started)
+            show_profile(
+                profile_frame(total_stats), f"Query profile ({total_stats['windows']} windows)"
+            )
         call.update(
             windows=total,
             partial_windows=len(partial_windows),

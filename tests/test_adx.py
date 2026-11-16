@@ -746,3 +746,34 @@ def test_real_cluster_is_not_cost_checked(workspace):
     c.query_tables("Aux_CL | take 1")
     get_policy.assert_not_called()
     assert client.execute_query.call_args.args[0] == "db"
+
+
+def _info_response(*rows):
+    table = mock.Mock(table_kind="QueryCompletionInformation", rows=list(rows))
+    return mock.Mock(primary_results=["t"], tables=[table])
+
+
+def test_profile_attaches_statistics(patched):
+    client, _, conv = patched
+    conv.side_effect = lambda t: pd.DataFrame({"a": [1]})
+    row = {"EventTypeName": "QueryResourceConsumption", "Payload": '{"ExecutionTime": 2.0}'}
+    client.execute_query.return_value = _info_response(row)
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    assert c.query_tables("T", profile=True)[0].attrs["_statistics"] == {"ExecutionTime": 2.0}
+    assert "_statistics" not in c.query_tables("T")[0].attrs
+
+
+def test_profile_without_statistics_table(patched):
+    client, _, conv = patched
+    conv.side_effect = lambda t: pd.DataFrame({"a": [1]})
+    client.execute_query.return_value = mock.Mock(primary_results=["t"], tables=[])
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    assert c.query_tables("T", profile=True)[0].attrs["_statistics"] is None
+
+
+def test_profile_with_mock_tables_does_not_crash(patched):
+    client, _, conv = patched
+    conv.side_effect = lambda t: pd.DataFrame({"a": [1]})
+    client.execute_query.return_value.primary_results = ["t"]
+    c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
+    assert c.query_tables("T", profile=True)[0].attrs["_statistics"] is None

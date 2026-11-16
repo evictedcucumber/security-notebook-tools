@@ -70,6 +70,7 @@ from ._log import (
     mask_id,
     redact_exception_text,
 )
+from ._profile import STATISTICS_ATTR
 from ._render import set_visualization
 from ._tablepolicy import (
     batch_checked,
@@ -259,7 +260,7 @@ class SentinelClient:
         )
 
     def _send(
-        self, kql: str, timespan: Timespan | None, server_timeout: int | None
+        self, kql: str, timespan: Timespan | None, server_timeout: int | None, profile: bool = False
     ) -> LogsQueryResult | LogsQueryPartialResult:
         """Send the query to the SDK, with the HTTP read timeout and the total deadline.
 
@@ -281,6 +282,7 @@ class SentinelClient:
                 timespan=timespan,
                 server_timeout=server_timeout,
                 include_visualization=True,
+                include_statistics=profile,
                 **transport,
             )
 
@@ -297,7 +299,7 @@ class SentinelClient:
         )
 
     def _run(
-        self, kql: str, timespan: Timespan | None, server_timeout: int | None
+        self, kql: str, timespan: Timespan | None, server_timeout: int | None, profile: bool = False
     ) -> LogsQueryResult | LogsQueryPartialResult:
         """Send the query and map every known SDK failure to a ``QueryError`` that explains it.
 
@@ -312,7 +314,7 @@ class SentinelClient:
                 timespan=describe_timespan(timespan),
                 server_timeout=server_timeout,
             ) as call:
-                result = self._send(kql, timespan, server_timeout)
+                result = self._send(kql, timespan, server_timeout, profile)
                 call["status"] = getattr(result.status, "value", result.status)
                 return result
         except CredentialUnavailableError as exc:
@@ -409,6 +411,7 @@ class SentinelClient:
         *,
         raise_on_partial: bool = False,
         server_timeout: int | None = None,
+        profile: bool = False,
     ) -> list[pd.DataFrame]:
         """Run ``kql`` and return every result table as a DataFrame.
 
@@ -425,6 +428,8 @@ class SentinelClient:
             server_timeout: Server-side timeout in seconds. The HTTP read timeout is raised to
                 match (plus 30 seconds), so a value above azure-core's 300-second default
                 takes effect.
+            profile: Ask the service for query statistics and keep them in
+                ``attrs["_statistics"]`` of the first table.
 
         Returns:
             One DataFrame per result table.
@@ -471,7 +476,7 @@ class SentinelClient:
         )
         start = time.perf_counter()
         with unexpected_errors(logger, "Sentinel query"):
-            result = self._run(kql, timespan, server_timeout)
+            result = self._run(kql, timespan, server_timeout, profile)
 
         if result.status == LogsQueryStatus.SUCCESS:
             tables = result.tables
@@ -487,12 +492,14 @@ class SentinelClient:
                 f" ({hint})" if hint else "",
             )
             if raise_on_partial:
-                raise PartialResultError(
+                error = PartialResultError(
                     msg,
                     partial_error=err,
                     partial_data=result.partial_data,
                     visualization=result.visualization,
                 )
+                error.statistics = result.statistics if profile else None
+                raise error
             warnings.warn(msg, stacklevel=2)
             tables = result.partial_data
         else:  # pragma: no cover - the SDK raises for failures, kept as a safeguard
@@ -505,6 +512,8 @@ class SentinelClient:
             dfs = [_table_to_df(t) for t in tables]
             set_visualization(dfs, result.visualization)
             call["rows"] = [len(df) for df in dfs]
+        if profile and dfs:
+            dfs[0].attrs[STATISTICS_ATTR] = result.statistics
         logger.info(
             "Sentinel query returned %d table(s), rows=%s in %.2fs",
             len(dfs),

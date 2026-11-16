@@ -130,7 +130,7 @@ df = exec_query_file("queries/failed_signins.kql")  # KQL from a .kql file
 text of a `.kql` file (UTF-8, read on every call). A bad path or file raises `ConfigurationError`.
 
 `exec_query(kql, timespan=None, *, target="sentinel", timeout=300, cache=True,
-raise_on_partial=False, debug=False)` returns the
+raise_on_partial=False, debug=False, profile=False)` returns the
 first result table as a DataFrame (empty if the query returned no tables). Sentinel datetime
 columns are UTC-aware. A partial Sentinel result (the service returned some data and an error)
 emits a warning and returns the data received, and `df.attrs["partial"]` is True (it is always set,
@@ -300,6 +300,19 @@ Large results stay in memory until evicted or cleared. Details: [docs/api.md](do
 
 ```python
 df = exec_query("SigninLogs | summarize count() by UserPrincipalName", timeout=600)
+```
+
+### Query profile
+
+`profile=True` returns the DataFrame as usual and shows a "Query profile" table (wall time plus
+the service's query statistics). The query always runs, skipping the caches. The statistics are
+not written to `notebooks.log`. They are also on the frame as `df.attrs["profile"]`, a flat dict.
+
+`exec_batch_query(..., profile=True)` runs every window fresh and shows one total table for the
+batch. Its `df.attrs["profile"]` is a list with one dict per window. Not available on `%%kql`.
+
+```python
+df = exec_query("SigninLogs | take 100", profile=True)
 ```
 
 ### Cell magic

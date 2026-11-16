@@ -34,6 +34,7 @@ from ._config import (
 from ._errors import public_call, unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
 from ._log import dependency_call, fingerprint
+from ._profile import PROFILE_ATTR, STATISTICS_ATTR, profile_dict, profile_frame, show_profile
 from ._render import set_visualization
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
@@ -147,6 +148,7 @@ def _sentinel_tables(
     kql: str,
     timespan: Timespan | None,
     timeout: int,
+    profile: bool = False,
 ) -> tuple[pd.DataFrame, ...]:
     """Fetch (and cache) all tables of a Sentinel query; partial results are not cached."""
     _fetch.ran = True
@@ -154,20 +156,34 @@ def _sentinel_tables(
     client = _sentinel_client(workspace_id, resource_id, tenant_id)
     try:
         return tuple(
-            client.query_tables(kql, timespan, raise_on_partial=True, server_timeout=timeout)
+            client.query_tables(
+                kql,
+                timespan,
+                raise_on_partial=True,
+                server_timeout=timeout,
+                **({"profile": True} if profile else {}),
+            )
         )
     except PartialResultError as exc:
         # query_tables already logged it; hand the data back without caching it.
         with dependency_call(logger, "pandas DataFrame conversion", target="sentinel_partial"):
             tables = tuple(_table_to_df(t) for t in exc.partial_data or ())
             set_visualization(list(tables), exc.visualization)
+            if profile and (statistics := getattr(exc, "statistics", None)):
+                tables = tables or (pd.DataFrame(),)
+                tables[0].attrs[STATISTICS_ATTR] = statistics
         logger.info("Partial result is returned but not stored in the result cache")
         raise _PartialResult(tables, str(exc), exc.partial_error) from exc
 
 
 @lru_cache(maxsize=RESULT_CACHE_SIZE)
 def _adx_tables(
-    cluster_uri: str, tenant_id: str | None, database: str, kql: str, timeout: int
+    cluster_uri: str,
+    tenant_id: str | None,
+    database: str,
+    kql: str,
+    timeout: int,
+    profile: bool = False,
 ) -> tuple[pd.DataFrame, ...]:
     """Fetch (and cache) all result tables of an ADX query or ``.show`` command.
 
@@ -188,7 +204,8 @@ def _adx_tables(
     props.set_option("truncationmaxsize", ADX_MAX_BYTES)
     if age := _server_cache_age():
         props.set_option("query_results_cache_max_age", timedelta(seconds=age))
-    return tuple(client.query_tables(kql, database, properties=props))
+    extra = {"profile": True} if profile else {}
+    return tuple(client.query_tables(kql, database, properties=props, **extra))
 
 
 # Windows of a batch that timed out, so a re-run goes straight to splitting them instead of
@@ -361,6 +378,16 @@ def _warn_retention(kql: str, timespan: Timespan | None) -> None:
     client.warn_retention(kql, timespan)
 
 
+def _with_profile(tables: list[pd.DataFrame], started: float, profile: bool) -> list[pd.DataFrame]:
+    """With ``profile``, set ``attrs["profile"]`` on the first table (adding one if none)."""
+    if not profile:
+        return tables
+    tables = tables or [pd.DataFrame()]
+    statistics = tables[0].attrs.pop(STATISTICS_ATTR, None)
+    tables[0].attrs[PROFILE_ATTR] = profile_dict(statistics, time.perf_counter() - started)
+    return tables
+
+
 def _query_sentinel(
     kql: str,
     timespan: Timespan | None,
@@ -371,6 +398,7 @@ def _query_sentinel(
     raise_on_partial: bool = False,
     warn_partial: bool = True,
     batch: BatchRun | None = None,
+    profile: bool = False,
 ) -> list[pd.DataFrame]:
     """Run ``kql`` on Sentinel with the API time range ``timespan`` and return all tables.
 
@@ -379,8 +407,10 @@ def _query_sentinel(
     ``warn_partial=False`` to summarise partial windows itself. Every returned table has
     ``attrs["partial"]``. A partial result raises ``PartialResultError`` with ``raise_on_partial``;
     otherwise it is returned (an empty table stands in if none arrived) and not cached. A batch
-    window passes ``batch`` (see :func:`_cached_call`).
+    window passes ``batch`` (see :func:`_cached_call`). ``profile`` keeps the statistics in
+    ``attrs`` and always runs fresh, like ``cache=False``.
     """
+    cache = cache and not profile
     if check_retention:
         _warn_retention(kql, timespan)
     args = (
@@ -390,10 +420,12 @@ def _query_sentinel(
         kql,
         timespan,
         timeout,
+        profile,
     )
+    started = time.perf_counter()
     try:
         tables = _cached_call(_sentinel_tables, args, cache=cache, batch=batch)
-        return _flag_partial(tables, False)
+        return _with_profile(_flag_partial(tables, False), started, profile)
     except _PartialResult as partial:
         # built fresh for this call and never cached, so no copy is needed
         tables = list(partial.tables) or [pd.DataFrame()]
@@ -406,21 +438,30 @@ def _query_sentinel(
             ) from partial
         if warn_partial:
             warnings.warn(partial.message, stacklevel=2)
-        return _flag_partial(tables, True)
+        return _with_profile(_flag_partial(tables, True), started, profile)
 
 
 def _query_adx(
-    kql: str, timeout: int, *, cache: bool = True, batch: BatchRun | None = None
+    kql: str,
+    timeout: int,
+    *,
+    cache: bool = True,
+    batch: BatchRun | None = None,
+    profile: bool = False,
 ) -> list[pd.DataFrame]:
     """Run ``kql`` (a query or ``.show`` command) on ADX and return all result tables.
 
-    A batch window passes ``batch`` (see :func:`_cached_call`).
+    A batch window passes ``batch`` (see :func:`_cached_call`). ``profile`` keeps the statistics
+    in ``attrs`` and always runs fresh, like ``cache=False``.
     """
+    cache = cache and not profile
     tenant_id = resolve_tenant_id()
     cluster_uri = resolve_cluster_uri()
     database = resolve_adx_database(cluster_uri)
-    args = (cluster_uri, tenant_id, database, kql, timeout)
-    return _flag_partial(_cached_call(_adx_tables, args, cache=cache, batch=batch), False)
+    args = (cluster_uri, tenant_id, database, kql, timeout, profile)
+    started = time.perf_counter()
+    tables = _cached_call(_adx_tables, args, cache=cache, batch=batch)
+    return _with_profile(_flag_partial(tables, False), started, profile)
 
 
 def clear_cache() -> None:
@@ -463,6 +504,7 @@ def exec_query(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run KQL against Microsoft Sentinel (default) or Azure Data Explorer (ADX).
 
@@ -584,6 +626,10 @@ def exec_query(
             unredacted (debug output is not written to the file; be careful when sharing a
             notebook saved with debug output). See
             the logging section of the README.
+        profile: If true, also show the query's performance statistics (everything the service
+            returns: CPU, memory, cache, data scanned, execution time ...) as a table in the
+            notebook cell's output; the returned DataFrame is unchanged. The query always runs
+            fresh, as with ``cache=False``. Default false.
 
     Returns:
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
@@ -607,10 +653,10 @@ def exec_query(
 
     Raises:
         ConfigurationError: ``kql`` is not a string or is blank, ``timeout`` is not a positive
-            integer, ``cache``, ``raise_on_partial`` or ``debug`` is not a bool, ``target`` is
-            unknown, ``timespan`` is not one of the accepted forms (a positive ``timedelta``, or
-            a ``(start, end)`` / ``(start, timedelta)`` tuple of datetimes with a positive
-            length), ``timespan``
+            integer, ``cache``, ``raise_on_partial``, ``debug`` or ``profile`` is not a bool,
+            ``target`` is unknown, ``timespan`` is not one of the accepted forms (a positive
+            ``timedelta``, or a ``(start, end)`` / ``(start, timedelta)`` tuple of datetimes with
+            a positive length), ``timespan``
             is combined with ``target="adx"``, a required environment variable is unset or
             invalid (workspace ID not a GUID, workspace resource ID not an
             ``/subscriptions/.../workspaces/<name>`` ID, tenant not a GUID or domain name,
@@ -659,6 +705,7 @@ def exec_query(
         cache=cache,
         raise_on_partial=raise_on_partial,
         debug=debug,
+        profile=profile,
         kql=fingerprint(kql),
     ) as call:
         _check_kql(kql)
@@ -666,6 +713,7 @@ def exec_query(
         _check_bool("cache", cache)
         _check_bool("raise_on_partial", raise_on_partial)
         _check_bool("debug", debug)
+        _check_bool("profile", profile)
         if target == "sentinel":
             validate_timespan(timespan)
             tables = _query_sentinel(
@@ -674,17 +722,20 @@ def exec_query(
                 timeout,
                 cache=cache,
                 raise_on_partial=raise_on_partial,
+                profile=profile,
             )
         elif target == "adx":
             if timespan is not None:
                 raise ConfigurationError(
                     "timespan only applies to Sentinel; filter on time in the KQL for ADX."
                 )
-            tables = _query_adx(kql, timeout, cache=cache)
+            tables = _query_adx(kql, timeout, cache=cache, profile=profile)
         else:
             raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
         df = tables[0] if tables else pd.DataFrame()
         df.attrs.setdefault("partial", False)
+        if profile:
+            show_profile(profile_frame(df.attrs[PROFILE_ATTR]))
         call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
         return df
 
@@ -698,6 +749,7 @@ def exec_query_file(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pd.DataFrame:
     """Run the KQL in a ``.kql`` file with ``exec_query``.
 
@@ -716,6 +768,7 @@ def exec_query_file(
         cache: As for ``exec_query``.
         raise_on_partial: As for ``exec_query``.
         debug: As for ``exec_query``.
+        profile: As for ``exec_query``.
 
     Returns:
         The DataFrame ``exec_query`` returns for the file's text.
@@ -758,4 +811,5 @@ def exec_query_file(
             cache=cache,
             raise_on_partial=raise_on_partial,
             debug=debug,
+            profile=profile,
         )

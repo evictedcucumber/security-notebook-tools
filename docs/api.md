@@ -33,6 +33,7 @@ exec_query(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -52,8 +53,9 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a partial result (the service returned some data and an error) raises `PartialResultError` instead of being returned with a warning. Default false. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (clients, credentials, table policy, the query itself). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
+| `profile` | If true, return the DataFrame as usual and show a "Query profile" table in the cell output (written to stderr outside IPython). Default false. See [Query profile](#query-profile). |
 
-`target`, `timeout`, `cache`, `raise_on_partial` and `debug` are keyword-only.
+`target`, `timeout`, `cache`, `raise_on_partial`, `debug` and `profile` are keyword-only.
 
 ### Environment variables
 
@@ -243,6 +245,9 @@ is issued and the data received is returned, so the frame may be incomplete), Fa
 including on ADX. A partial result is never cached. Nested `dynamic` values (dicts and lists) are
 copies: changing them does not alter the cached result.
 
+With `profile=True`, `df.attrs["profile"]` is the flat dict of query statistics (see
+[Query profile](#query-profile)); without it the key is absent.
+
 If the query ends in `| render <charttype> [with (...)]`, `df.attrs["visualization"]` is a dict
 with the render spec for `render_dataframe`; with no `render` the key is absent. Both services are
 normalised to the same shape: `"visualization"` is the lower-case chart type, and these keys are
@@ -289,7 +294,7 @@ and `SystemExit` are never wrapped.
 ### Raises
 
 - `ConfigurationError` (also a `ValueError`): `kql` is not a string or is blank, `timeout` is not a positive
-  integer, `cache`, `raise_on_partial` or `debug` is not a bool, `target` is unknown, `timespan` is not a positive
+  integer, `cache`, `raise_on_partial`, `debug` or `profile` is not a bool, `target` is unknown, `timespan` is not a positive
   `timedelta` or a `(start, end)` / `(start, timedelta)` tuple of datetimes with a positive length,
   `timespan` is combined with `target="adx"`, a required environment variable is unset or invalid,
   `SENTINEL_WORKSPACE_ID` and the workspace named by `SENTINEL_SUBSCRIPTION_ID`,
@@ -337,6 +342,7 @@ exec_query_file(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -351,7 +357,7 @@ and caching are the same. The cache is keyed by the KQL text, so an edited file 
 | --- | --- |
 | `path` | Path to the file, a `str` or `os.PathLike`. Its suffix must be `.kql` (case-insensitive). A relative path is resolved against the current working directory (the notebook's folder in Jupyter). |
 
-`timespan`, `target`, `timeout`, `cache`, `raise_on_partial` and `debug` are as for
+`timespan`, `target`, `timeout`, `cache`, `raise_on_partial`, `debug` and `profile` are as for
 [`exec_query`](#exec_query), and `target` onward are keyword-only.
 
 ### Returns
@@ -393,6 +399,7 @@ exec_batch_query(
     cache: bool = True,
     raise_on_partial: bool = False,
     debug: bool = False,
+    profile: bool = False,
 ) -> pandas.DataFrame
 ```
 
@@ -477,6 +484,7 @@ after the first window, so a typo fails before the other windows run.
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a window whose result is partial (the service returned some data and an error) fails the batch with `PartialResultError` naming the window; it is not retried or split. Default false: the partial data is kept, the frame is marked (see Returns) and one notice summarises the partial windows. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (every window, also those run on worker threads). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
+| `profile` | If true, every window runs fresh (like `cache=False`) and one "Query profile (N windows)" total table is shown; `df.attrs["profile"]` lists each window's statistics. Default false. See [Query profile](#query-profile). |
 
 ### Returns
 
@@ -502,12 +510,16 @@ notice states how many windows were partial and which (the first five are named)
 per window. In IPython it is written to the cell's stderr as plain text, without the file, line
 and source echo of a warning; elsewhere it is a `UserWarning`.
 
+With `profile=True`, `df.attrs["profile"]` is a list with one dict per window that returned a
+result (sub-windows from `min_interval` splits included), sorted by window start. See
+[Query profile](#query-profile).
+
 ### Raises
 
 * `ConfigurationError`: `kql` is not a string or is blank, `start` is not a datetime or
   timedelta, `end` is not a datetime or `None`, `interval` is not a positive `timedelta`,
   `min_interval` is not a positive `timedelta` or is longer than `interval`,
-  `timeout` is not a positive integer, `cache`, `raise_on_partial` or `debug` is not a bool, `max_workers` is not an integer
+  `timeout` is not a positive integer, `cache`, `raise_on_partial`, `debug` or `profile` is not a bool, `max_workers` is not an integer
   from 1 to 5, `start` is not before `end`, `interval` cuts the range into more than 10,000 windows,
   `target` is unknown, the ADX KQL is a management command, the KQL lacks `>= BatchStart` or
   `< BatchEnd`, compares them in another form or defines them (checked before any query),
@@ -1063,6 +1075,41 @@ treatment as above.
 ## `__version__`
 
 The installed version string, e.g. `"9.0.0"`.
+
+### Query profile
+
+With `profile=True`, `exec_query` and `exec_query_file` return the DataFrame as usual and show a
+"Query profile" table (columns `Metric`, `Value`) in the cell output. Outside IPython the table is
+written to stderr. Its first row is the wall time measured on the client; the rest are the
+statistics the service returns, flattened with dotted names. Names come from the service and vary:
+
+- Sentinel: the Log Analytics query statistics (execution time, CPU, memory, cache, rows and
+  extents scanned, dataset sizes, ...).
+- `target="adx"`, including a workspace URL: the query's resource consumption (`ExecutionTime`,
+  `resource_usage.*`, `input_dataset_statistics.*`, `dataset_statistics.*`).
+- If the service returns none (for example for `.show` commands), the table says so.
+
+The same statistics are on the frame as `df.attrs["profile"]`, a flat dict: `"client_elapsed_seconds"`
+first, then each metric under the same dotted name as in the table, with the service's values
+(numbers, or strings such as Kusto timespans like `"00:00:00.0156"`). If the service returned no
+statistics it holds only `client_elapsed_seconds`.
+
+`profile=True` always sends the query: it skips the local result cache and, on ADX, the service's
+results cache, like `cache=False`, so the statistics come from a real run. Failing to read or show
+the statistics never fails the query. The statistics are not written to `notebooks.log`.
+
+With `exec_batch_query(..., profile=True)` every window runs fresh, like `cache=False`, and one
+"Query profile (N windows)" table is shown. Its rows are `windows` (N), `client_elapsed_seconds`
+(wall time of the whole batch call), then each metric across the windows: numbers and timespans
+are summed, metrics whose name contains "peak" take the maximum, and other text metrics are left
+out. `df.attrs["profile"]` is then a list with one dict per window (`window_start`, `window_end`
+and that window's flat metrics), see [`exec_batch_query`](#exec_batch_query).
+
+`%%kql` does not take `profile`.
+
+```python
+df = exec_query("SigninLogs | take 100", profile=True)
+```
 
 ### Debug output in the cell
 

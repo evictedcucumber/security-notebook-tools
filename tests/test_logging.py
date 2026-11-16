@@ -164,7 +164,7 @@ def test_exec_query_logs_entry_and_result_summary(sentinel, caplog):
     text = _text(caplog, "query")
     assert (
         "exec_query: started target=sentinel timeout=300 cache=True raise_on_partial=False "
-        "kql=hmac:"
+        "profile=False kql=hmac:"
     ) in text
     assert "exec_query: finished in " in text
     assert "tables=1 rows=2 columns=2" in text

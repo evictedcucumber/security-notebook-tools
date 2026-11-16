@@ -59,6 +59,7 @@ from ._exceptions import (
 from ._format import KQL_TYPES_ATTR
 from ._kql import reject_adx_constructs
 from ._log import dependency_call, fingerprint, mask_name
+from ._profile import STATISTICS_ATTR, adx_statistics
 from ._render import set_visualization
 from ._tablepolicy import batch_checked, check_sentinel_query, get_policy, note_batch_checked
 
@@ -279,7 +280,12 @@ class ADXClient:
             raise QueryError(message) from exc
 
     def _execute(
-        self, kind: str, text: str, database: str | None, properties: Properties
+        self,
+        kind: str,
+        text: str,
+        database: str | None,
+        properties: Properties,
+        profile: bool = False,
     ) -> list[pd.DataFrame]:
         """Run a ``"query"`` or ``"command"`` and return its primary result tables.
 
@@ -307,6 +313,8 @@ class ADXClient:
             with dependency_call(logger, "pandas DataFrame conversion", target="adx") as call:
                 dfs = [_table_to_df(t) for t in response.primary_results]
                 _attach_visualizations(response, dfs)
+                if profile and dfs:
+                    dfs[0].attrs[STATISTICS_ATTR] = adx_statistics(response)
                 call["rows"] = [len(df) for df in dfs]
         logger.info(
             "ADX %s returned %d table(s), rows=%s in %.2fs",
@@ -323,6 +331,7 @@ class ADXClient:
         database: str | None = None,
         *,
         properties: Properties = None,
+        profile: bool = False,
     ) -> list[pd.DataFrame]:
         """Run ``kql`` and return all primary result tables as DataFrames.
 
@@ -330,6 +339,8 @@ class ADXClient:
             kql: The KQL query.
             database: Database to run against. Defaults to the client's database.
             properties: Request options, as a dict or ``ClientRequestProperties``.
+            profile: Keep the query's resource statistics in ``attrs["_statistics"]`` of the
+                first table (None if the service sent none).
 
         Raises:
             ConfigurationError: No database is available or it is invalid, the KQL uses
@@ -348,7 +359,7 @@ class ADXClient:
             QueryTimeoutError: The service timed the query out (HTTP 408/504 or a timeout error
                 code). It is a ``QueryError``, not transient.
         """
-        return self._execute("query", kql, database, properties)
+        return self._execute("query", kql, database, properties, profile)
 
     def query(
         self,

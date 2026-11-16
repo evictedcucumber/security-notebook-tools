@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `exec_query` and `exec_query_file` take `profile=False`. With `profile=True` the DataFrame is
+  returned as usual and a "Query profile" table shows the wall time and the service's query
+  statistics (written to stderr outside IPython), also kept as a flat dict in
+  `df.attrs["profile"]`. The query always runs, skipping the result caches.
+- `exec_batch_query` takes `profile=False`. With `profile=True` every window runs fresh and a
+  "Query profile (N windows)" table totals the windows; `df.attrs["profile"]` lists each window's
+  statistics.
+
 ## 9.0.0 - 2026-11-14
 
 ### Breaking
