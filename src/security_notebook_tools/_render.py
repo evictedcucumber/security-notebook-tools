@@ -657,6 +657,43 @@ def _hide(fig: Any, chart: str, keys: list[str]) -> None:
         )
 
 
+def build_figure(df: pd.DataFrame, spec: dict[str, Any]) -> Any:
+    """Build the Plotly figure for ``df`` from a checked ``spec``; no public-call logging."""
+    chart = spec[VISUALIZATION_ATTR].lower()
+    go = _load_plotly()
+    # Everything that can fail on bad input is checked before the dependency call, so a
+    # user error is logged once (by public_call) and not also as a plotly failure.
+    frame, spec = (df, spec) if chart in ("card", "table") else _expand_arrays(df, spec)
+    plan = groups = None
+    if chart == "card" and df.empty:
+        raise ConfigurationError("The result has no rows to show in a card.")
+    if chart not in ("card", "table"):
+        plan = _Plan(frame, spec, chart)
+        logger.debug("Chart columns: x=%r y=%r series=%r", plan.x, plan.y, plan.series)
+        if chart != "piechart":
+            groups = _groups(frame, plan)
+    with dependency_call(logger, "plotly figure", chart=chart) as dep:
+        if chart == "card":
+            fig = _card(go, df)
+        elif chart == "table":
+            fig = _table(go, df)
+        elif chart == "piechart":
+            fig = go.Figure(_pie_trace(go, frame, plan))
+            if spec.get("legend") == "hidden":
+                fig.update_layout(showlegend=False)
+        else:
+            fig = go.Figure(_series_traces(go, groups, plan, spec, chart))
+            _style(fig, spec, plan, chart)
+        if chart in ("card", "table", "piechart") and spec.get("title"):
+            fig.update_layout(title={"text": _esc(spec["title"])})  # _style does the others
+        if template := _template():
+            fig.update_layout(template=template)
+        if chart not in ("card", "table"):
+            fig.update_layout(legend=LEGEND_BELOW)
+        dep["traces"] = len(fig.data)
+    return fig
+
+
 def render_dataframe(
     df: pd.DataFrame,
     *,
@@ -769,37 +806,7 @@ def render_dataframe(
             spec = {**spec, "title": title}
         chart = spec[VISUALIZATION_ATTR].lower()
         call.update(chart=chart)
-        go = _load_plotly()
-        # Everything that can fail on bad input is checked before the dependency call, so a
-        # user error is logged once (by public_call) and not also as a plotly failure.
-        frame, spec = (df, spec) if chart in ("card", "table") else _expand_arrays(df, spec)
-        plan = groups = None
-        if chart == "card" and df.empty:
-            raise ConfigurationError("The result has no rows to show in a card.")
-        if chart not in ("card", "table"):
-            plan = _Plan(frame, spec, chart)
-            logger.debug("Chart columns: x=%r y=%r series=%r", plan.x, plan.y, plan.series)
-            if chart != "piechart":
-                groups = _groups(frame, plan)
-        with dependency_call(logger, "plotly figure", chart=chart) as dep:
-            if chart == "card":
-                fig = _card(go, df)
-            elif chart == "table":
-                fig = _table(go, df)
-            elif chart == "piechart":
-                fig = go.Figure(_pie_trace(go, frame, plan))
-                if spec.get("legend") == "hidden":
-                    fig.update_layout(showlegend=False)
-            else:
-                fig = go.Figure(_series_traces(go, groups, plan, spec, chart))
-                _style(fig, spec, plan, chart)
-            if chart in ("card", "table", "piechart") and spec.get("title"):
-                fig.update_layout(title={"text": _esc(spec["title"])})  # _style does the others
-            if template := _template():
-                fig.update_layout(template=template)
-            if chart not in ("card", "table"):
-                fig.update_layout(legend=LEGEND_BELOW)
-            dep["traces"] = len(fig.data)
+        fig = build_figure(df, spec)
         if keys:
             _hide(fig, chart, keys)
         call.update(traces=len(fig.data))
