@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The `profile=True` output is now a grouped, human-readable summary with share bars, a
+  collapsible list of the other statistics and, for `exec_batch_query`, a per-window table and,
+  with the `charts` extra installed, a chart of execution and CPU time per window.
+
 ## 10.1.0 - 2026-11-16
 
 ### Added

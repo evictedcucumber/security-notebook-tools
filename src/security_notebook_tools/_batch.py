@@ -42,10 +42,9 @@ from ._log import (
 from ._profile import (
     PROFILE_ATTR,
     _in_ipython,
-    profile_frame,
-    show_profile,
     total_profile,
 )
+from ._profile_render import show_batch_profile
 from ._query import (
     DEFAULT_TIMEOUT,
     BatchRun,
@@ -1212,9 +1211,7 @@ def exec_batch_query(
         if profile:
             merged.attrs[PROFILE_ATTR] = window_profiles or []
             total_stats = total_profile(merged.attrs[PROFILE_ATTR], time.perf_counter() - started)
-            show_profile(
-                profile_frame(total_stats), f"Query profile ({total_stats['windows']} windows)"
-            )
+            show_batch_profile(merged.attrs[PROFILE_ATTR], total_stats, merged.shape)
         call.update(
             windows=total,
             partial_windows=len(partial_windows),

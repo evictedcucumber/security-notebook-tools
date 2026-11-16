@@ -304,12 +304,16 @@ df = exec_query("SigninLogs | summarize count() by UserPrincipalName", timeout=6
 
 ### Query profile
 
-`profile=True` returns the DataFrame as usual and shows a "Query profile" table (wall time plus
-the service's query statistics). The query always runs, skipping the caches. The statistics are
-not written to `notebooks.log`. They are also on the frame as `df.attrs["profile"]`, a flat dict.
+`profile=True` returns the DataFrame as usual and shows a "Query profile" summary: wall time, the
+service's execution time, CPU, memory, data scanned, cache, network and result size, with a share
+bar where a ratio applies. Other statistics are in a collapsible list. The query always runs,
+skipping the caches. The statistics are not written to `notebooks.log`. They are also on the frame
+as `df.attrs["profile"]`, a flat dict.
 
-`exec_batch_query(..., profile=True)` runs every window fresh and shows one total table for the
-batch. Its `df.attrs["profile"]` is a list with one dict per window.
+`exec_batch_query(..., profile=True)` runs every window fresh and shows the same summary for the
+batch, plus a table with one row per window; in a notebook with the `charts` extra installed, a
+chart of execution and CPU time per window follows the table. Its `df.attrs["profile"]` is a list
+with one dict per window.
 
 ```python
 df = exec_query("SigninLogs | take 100", profile=True)

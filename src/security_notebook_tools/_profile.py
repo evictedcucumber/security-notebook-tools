@@ -9,13 +9,10 @@ import sys
 from datetime import timedelta
 from typing import Any
 
-import pandas as pd
-
 logger = logging.getLogger("security_notebook_tools.profile")
 
 STATISTICS_ATTR = "_statistics"
 PROFILE_ATTR = "profile"
-_CAPTION = "Query profile"
 
 
 def _in_ipython() -> bool:
@@ -110,24 +107,3 @@ def total_profile(windows: list[dict[str, Any]], elapsed: float) -> dict[str, An
         elif spans:
             total[name] = _format_timespan(max(spans) if peak else sum(spans, timedelta()))
     return total
-
-
-def profile_frame(profile: dict[str, Any]) -> pd.DataFrame:
-    """A ``Metric`` / ``Value`` table of a flat profile dict (values shown as text)."""
-    rows = list(profile.items())
-    if len(rows) == 1:
-        rows.append(("statistics", "the service returned no statistics"))
-    return pd.DataFrame(rows, columns=["Metric", "Value"]).astype({"Value": "string"})
-
-
-def show_profile(frame: pd.DataFrame, caption: str = _CAPTION) -> None:
-    """Display ``frame`` in the notebook cell, or write it to stderr outside IPython."""
-    try:
-        if _in_ipython():
-            from IPython.display import display
-
-            display(frame.style.hide(axis="index").set_caption(caption))
-        else:
-            sys.stderr.write(f"{caption}\n{frame.to_string(index=False)}\n")
-    except Exception:
-        logger.debug("Could not show the query profile", exc_info=True)

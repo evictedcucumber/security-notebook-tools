@@ -13,7 +13,7 @@ Version 10.1.0. MIT licence.
 - `src/security_notebook_tools/`: the package. Every module is private (`_query.py`, `_batch.py`,
   `_pivot.py`, `_merge.py`, `_log.py`, `_config.py`, `_timerange.py`, `_sentinel.py`, `_adx.py`,
   `_auth.py`, `_exceptions.py`, `_errors.py`, `_kql.py`, `_tablepolicy.py`, `_format.py`,
-  `_render.py`, `_profile.py`).
+  `_render.py`, `_profile.py`, `_profile_render.py`).
 - `_kql.py` (tokenizer) and `_tablepolicy.py` (ARM table-plan check) are the cost guard: Sentinel
   queries may only read Analytics-plan tables. They fail closed; treat any loosening as a
   security change and add a regression test for every bypass.

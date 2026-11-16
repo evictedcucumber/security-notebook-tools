@@ -34,7 +34,8 @@ from ._config import (
 from ._errors import public_call, unexpected_errors
 from ._exceptions import ConfigurationError, PartialResultError
 from ._log import dependency_call, fingerprint
-from ._profile import PROFILE_ATTR, STATISTICS_ATTR, profile_dict, profile_frame, show_profile
+from ._profile import PROFILE_ATTR, STATISTICS_ATTR, profile_dict
+from ._profile_render import show_profile
 from ._render import set_visualization
 from ._sentinel import SentinelClient, _table_to_df
 from ._tablepolicy import clear_policy_cache
@@ -735,7 +736,7 @@ def exec_query(
         df = tables[0] if tables else pd.DataFrame()
         df.attrs.setdefault("partial", False)
         if profile:
-            show_profile(profile_frame(df.attrs[PROFILE_ATTR]))
+            show_profile(df.attrs[PROFILE_ATTR], df.shape)
         call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
         return df
 

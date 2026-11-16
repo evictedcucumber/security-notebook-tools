@@ -2590,14 +2590,17 @@ def test_profile_runs_fresh_and_shows_statistics(sentinel, monkeypatch):
 
     cls.return_value.query_tables.side_effect = tables
     shown = []
-    monkeypatch.setattr(_query, "show_profile", shown.append)
+    monkeypatch.setattr(
+        _query, "show_profile", lambda profile, shape: shown.append((profile, shape))
+    )
     plain = snt.exec_query("T | take 1")
     assert snt.exec_query("T | take 1") is not None
     assert cls.return_value.query_tables.call_count == 1  # second call was cached
     df = snt.exec_query("T | take 1", profile=True)
     assert cls.return_value.query_tables.call_count == 2
     assert len(shown) == 1
-    assert "query.executionTime" in set(shown[0]["Metric"])
+    assert "query.executionTime" in shown[0][0]
+    assert shown[0][1] == (1, 1)
     pd.testing.assert_frame_equal(df, plain)
     assert "_statistics" not in df.attrs
     assert "profile" not in plain.attrs
@@ -2609,7 +2612,9 @@ def test_profile_runs_fresh_and_shows_statistics(sentinel, monkeypatch):
 
 def test_profile_false_shows_nothing(sentinel, monkeypatch):
     shown = []
-    monkeypatch.setattr(_query, "show_profile", shown.append)
+    monkeypatch.setattr(
+        _query, "show_profile", lambda profile, shape: shown.append((profile, shape))
+    )
     snt.exec_query("T | take 1")
     assert shown == []
 
@@ -2644,10 +2649,8 @@ def test_batch_profile_lists_windows_and_shows_the_total(sentinel, monkeypatch):
     _stats_tables(cls, lambda: {"rows": 2, "cpu": "00:00:01", "peakMem": next(peaks)})
     shown = []
     monkeypatch.setattr(
-        "security_notebook_tools._batch.show_profile",
-        lambda frame, caption: shown.append(
-            (caption, dict(zip(frame["Metric"], frame["Value"], strict=True)))
-        ),
+        "security_notebook_tools._batch.show_batch_profile",
+        lambda windows, total, shape: shown.append((windows, total, shape)),
     )
     df = snt.exec_batch_query(FILTER, D0, _days(2), profile=True)
     entries = df.attrs["profile"]
@@ -2655,19 +2658,20 @@ def test_batch_profile_lists_windows_and_shows_the_total(sentinel, monkeypatch):
     assert entries[0]["window_end"] == _days(1)
     assert entries[0]["rows"] == 2
     assert len(shown) == 1
-    caption, table = shown[0]
-    assert caption == "Query profile (2 windows)"
-    assert table["windows"] == "2"
-    assert table["rows"] == "4"
+    windows, table, shape = shown[0]
+    assert windows == entries
+    assert table["windows"] == 2
+    assert table["rows"] == 4
     assert table["cpu"] == "00:00:02"
-    assert table["peakMem"] == "9"
+    assert table["peakMem"] == 9
     assert "client_elapsed_seconds" in table
+    assert shape == df.shape
 
 
 def test_batch_profile_forces_fresh_runs(sentinel, monkeypatch):
     cls, _ = sentinel
     _stats_tables(cls, _batch_stats)
-    monkeypatch.setattr("security_notebook_tools._batch.show_profile", lambda *a: None)
+    monkeypatch.setattr("security_notebook_tools._batch.show_batch_profile", lambda *a: None)
     snt.exec_batch_query(FILTER, D0, _days(2))
     assert cls.return_value.query_tables.call_count == 2
     snt.exec_batch_query(FILTER, D0, _days(2), profile=True)

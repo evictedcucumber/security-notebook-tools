@@ -53,7 +53,7 @@ the Azure CLI, so run `az login` first. Sentinel queries pass the [cost guard](#
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a partial result (the service returned some data and an error) raises `PartialResultError` instead of being returned with a warning. Default false. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (clients, credentials, table policy, the query itself). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
-| `profile` | If true, return the DataFrame as usual and show a "Query profile" table in the cell output (written to stderr outside IPython). Default false. See [Query profile](#query-profile). |
+| `profile` | If true, return the DataFrame as usual and show a "Query profile" summary in the cell output (written to stderr outside IPython). Default false. See [Query profile](#query-profile). |
 
 `target`, `timeout`, `cache`, `raise_on_partial`, `debug` and `profile` are keyword-only.
 
@@ -484,7 +484,7 @@ after the first window, so a typo fails before the other windows run.
 | `cache` | If true (default), reuse a cached result for the same query and send nothing; if false, always run it and neither read nor write the cache. See [Caching](#caching). |
 | `raise_on_partial` | Sentinel only; no effect with `target="adx"`. If true, a window whose result is partial (the service returned some data and an error) fails the batch with `PartialResultError` naming the window; it is not retried or split. Default false: the partial data is kept, the frame is marked (see Returns) and one notice summarises the partial windows. |
 | `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs, including the calls it makes (every window, also those run on worker threads). Default false. The lines are printed unredacted (debug output is not written to the file; be careful when sharing a notebook saved with debug output). See [Debug output](#debug-output-in-the-cell). |
-| `profile` | If true, every window runs fresh (like `cache=False`) and one "Query profile (N windows)" total table is shown; `df.attrs["profile"]` lists each window's statistics. Default false. See [Query profile](#query-profile). |
+| `profile` | If true, every window runs fresh (like `cache=False`) and a "Query profile (N windows)" summary of the batch and a table of its windows are shown; `df.attrs["profile"]` lists each window's statistics. Default false. See [Query profile](#query-profile). |
 
 ### Returns
 
@@ -1045,31 +1045,41 @@ The installed version string, e.g. `"10.1.0"`.
 ### Query profile
 
 With `profile=True`, `exec_query` and `exec_query_file` return the DataFrame as usual and show a
-"Query profile" table (columns `Metric`, `Value`) in the cell output. Outside IPython the table is
-written to stderr. Its first row is the wall time measured on the client; the rest are the
-statistics the service returns, flattened with dotted names. Names come from the service and vary:
+"Query profile" summary in the cell output (written to stderr outside IPython). The summary has
+these sections, in order:
 
-- Sentinel: the Log Analytics query statistics (execution time, CPU, memory, cache, rows and
-  extents scanned, dataset sizes, ...).
-- `target="adx"`, including a workspace URL: the query's resource consumption (`ExecutionTime`,
-  `resource_usage.*`, `input_dataset_statistics.*`, `dataset_statistics.*`).
-- If the service returns none (for example for `.show` commands), the table says so.
+- Time: wall time on the client, execution time on the service.
+- CPU: total, user and kernel.
+- Memory: peak per node.
+- Data scanned: rows and extents scanned ("X of Y"), scanned time range, rowstore rows and size.
+- Cache: memory and disk cache hits, hot and cold shard hit/miss, bypass.
+- Network: inter-cluster and cross-cluster bytes.
+- Tables: rows and size of each table returned.
+- Result: rows and columns returned.
+
+Values are human-readable (s, ms, B, KiB, MiB, GiB). Where a ratio applies (rows scanned out of the
+total, cache hit rate) the Share column shows it as a bar. Rows the service did not report are left
+out; if it reports no statistics, a "Note" row says so. Other statistics are listed under a
+collapsed "All statistics (N)" section, and a footer points to `df.attrs["profile"]`.
 
 The same statistics are on the frame as `df.attrs["profile"]`, a flat dict: `"client_elapsed_seconds"`
-first, then each metric under the same dotted name as in the table, with the service's values
-(numbers, or strings such as Kusto timespans like `"00:00:00.0156"`). If the service returned no
-statistics it holds only `client_elapsed_seconds`.
+first, then each metric under the dotted name the service returns it by, with the service's values
+(numbers, or strings such as Kusto timespans like `"00:00:00.0156"`). Which metrics appear depends on
+the target (Sentinel or ADX). If the service returned no statistics it holds only
+`client_elapsed_seconds`.
 
 `profile=True` always sends the query: it skips the local result cache and, on ADX, the service's
 results cache, like `cache=False`, so the statistics come from a real run. Failing to read or show
 the statistics never fails the query. The statistics are not written to `notebooks.log`.
 
-With `exec_batch_query(..., profile=True)` every window runs fresh, like `cache=False`, and one
-"Query profile (N windows)" table is shown. Its rows are `windows` (N), `client_elapsed_seconds`
-(wall time of the whole batch call), then each metric across the windows: numbers and timespans
-are summed, metrics whose name contains "peak" take the maximum, and other text metrics are left
-out. `df.attrs["profile"]` is then a list with one dict per window (`window_start`, `window_end`
-and that window's flat metrics), see [`exec_batch_query`](#exec_batch_query).
+With `exec_batch_query(..., profile=True)` every window runs fresh, like `cache=False`. The
+"Query profile (N windows)" summary totals the batch: wall time of the whole call, then each metric
+summed over the windows (`peak` metrics take the maximum). A "Windows" table below it has one row
+per window with execution time, CPU total, peak memory, rows scanned and hot cache hit, each with a
+bar. Above 200 windows only the 200 slowest by execution time are listed. In a notebook with the
+`charts` extra installed, a chart of execution and CPU time per window follows the table.
+`df.attrs["profile"]` is then a list with one dict per window (`window_start`, `window_end` and
+that window's flat metrics), see [`exec_batch_query`](#exec_batch_query).
 
 ```python
 df = exec_query("SigninLogs | take 100", profile=True)
