@@ -16,7 +16,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "10.2.0"
+security_notebook_tools.__version__  # "10.3.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -560,6 +560,14 @@ df = exec_batch_query(
 )  # one row per user
 ```
 
+## Row count
+
+Once the package is imported in a notebook, `display(df)` (or `df` as the last expression of a
+cell) shows the row count, such as `1,234 rows`, above the table. This applies to every
+`pandas.DataFrame` in the kernel, not only query results; outside IPython nothing changes.
+`format_dataframe` and each table of `format_dataframe_by` show the count as a caption above the
+table, or `Showing the first N of M rows.` when `max_rows` cuts it.
+
 ## format_dataframe
 
 ```python
@@ -1040,7 +1048,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"10.2.0"`.
+The installed version string, e.g. `"10.3.0"`.
 
 ### Query profile
 

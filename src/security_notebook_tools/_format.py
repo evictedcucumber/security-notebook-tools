@@ -7,11 +7,13 @@ values for columns it has no type for.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import logging
 import math
 import re
+import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from numbers import Integral, Real
@@ -255,6 +257,11 @@ def _check_format_args(df: Any, max_rows: Any, debug: Any) -> None:
         raise ValueError(f"max_rows must be a positive integer or None, got {max_rows!r}.")
 
 
+def _row_count(rows: int) -> str:
+    """Return the row count as shown above a table, such as ``1,234 rows``."""
+    return f"{rows:,} row{'' if rows == 1 else 's'}"
+
+
 def _style_dataframe(
     df: pd.DataFrame, max_rows: int | None, *, log_level: int = logging.INFO
 ) -> Styler:
@@ -311,6 +318,8 @@ def _style_dataframe(
             styler = styler.hide(axis="index")
         if len(view) < len(df):
             styler = styler.set_caption(f"Showing the first {len(view):,} of {len(df):,} rows.")
+        else:
+            styler = styler.set_caption(_row_count(len(df)))
     return styler
 
 
@@ -329,7 +338,7 @@ def format_dataframe(
     single-line JSON (a list stays a list, an object an object). Nulls are shown as empty
     cells. The types come from ``df.attrs["kql_types"]``, which :func:`exec_query` sets;
     columns without a recorded type (for example ones you added) are typed from their dtype
-    and values.
+    and values. A caption above the table gives the row count.
 
     Numbers (``int``, ``long``, ``real``, ``decimal``) have the integer part split into groups of
     three digits with spaces, so ``1000000000.00000`` is shown as ``1 000 000 000.00000``. The
@@ -350,7 +359,7 @@ def format_dataframe(
     Args:
         df: The DataFrame to format, usually the result of :func:`exec_query`. It is not
             modified.
-        max_rows: Show at most this many rows (default 1000), with a caption giving the total;
+        max_rows: Show at most this many rows (default 1000), with the caption giving the total;
             ``None`` shows every row. Rendering very large tables can make a notebook slow.
         debug: If true, also print this call's log records, at DEBUG and above, to the
             notebook cell's output while it runs. Default false. The lines are printed unredacted
@@ -501,3 +510,18 @@ def format_dataframe_by(
                 parts.append(f"<h3>{heading}</h3>{styler.to_html()}")
         call.update(tables=len(groups))
         return SplitTables("".join(parts) or "<p>No rows.</p>")
+
+
+def _html_with_row_count(df: pd.DataFrame) -> str | None:
+    """Return the notebook HTML of ``df`` with its row count above the table."""
+    table = df._repr_html_()
+    if table is None:
+        return None
+    return f"<p>{_row_count(len(df))}</p>{table}"
+
+
+def show_row_counts() -> None:
+    """Make a running IPython shell show the row count above every displayed DataFrame."""
+    with contextlib.suppress(Exception):
+        shell = sys.modules["IPython"].get_ipython()
+        shell.display_formatter.formatters["text/html"].for_type(pd.DataFrame, _html_with_row_count)

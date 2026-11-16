@@ -203,10 +203,14 @@ def test_caption_uses_thousands_separator():
     assert len(_cells(df)) == 1000
 
 
-def test_no_caption_when_everything_shown():
+def test_caption_is_row_count_when_everything_shown():
     df = pd.DataFrame({"a": range(3)})
     assert "Showing the first" not in format_dataframe(df, max_rows=3).to_html()
-    assert "<caption" not in format_dataframe(df).to_html()
+    assert "<caption>3 rows</caption>" in format_dataframe(df).to_html()
+    assert "<caption>1 row</caption>" in format_dataframe(df.head(1)).to_html()
+    assert "<caption>1,234 rows</caption>" in (
+        format_dataframe(pd.DataFrame({"a": range(1234)}), max_rows=None).to_html()
+    )
 
 
 def test_max_rows_none_shows_all():
@@ -600,3 +604,42 @@ def test_by_logs_one_summary_not_one_per_table():
     assert messages[0].startswith("format_dataframe_by: started")
     assert messages[1].startswith("format_dataframe_by: finished")
     assert "tables=20" in messages[1]
+
+
+def _fake_shell(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from unittest import mock
+
+    html_formatter = mock.Mock()
+    shell = SimpleNamespace(
+        display_formatter=SimpleNamespace(formatters={"text/html": html_formatter})
+    )
+    monkeypatch.setitem(sys.modules, "IPython", SimpleNamespace(get_ipython=lambda: shell))
+    return html_formatter
+
+
+def test_show_row_counts_registers_dataframe_formatter(monkeypatch):
+    from security_notebook_tools._format import show_row_counts
+
+    html_formatter = _fake_shell(monkeypatch)
+    show_row_counts()
+    (cls, render), _ = html_formatter.for_type.call_args
+    assert cls is pd.DataFrame
+    html = render(pd.DataFrame({"a": range(1234)}))
+    assert html.startswith("<p>1,234 rows</p>")
+    assert "<table" in html
+    assert render(pd.DataFrame({"a": [1]})).startswith("<p>1 row</p>")
+    assert render(pd.DataFrame()).startswith("<p>0 rows</p>")
+
+
+def test_show_row_counts_without_a_shell_does_nothing(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from security_notebook_tools._format import show_row_counts
+
+    monkeypatch.delitem(sys.modules, "IPython", raising=False)
+    show_row_counts()
+    monkeypatch.setitem(sys.modules, "IPython", SimpleNamespace(get_ipython=lambda: None))
+    show_row_counts()
