@@ -1,6 +1,5 @@
 import json
 import sys
-import warnings
 from datetime import UTC, datetime, timedelta
 from unittest import mock
 
@@ -668,82 +667,6 @@ def test_no_data_values_in_the_log(caplog):
     assert "secret" not in caplog.text
 
 
-# --- %%kql --------------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def shell(monkeypatch):
-    pytest.importorskip("IPython")
-    from IPython.core.interactiveshell import InteractiveShell
-
-    from security_notebook_tools import _magic
-
-    sh = InteractiveShell.instance()
-    sh.user_ns.clear()
-    snt.load_ipython_extension(sh)
-    sh.frame = _frame(_spec("columnchart", xcolumn="Result", ycolumns=["Count"]))
-    monkeypatch.setattr(_magic, "exec_query", lambda *a, **k: sh.frame)
-    return sh
-
-
-def test_magic_returns_a_figure_for_a_render(shell):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        out = shell.run_cell_magic("kql", "", "T | render columnchart")
-    assert isinstance(out, go.Figure)
-
-
-def test_magic_table_flag_returns_the_styler(shell):
-    from pandas.io.formats.style import Styler
-
-    assert isinstance(shell.run_cell_magic("kql", "--table", "T | render columnchart"), Styler)
-
-
-def test_magic_without_render_returns_the_styler(shell):
-    from pandas.io.formats.style import Styler
-
-    shell.frame = pd.DataFrame({"a": [1]})
-    assert isinstance(shell.run_cell_magic("kql", "", "T"), Styler)
-
-
-def test_magic_render_table_shows_the_table_without_warning(shell):
-    from pandas.io.formats.style import Styler
-
-    shell.frame = _frame(_spec("table"))
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        assert isinstance(shell.run_cell_magic("kql", "", "T | render table"), Styler)
-
-
-def test_magic_falls_back_with_one_warning_when_plotly_is_missing(shell, monkeypatch):
-    from pandas.io.formats.style import Styler
-
-    monkeypatch.setitem(sys.modules, "plotly", None)
-    monkeypatch.setitem(sys.modules, "plotly.graph_objects", None)
-    with pytest.warns(UserWarning, match=r"charts\].*Showing the table") as record:
-        out = shell.run_cell_magic("kql", "", "T | render columnchart")
-    assert isinstance(out, Styler)
-    assert len(record) == 1
-
-
-def test_magic_falls_back_with_one_warning_for_an_unsupported_chart(shell):
-    from pandas.io.formats.style import Styler
-
-    shell.frame = _frame(_spec("pivotchart"))
-    with pytest.warns(UserWarning, match="pivotchart.*Showing the table") as record:
-        out = shell.run_cell_magic("kql", "", "T | render pivotchart")
-    assert isinstance(out, Styler)
-    assert len(record) == 1
-
-
-def test_magic_falls_back_when_a_named_column_is_missing(shell):
-    from pandas.io.formats.style import Styler
-
-    shell.frame = _frame(_spec("columnchart", xcolumn="Nope"))
-    with pytest.warns(UserWarning, match="Nope"):
-        assert isinstance(shell.run_cell_magic("kql", "", "T"), Styler)
-
-
 # --- review round -------------------------------------------------------------------------------
 
 TEX = r"$\href{javascript:alert(1)}{x}$"
@@ -1061,24 +984,6 @@ def test_partial_error_carries_visualization(monkeypatch, sentinel_sdk):
         with pytest.raises(PartialResultError) as ei:
             _sentinel().query_tables("T", raise_on_partial=True)
         assert ei.value.visualization == RENDER
-
-
-# %%kql never loses the table
-
-
-def test_magic_falls_back_on_any_chart_exception(shell):
-    from pandas.io.formats.style import Styler
-
-    with (
-        mock.patch(
-            "security_notebook_tools._magic.render_dataframe", side_effect=KeyError("secret")
-        ),
-        pytest.warns(UserWarning, match="KeyError") as record,
-    ):
-        out = shell.run_cell_magic("kql", "", "T | render columnchart")
-    assert isinstance(out, Styler)
-    assert len(record) == 1
-    assert "secret" not in str(record[0].message)
 
 
 @pytest.mark.parametrize(

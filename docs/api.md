@@ -16,7 +16,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "9.1.0"
+security_notebook_tools.__version__  # "10.1.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -692,7 +692,7 @@ remaining non-numeric columns, split the data into one trace per value.
 | `scatterchart` | Markers. |
 | `anomalychart` | Lines, plus a marker on the first y column wherever an `anomalycolumns` column of the same row (or array element, for `make-series`) is not zero. |
 | `card` | The first cell of the first row, as a number indicator or text. |
-| `table` | A Plotly table of the whole frame (`%%kql` shows the normal table for it). |
+| `table` | A Plotly table of the whole frame. |
 
 A `make-series` result (one row per series, with the x axis and every aggregate as an array) is
 expanded first: the x, y and anomaly arrays of each row are exploded together, so a row of `n`
@@ -879,39 +879,6 @@ raw = exec_query("SigninLogs | project UserPrincipalName, AppDisplayName")
 apps = merge_dataframe(raw, "UserPrincipalName", "AppDisplayName", "nunique")  # apps per user
 ```
 
-## %%kql
-
-```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--table] [--debug]
-<KQL>
-```
-
-IPython cell magic for quick queries: runs the cell body with `exec_query` and displays the
-result with `format_dataframe` (default `max_rows`), or, if the query ends in
-`| render <charttype>`, as a chart with `render_dataframe`. The DataFrame is not assigned anywhere; call
-`exec_query` directly when you need it. Enable it with
-`%load_ext security_notebook_tools` (`load_ipython_extension`, not part of `__all__`). Importing
-the package does not import IPython; it is only needed when the extension is loaded.
-
-| Argument | Description |
-| --- | --- |
-| `-t`, `--timespan` | Duration shorthand (`<number><unit>` parts, units `d`, `h`, `m`, `s`, case-insensitive: `1d`, `12h`, `30m`, `1d12h`, `90s`) giving a `timedelta`, otherwise a Python expression evaluated in the notebook namespace (`ts`, `"(start, end)"`, `"timedelta(hours=3)"`). The value is passed to `exec_query` as `timespan`. |
-| `--target` | `sentinel` (default) or `adx`. |
-| `--timeout` | Seconds, an integer. Default 300 (`exec_query`'s default). |
-| `--no-cache` | Same as `cache=False`: skip the [result cache](#caching) for this cell. |
-| `--table` | Show the table even when the query ends in `| render <charttype>`. Without this flag, a chart that cannot be drawn (Plotly not installed, an unsupported chart type, a column the render names is missing) falls back to the table with one `UserWarning` saying why; the cell does not fail. Any other
-error while drawing (a bug) also falls back to the table with a warning naming only the error type. `render table` always shows the table. |
-| `--debug` | Same as `debug=True` for the whole run (`exec_query` and `format_dataframe`): print the run's log records, at DEBUG and above, below the cell. See [Debug output](#debug-output-in-the-cell). |
-
-The cell body is passed verbatim as `kql`: no `{}` or `$` expansion. An empty body, a positional
-argument or a timespan expression that fails to evaluate raises `UsageError` before any query runs.
-All other validation and errors come from `exec_query` unchanged.
-
-```text
-%%kql --timespan 1d12h
-SigninLogs | take 100
-```
-
 ## clear_cache
 
 ```python
@@ -974,9 +941,9 @@ below).
   the windows of that run are kept for it (not those of other ranges it was run over before), so
   the memory used is about that of its 4 most recent merged results.
 
-Use `cache=False` (or `--no-cache` in `%%kql`) for one fresh call, or `clear_cache()` to drop
-everything. Large results stay in memory until evicted or cleared, so use `cache=False` or call
-`clear_cache()` for very large pulls.
+Use `cache=False` for one fresh call, or `clear_cache()` to drop everything. Large results stay
+in memory until evicted or cleared, so use `cache=False` or call `clear_cache()` for very large
+pulls.
 
 ```python
 df = exec_query("SigninLogs | take 100")  # runs the query
@@ -1029,7 +996,6 @@ query. The records come from these loggers:
 | `security_notebook_tools.format` | `format_dataframe` and `format_dataframe_by` entry and summary, the pandas Styler |
 | `security_notebook_tools.pivot` | `pivot_dataframe` entry and summary, the pandas steps |
 | `security_notebook_tools.merge` | `merge_dataframe` entry and summary, the pandas steps |
-| `security_notebook_tools.magic` | `%%kql` runs, argument parsing, extension loading |
 | `azure` (and `azure.core`, `azure.identity` ...) | WARNING and above from the Azure SDKs, written by the same handler; their levels are not changed |
 
 Levels:
@@ -1037,8 +1003,8 @@ Levels:
 | Level | Meaning |
 | --- | --- |
 | DEBUG | Internal detail: cached client, credential or table policy reused, the start of each dependency call. Never written to the file. |
-| INFO | An operation starting or completing: a public function's entry and result summary (rows, columns, duration), result cache hit, miss or bypass, client or credential created, each dependency call completing with its duration, cost guard passed, table policy fetched, `clear_cache`, a `%%kql` run, the extension loaded. |
-| WARNING | Recoverable or refused: a dependency call that failed (exception type and redacted message, no traceback), each batch retry, partial results (in a batch, each partial window), a call rejected by validation or the cost guard (`ConfigurationError`, `%%kql` `UsageError`). |
+| INFO | An operation starting or completing: a public function's entry and result summary (rows, columns, duration), result cache hit, miss or bypass, client or credential created, each dependency call completing with its duration, cost guard passed, table policy fetched, `clear_cache`. |
+| WARNING | Recoverable or refused: a dependency call that failed (exception type and redacted message, no traceback), each batch retry, partial results (in a batch, each partial window), a call rejected by validation or the cost guard (`ConfigurationError`). |
 | ERROR | The operation failed and an exception reaches you. Logged once per failed public call, at the public function. An unanticipated error is logged once, with a traceback. |
 
 The `security_notebook_tools` logger does not propagate to the root logger: its DEBUG records
@@ -1056,7 +1022,7 @@ What is never logged: KQL text (only `kql=hmac:<12 hex> len=<n>`, an HMAC under 
 exists only for the running process, so fingerprints compare within a session but cannot be
 guessed from), result values and DataFrame contents, environment variable values, HTTP headers,
 bodies and query strings, tokens, credentials, request properties, the notebook namespace, and a
-`timespan` or `%%kql` `--timespan` value (only a duration or dates are logged, otherwise
+`timespan` value (only a duration or dates are logged, otherwise
 `<TypeName>`). Workspace, cluster host and database names are masked (`co…(len 12)`), and fields
 are written only as plain numbers, dates and short identifier-like strings. SDK error messages
 are best effort: shortened to 200 characters, with quoted text (`'…'`, `"…"`, backticks, `b'…'`),
@@ -1074,7 +1040,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"9.1.0"`.
+The installed version string, e.g. `"10.1.0"`.
 
 ### Query profile
 
@@ -1105,8 +1071,6 @@ are summed, metrics whose name contains "peak" take the maximum, and other text 
 out. `df.attrs["profile"]` is then a list with one dict per window (`window_start`, `window_end`
 and that window's flat metrics), see [`exec_batch_query`](#exec_batch_query).
 
-`%%kql` does not take `profile`.
-
 ```python
 df = exec_query("SigninLogs | take 100", profile=True)
 ```
@@ -1114,9 +1078,9 @@ df = exec_query("SigninLogs | take 100", profile=True)
 ### Debug output in the cell
 
 `exec_query`, `exec_query_file`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`,
-`pivot_dataframe` and `merge_dataframe` take a keyword-only `debug=False`, and `%%kql` takes
-`--debug`. With it, the package's log records at DEBUG and above are also printed to that notebook cell's output for as long as the call runs, in the same format
-as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
+`pivot_dataframe` and `merge_dataframe` take a keyword-only `debug=False`. With it, the package's
+log records at DEBUG and above are also printed to that notebook cell's output for as long as the
+call runs, in the same format as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
 output is not written to the file; be careful when sharing a notebook saved with debug output:
 
 ```python
@@ -1131,9 +1095,9 @@ df = exec_query("SigninLogs | take 100", debug=True)
 2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 0.85s tables=1 rows=10 columns=4
 ```
 
-- **Scope.** The call and everything it calls are covered: nested public calls (`%%kql --debug`
-  covers `exec_query` and `format_dataframe`; `exec_batch_query` covers every window, including
-  those run on worker threads with `max_workers`). A nested call with `debug=False` does not
+- **Scope.** The call and everything it calls are covered: nested public calls
+  (`exec_batch_query` covers every window, including those run on worker threads with
+  `max_workers`). A nested call with `debug=False` does not
   switch it off, and a nested `debug=True` inside a call without it covers just that inner call.
 - **Only that call.** Other calls, including ones running at the same time in other threads, print
   nothing, and nothing is printed once the call has returned or raised.

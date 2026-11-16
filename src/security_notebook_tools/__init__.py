@@ -34,20 +34,15 @@ Public API:
   ``hidden=`` starts legend entries switched off, to be clicked on.
 * ``clear_cache``: forget cached query results (and clients, credentials and table plans).
 
-In IPython notebooks, ``%load_ext security_notebook_tools`` adds a ``%%kql`` cell magic that
-runs the cell body as KQL through ``exec_query`` and displays it with ``format_dataframe``, or as a
-chart with ``render_dataframe`` if the query ends in ``| render <charttype>`` (see
-``help(load_ipython_extension)``).
-
 Logging: every record at INFO and above from every module is appended to ``notebooks.log`` in
 the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
 above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
 redacted: KQL text, result values, environment variable values, tokens and URL query strings are
 never written. Gitignore the file. ``exec_query``, ``exec_query_file``, ``exec_batch_query``,
 ``format_dataframe``, ``format_dataframe_by``, ``merge_dataframe``, ``pivot_dataframe`` and
-``render_dataframe`` take ``debug=True`` (``%%kql`` takes ``--debug``): for that call, and
-everything it calls, the records at DEBUG and above are also printed to the cell's output,
-unredacted (raw KQL, workspace IDs, cluster URIs).
+``render_dataframe`` take ``debug=True``: for that call, and everything it calls, the records at
+DEBUG and above are also printed to the cell's output, unredacted (raw KQL, workspace IDs,
+cluster URIs).
 DEBUG records are never written to the file. The ``security_notebook_tools`` logger does not
 propagate to the root logger (a ``logging.basicConfig`` handler does not see these records); a
 handler you attach to it sees every record, DEBUG included, unredacted. Control and bidirectional
@@ -61,17 +56,14 @@ If the query ends in ``| render <charttype>``, ``attrs["visualization"]`` holds 
 Use ``help(function)`` for details. Submodules are private and may change.
 """
 
-import logging
-
 from ._batch import exec_batch_query
 from ._format import format_dataframe, format_dataframe_by
-from ._log import describe_exception
 from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query, exec_query_file
 from ._render import render_dataframe
 
-__version__ = "9.1.0"
+__version__ = "10.1.0"
 
 __all__ = [
     "clear_cache",
@@ -84,37 +76,6 @@ __all__ = [
     "pivot_dataframe",
     "render_dataframe",
 ]
-
-
-def load_ipython_extension(ipython) -> None:
-    """Register the ``%%kql`` cell magic (IPython calls this from ``%load_ext``).
-
-    Run ``%load_ext security_notebook_tools`` in a notebook, then write raw KQL in a cell::
-
-        %%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--table]
-            [--debug]
-
-    The body is passed verbatim to ``exec_query``, which does all validation, and the result is
-    displayed with ``format_dataframe``, or drawn with ``render_dataframe`` if the query ends in
-    ``| render <charttype>`` (``--table`` shows the table instead; without Plotly or for an
-    unsupported chart type the table is shown with a warning). The DataFrame is not kept; call
-    ``exec_query`` directly for that. ``--timespan`` takes a duration such as ``1d``, ``12h``,
-    ``30m``, ``1d12h`` or ``90s``, or a Python expression evaluated in the notebook namespace (a
-    variable, ``(start, end)``, ``timedelta(hours=3)``). IPython must be installed (it is with
-    the ``notebook`` extra).
-
-    Args:
-        ipython: The active ``InteractiveShell``.
-    """
-    log = logging.getLogger("security_notebook_tools.magic")
-    try:
-        from ._magic import KqlMagics
-
-        ipython.register_magics(KqlMagics)
-    except Exception as exc:
-        log.error("Could not load the IPython extension: %s", describe_exception(exc))
-        raise
-    log.info("IPython extension loaded: the %%kql cell magic is registered")
 
 
 def __dir__() -> list[str]:

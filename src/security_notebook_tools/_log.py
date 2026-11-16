@@ -1,17 +1,16 @@
 r"""Always-on, redacted file logging for the package.
 
 All modules log to children of the ``security_notebook_tools`` logger (``.auth``, ``.config``,
-``.sentinel``, ``.adx``, ``.timerange``, ``.tablepolicy``, ``.query``, ``.batch``, ``.format``,
-``.pivot`` and ``.magic``). Every record at INFO and above is appended to ``notebooks.log`` in the
-project root and nothing is printed to the notebook cell, unless a call is made with
-``debug=True`` (see below). The project root is the first
-directory, walking up from the current working directory, that contains ``.git`` or
-``pyproject.toml``; the walk never goes above the user's home directory, and if there is no
-marker the working directory itself is used. The path is resolved on every record (the root is
+``.sentinel``, ``.adx``, ``.timerange``, ``.tablepolicy``, ``.query``, ``.batch``, ``.format`` and
+``.pivot``). Every record at INFO and above is appended to ``notebooks.log`` in the project root and
+nothing is printed to the notebook cell, unless a call is made with ``debug=True`` (see below). The
+project root is the first directory, walking up from the current working directory, that contains
+``.git`` or ``pyproject.toml``; the walk never goes above the user's home directory, and if there is
+no marker the working directory itself is used. The path is resolved on every record (the root is
 cached per working directory), so ``os.chdir`` in a notebook is respected, and the file is only
-created when the first record is written, with mode 0600. It is opened without following
-symbolic links and records are dropped unless it is a regular file owned by the current user
-with a single link. Add ``notebooks.log`` to ``.gitignore``.
+created when the first record is written, with mode 0600. It is opened without following symbolic
+links and records are dropped unless it is a regular file owned by the current user with a single
+link. Add ``notebooks.log`` to ``.gitignore``.
 
 The same handler is attached to the ``azure`` logger namespace (``azure.core``,
 ``azure.identity``, ``azure.monitor`` ...) but only passes WARNING and above from there, so the
@@ -43,10 +42,10 @@ Levels, the same in every module:
 * INFO: an operation starting or completing: a public function's entry and result summary (rows
   and columns, duration), a result cache hit, miss or bypass, a client or credential created,
   each dependency call completing with its duration, the cost guard passing, the table policy
-  fetched, ``clear_cache``, a ``%%kql`` run, the extension loading.
+  fetched, ``clear_cache``.
 * WARNING: recoverable or refused: a dependency call that failed (exception type and redacted
   message, no traceback), each batch retry, partial results, and a call rejected by argument
-  validation or the cost guard (``ConfigurationError``, ``%%kql`` ``UsageError``).
+  validation or the cost guard (``ConfigurationError``).
 * ERROR: the operation failed and an exception reaches the user. Logged once per failed public
   call, at the public boundary (:func:`security_notebook_tools._errors.public_call`). An error
   nobody anticipated is logged once, with its traceback, by ``unexpected``; the boundary then
@@ -68,8 +67,8 @@ exception message is shortened and stripped of quoted strings.
 
 Failures to open or write the file are ignored so logging never breaks a query.
 
-Debug output (``debug=True``): ``exec_query``, ``exec_batch_query``, ``format_dataframe``,
-``pivot_dataframe`` and ``%%kql --debug`` open a debug scope for the duration of the call (see
+Debug output (``debug=True``): ``exec_query``, ``exec_batch_query``, ``format_dataframe``
+and ``pivot_dataframe`` open a debug scope for the duration of the call (see
 :func:`debug_scope`). While it is active, every package record at DEBUG and above is also
 printed to that notebook cell's output, unredacted (same line format as the file), whichever
 function or thread logs it: nested public calls inherit the scope and the batch's worker

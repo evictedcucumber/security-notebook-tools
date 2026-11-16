@@ -24,7 +24,7 @@ Into a uv-managed project:
 uv add git+https://github.com/evictedcucumber/security-notebook-tools@<full-commit-sha>
 
 # A specific release (less strict: tags can be moved)
-uv add git+https://github.com/evictedcucumber/security-notebook-tools@v9.1.0
+uv add git+https://github.com/evictedcucumber/security-notebook-tools@v10.1.0
 
 # Latest main (least strict: whatever main is at install time)
 uv add git+https://github.com/evictedcucumber/security-notebook-tools
@@ -43,7 +43,7 @@ To register a Jupyter kernel from the project's environment, add the `notebook` 
 (it installs `ipykernel`): `uv add "security-notebook-tools[notebook] @ git+https://github.com/evictedcucumber/security-notebook-tools"`.
 See [docs/notebook-setup.md](docs/notebook-setup.md) for kernel and VS Code setup.
 
-Charts (`render_dataframe` and the chart output of `%%kql`) need Plotly, an optional extra:
+Charts (`render_dataframe`) need Plotly, an optional extra:
 `uv add "security-notebook-tools[charts] @ git+https://github.com/evictedcucumber/security-notebook-tools"`
 or `pip install "security-notebook-tools[charts] @ git+https://github.com/evictedcucumber/security-notebook-tools"`.
 
@@ -285,7 +285,7 @@ ADX queries also use the service's results cache and a higher row limit; see
 [docs/api.md](docs/api.md#caching).
 
 ```python
-df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call (`--no-cache` in %%kql)
+df = exec_query("SigninLogs | take 100", cache=False)  # one fresh call
 
 from security_notebook_tools import clear_cache
 
@@ -309,43 +309,10 @@ the service's query statistics). The query always runs, skipping the caches. The
 not written to `notebooks.log`. They are also on the frame as `df.attrs["profile"]`, a flat dict.
 
 `exec_batch_query(..., profile=True)` runs every window fresh and shows one total table for the
-batch. Its `df.attrs["profile"]` is a list with one dict per window. Not available on `%%kql`.
+batch. Its `df.attrs["profile"]` is a list with one dict per window.
 
 ```python
 df = exec_query("SigninLogs | take 100", profile=True)
-```
-
-### Cell magic
-
-For quick looks in a notebook you can write raw KQL in a cell instead of a Python string. Load
-the extension once per kernel:
-
-```python
-%load_ext security_notebook_tools
-```
-
-```text
-%%kql [-t TIMESPAN] [--target {sentinel,adx}] [--timeout SECONDS] [--no-cache] [--table] [--debug]
-SigninLogs
-| summarize count() by UserPrincipalName
-```
-
-The cell body is passed to `exec_query` unchanged (no `{}` or `$` expansion), and every
-`exec_query` option is available. The result is displayed with `format_dataframe` (see
-[Display](#display)) and not kept; call `exec_query` yourself when you want the DataFrame.
-`--timespan` takes a duration (`1d`, `12h`, `30m`, `90s`, or combined like
-`1d12h`) or a Python expression evaluated in the notebook, such as `ts`, `"(start, end)"` or
-`"timedelta(hours=3)"`. `--target` defaults to `sentinel`, `--timeout` to 300. `%%kql?` shows the
-usage. IPython comes with the `notebook` extra.
-
-If the query ends in `| render <charttype>`, the cell shows the chart instead of the table (see
-[Charts](#charts)); `--table` shows the table anyway. Without Plotly, or for a chart type that
-cannot be drawn (or drawing fails for any reason), the table is shown with one warning saying why;
-the cell never loses the result.
-
-```text
-%%kql --timespan 1d --timeout 600
-SigninLogs | take 100
 ```
 
 ### Display
@@ -391,8 +358,6 @@ SigninLogs
 df.attrs["visualization"]  # {"visualization": "timechart", "title": "Sign-ins per hour"}
 render_dataframe(df)  # a plotly Figure; last expression in the cell renders it
 ```
-
-In a `%%kql` cell the chart is shown automatically; `%%kql --table` shows the table instead.
 
 Supported: `timechart`, `linechart`, `areachart`, `stackedareachart`, `columnchart`, `barchart`
 (`kind` default, unstacked, stacked or stacked100), `piechart`, `scatterchart`, `anomalychart`,
@@ -465,7 +430,7 @@ The `security_notebook_tools` logger does not propagate to the root logger, so a
 
 Every log record at INFO and above from the `security_notebook_tools` logger and its children
 (`auth`, `config`, `sentinel`, `adx`, `timerange`, `tablepolicy`, `query`, `batch`, `format`,
-`pivot`, `merge`, `magic`) is appended to `notebooks.log` in your project root (the nearest
+`pivot`, `merge`) is appended to `notebooks.log` in your project root (the nearest
 directory above the working directory with `.git` or `pyproject.toml`, never looking above your
 home directory, else the working directory). The file is created with permissions 0600 and is not written if it
 is a symbolic link, a hard link or owned by someone else; an existing file with group or other
@@ -514,9 +479,8 @@ same caveat. `notebooks.log` is unchanged.
 
 ### Debug output in the cell
 
-To see what a call does, pass `debug=True` (`--debug` in `%%kql`) to `exec_query`,
-`exec_query_file`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`,
-`pivot_dataframe` or `merge_dataframe`. While that call
+To see what a call does, pass `debug=True` to `exec_query`, `exec_query_file`, `exec_batch_query`,
+`format_dataframe`, `format_dataframe_by`, `pivot_dataframe` or `merge_dataframe`. While that call
 runs, the package's log records at DEBUG and above are also printed to the cell's output, in the
 same line format as the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
 
@@ -531,9 +495,8 @@ df = exec_query("SigninLogs | take 100", debug=True)
 2026-10-23T14:02:12.247Z INFO security_notebook_tools.query: exec_query: finished in 0.85s tables=1 rows=10 columns=4
 ```
 
-It covers the call and everything it calls: `%%kql --debug` covers both `exec_query` and
-`format_dataframe`, and `exec_batch_query(..., debug=True)` covers every window, also with
-`max_workers`. Other calls print nothing, including ones running at the same time, and so does
+It covers the call and everything it calls: `exec_batch_query(..., debug=True)` covers every
+window, also with `max_workers`. Other calls print nothing, including ones running at the same time, and so does
 everything after the call returns or raises. It is off by default, only the package's own
 records are shown (not the Azure SDK loggers'), and DEBUG records are never written to
 `notebooks.log`. The cell shows the raw text, which is not written to the file; be careful when sharing a

@@ -1151,7 +1151,7 @@ wheels = [
 
 [[package]]
 name = "security-notebook-tools"
-version = "9.1.0"
+version = "10.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "azure-identity" },
@@ -1172,7 +1172,6 @@ notebook = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "ipython" },
     { name = "nbformat" },
     { name = "plotly" },
     { name = "pytest" },
@@ -1194,7 +1193,6 @@ provides-extras = ["notebook", "charts"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "ipython" },
     { name = "nbformat", specifier = ">=4.2.0" },
     { name = "plotly", specifier = ">=7.1.0" },
     { name = "pytest" },

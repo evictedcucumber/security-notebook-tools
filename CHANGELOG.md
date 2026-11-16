@@ -1,6 +1,6 @@
 # Changelog
 
-## 9.1.0 - 2026-11-16
+## 10.1.0 - 2026-11-16
 
 ### Added
 
@@ -11,6 +11,14 @@
 - `exec_batch_query` takes `profile=False`. With `profile=True` every window runs fresh and a
   "Query profile (N windows)" table totals the windows; `df.attrs["profile"]` lists each window's
   statistics.
+
+## 10.0.0 - 2026-11-16
+
+### Breaking
+
+- The `%%kql` cell magic and `load_ipython_extension` (`%load_ext security_notebook_tools`) are
+  removed, along with the `security_notebook_tools.magic` logger. Use `exec_query` with
+  `format_dataframe` or `render_dataframe` instead.
 
 ## 9.0.0 - 2026-11-14
 
