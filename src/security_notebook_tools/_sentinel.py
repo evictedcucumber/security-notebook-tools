@@ -47,10 +47,12 @@ from ._config import resolve_tenant_id, resolve_workspace_id, resolve_workspace_
 from ._errors import (
     TRANSIENT_STATUS,
     azure_error_codes,
+    azure_kql_error,
     describe_codes,
     describe_network_error,
     hints_for,
     is_timeout,
+    kql_query_error,
     unexpected_errors,
 )
 from ._exceptions import (
@@ -353,6 +355,8 @@ class SentinelClient:
         except HttpResponseError as exc:
             status = exc.status_code
             codes = azure_error_codes(exc)
+            if kql_error := azure_kql_error(exc):
+                raise kql_query_error("Sentinel query failed", kql_error, codes, kql) from None
             message = f"Sentinel query failed: {exc.message or exc}"
             if isinstance(exc, DecodeError):
                 message += " (the service sent a response that could not be read; retry)"
@@ -439,9 +443,11 @@ class SentinelClient:
                 that is not on the Analytics plan), or the workspace ID does not match the
                 resource ID.
             QueryError: The table plans could not be verified, or the service returned an error.
-                The message adds hints for the HTTP status and the service error code
-                (``SyntaxError``, ``PathNotFoundError``, ``InsufficientAccessError`` ...), and
-                says to run `az login` for authentication problems. An error nobody anticipated
+                A KQL syntax or semantic error is reported as one short message with its line and
+                column, and a note showing the offending query line with a caret (the SDK
+                traceback is not chained). Other messages add hints for the HTTP status and the
+                service error code (``PathNotFoundError``, ``InsufficientAccessError`` ...), and
+                say to run `az login` for authentication problems. An error nobody anticipated
                 is logged at ERROR with its traceback and raised as a ``QueryError`` that
                 chains the original.
             QueryTimeoutError: The query ran out of time: HTTP 504/408 (``GatewayTimeout``) or no

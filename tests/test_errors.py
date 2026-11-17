@@ -9,14 +9,18 @@ from azure.kusto.data.exceptions import KustoApiError, KustoMultiApiError, Kusto
 from security_notebook_tools._errors import (
     TIMEOUT_STATUS,
     TRANSIENT_STATUS,
+    KqlError,
     azure_error_codes,
+    azure_kql_error,
     describe_codes,
     describe_network_error,
     describe_status,
     hints_for,
     is_network_error,
     is_timeout,
+    kql_query_error,
     kusto_error_codes,
+    kusto_kql_error,
     unexpected,
     unexpected_errors,
 )
@@ -246,3 +250,57 @@ def test_timeout_without_oserror_says_timed_out():
     text = describe_network_error(ServiceResponseTimeoutError("Read timed out"))
     assert "timed out" in text
     assert "ServiceResponseTimeoutError" in text
+
+
+def test_azure_kql_error_reads_the_innermost_message_and_position():
+    leaf = {"code": "SYN0002", "message": "deep", "line": 3, "pos": 7}
+    exc = HttpResponseError(message="m")
+    exc.error = ODataV4Format(
+        {
+            "code": "BadArgumentError",
+            "message": "outer",
+            "innererror": {"code": "SyntaxError", "innererror": leaf},
+        }
+    )
+    assert azure_kql_error(exc) == KqlError("syntax", "deep", 3, 7)
+
+
+def test_azure_kql_error_parses_the_position_from_the_message():
+    exc = HttpResponseError(message="m")
+    exc.error = ODataV4Format({"code": "SemanticError", "message": "bad on line [4, 2]"})
+    assert azure_kql_error(exc) == KqlError("semantic", "bad on line [4, 2]", 4, 2)
+
+
+@pytest.mark.parametrize(
+    "error", [None, ODataV4Format({"code": "PathNotFoundError", "message": "x"})]
+)
+def test_azure_kql_error_ignores_other_errors(error):
+    exc = HttpResponseError(message="m")
+    exc.error = error
+    assert azure_kql_error(exc) is None
+    assert azure_kql_error(ValueError("x")) is None
+
+
+def test_kusto_kql_error_ignores_other_errors():
+    other = KustoApiError({"error": {"code": "LimitsExceeded", "message": "m"}})
+    assert kusto_kql_error(other) is None
+    assert kusto_kql_error(ValueError("x")) is None
+
+
+def test_kusto_kql_error_parses_either_position_form():
+    exc = KustoApiError(
+        {
+            "error": {
+                "code": "BadRequest_SyntaxError",
+                "message": "m",
+                "@message": "bad on line [1,5]",
+            }
+        }
+    )
+    assert kusto_kql_error(exc) == KqlError("syntax", "bad on line [1,5]", 1, 5)
+
+
+def test_kql_query_error_excerpt_keeps_tabs_and_skips_a_column_past_the_end():
+    error = KqlError("syntax", "bad", 1, 3)
+    assert kql_query_error("p", error, [], "\tx y").__notes__ == ["1 | \tx y\n  | \t ^"]
+    assert not hasattr(kql_query_error("p", KqlError("syntax", "bad", 1, 9), [], "ab"), "__notes__")

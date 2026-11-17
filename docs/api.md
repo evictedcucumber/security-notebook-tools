@@ -273,6 +273,9 @@ Known failures are raised as `QueryError` (or a subclass) with a message that ex
 
 - Network failures (reset by peer, refused, timed out, DNS) raise `QueryConnectionError` and say
   what they usually mean.
+- A KQL syntax or semantic error raises `QueryError` with one short message (`KQL syntax error at
+  line 2, column 5: ...`) and a note showing the offending query line with a caret. The SDK
+  traceback is not shown. In a batch the line number counts the user's query only.
 - HTTP statuses (400, 401, 403, 404, 408, 413, 429, 5xx) and service error codes (Log Analytics
   `SyntaxError`, `SemanticError`, `PathNotFoundError`, `InsufficientAccessError`,
   `ResponsePayloadTooLarge`, timeouts; Kusto `BadRequest_SyntaxError`, `BadRequest_EntityNotFound`,

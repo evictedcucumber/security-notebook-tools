@@ -777,3 +777,82 @@ def test_profile_with_mock_tables_does_not_crash(patched):
     client.execute_query.return_value.primary_results = ["t"]
     c = ADXClient("https://c.kusto.windows.net", "db", credential=mock.Mock())
     assert c.query_tables("T", profile=True)[0].attrs["_statistics"] is None
+
+
+def test_kusto_syntax_error_reports_position_and_excerpt(patched, caplog):
+    caplog.set_level(logging.INFO)
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {
+            "error": {
+                "code": "BadRequest_SyntaxError",
+                "message": "Request is invalid and cannot be processed: Syntax error",
+                "@type": "Kusto.Data.Exceptions.SyntaxException",
+                "@message": "Syntax error: Query could not be parsed at 'x' [line:position=2:3]",
+            }
+        }
+    )
+    with pytest.raises(QueryError) as ei:
+        _adx().query("T\n| where a == 1")
+    exc = ei.value
+    assert "KQL syntax error at line 2, column 3: Query could not" in str(exc)
+    assert "service error code: BadRequest_SyntaxError" in str(exc)
+    assert exc.__notes__ == ["2 | | where a == 1\n  |   ^"]
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__
+    assert "a == 1" not in caplog.text
+
+
+def test_kusto_semantic_error_without_position_has_no_note(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {
+            "error": {
+                "code": "BadRequest_SemanticError",
+                "message": "m",
+                "@message": "No such column",
+            }
+        }
+    )
+    with pytest.raises(QueryError, match="KQL semantic error: No such column") as ei:
+        _adx().query("T")
+    assert not hasattr(ei.value, "__notes__")
+
+
+def test_kusto_kql_error_recognised_by_type_alone(patched):
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {
+            "error": {
+                "code": "General_BadRequest",
+                "message": "m",
+                "@type": "Kusto.Data.Exceptions.SyntaxException",
+                "@message": "Syntax error",
+            }
+        }
+    )
+    with pytest.raises(QueryError, match="KQL syntax error: Syntax error") as ei:
+        _adx().query("T")
+    assert ei.value.__cause__ is None
+
+
+def test_kusto_kql_error_recognised_from_message_text(patched):
+    # As a real cluster sends it: the code is generic, only the text names a semantic error.
+    client, _, _ = patched
+    client.execute_query.side_effect = KustoApiError(
+        {
+            "error": {
+                "code": "General_BadRequest",
+                "message": "Request is invalid and cannot be executed.",
+                "@message": "Request is invalid and cannot be processed: Semantic error: SEM0100: "
+                "'summarize' operator: Failed to resolve scalar expression named 'SeverityLevel'",
+            }
+        }
+    )
+    with pytest.raises(QueryError) as ei:
+        _adx().query("T")
+    assert str(ei.value) == (
+        "ADX query failed: KQL semantic error: SEM0100: 'summarize' operator: Failed to resolve "
+        "scalar expression named 'SeverityLevel' (service error code: General_BadRequest)"
+    )
+    assert ei.value.__cause__ is None

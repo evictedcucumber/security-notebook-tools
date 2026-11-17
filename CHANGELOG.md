@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A KQL syntax or semantic error from Sentinel or ADX is now one short `QueryError` message with
+  the problem, line and column, plus a note showing the offending query line with a caret. The
+  SDK's raw JSON, stacked hints and chained traceback are no longer shown.
+
 ## 10.3.0 - 2026-11-16
 
 ### Changed

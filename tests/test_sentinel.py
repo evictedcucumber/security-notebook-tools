@@ -740,3 +740,114 @@ def test_no_profile_does_not_request_statistics(client):
     tables = client.query_tables("T")
     assert client._mock.query_workspace.call_args.kwargs["include_statistics"] is False
     assert "_statistics" not in tables[0].attrs
+
+
+def _log_analytics_error(inner, status=400):
+    body = {
+        "error": {
+            "message": "The request had some invalid properties",
+            "code": "BadArgumentError",
+            "innererror": inner,
+        }
+    }
+    exc = HttpResponseError(
+        message="(BadArgumentError) The request had some invalid properties\nInner error: {...}",
+        response=mock.Mock(status_code=status),
+    )
+    exc.error = ODataV4Format(body["error"])
+    return exc
+
+
+def _syntax_inner(code="SyntaxError", leaf=None):
+    leaf = leaf or {
+        "code": "SYN0002",
+        "message": "Query could not be parsed at 'x' on line [2,5]",
+        "line": 2,
+        "pos": 5,
+        "token": "x",
+    }
+    return {
+        "code": code,
+        "message": "A recognition error occurred in the query.",
+        "innererror": leaf,
+    }
+
+
+KQL = "T\n| where EventID == 4625"
+
+
+def test_log_analytics_syntax_error_is_short_with_an_excerpt_note(client, caplog):
+    caplog.set_level(logging.INFO)
+    client._mock.query_workspace.side_effect = _log_analytics_error(_syntax_inner())
+    with pytest.raises(QueryError) as ei:
+        client.query(KQL)
+    exc = ei.value
+    assert "KQL syntax error at line 2, column 5" in str(exc)
+    assert "Query could not be parsed at 'x'" in str(exc)
+    assert "Inner error" not in str(exc)
+    assert exc.__notes__ == ["2 | | where EventID == 4625\n  |     ^"]
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__
+    assert isinstance(exc.__context__, HttpResponseError)
+    assert "EventID" not in caplog.text
+
+
+def test_log_analytics_semantic_error(client):
+    leaf = {"code": "SEM0100", "message": "'where' operator: Failed to resolve column", "line": 2}
+    leaf["pos"] = 3
+    client._mock.query_workspace.side_effect = _log_analytics_error(
+        _syntax_inner("SemanticError", leaf)
+    )
+    with pytest.raises(QueryError, match="KQL semantic error at line 2, column 3: 'where'") as ei:
+        client.query(KQL)
+    assert ei.value.__notes__ == ["2 | | where EventID == 4625\n  |   ^"]
+
+
+def test_batch_prefix_line_is_mapped_to_the_users_query(client):
+    from security_notebook_tools._batch import _prefix
+
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    sent = _prefix((stamp, stamp)) + "T | where EventID == 4625"
+    client._mock.query_workspace.side_effect = _log_analytics_error(_syntax_inner())
+    with pytest.raises(QueryError) as ei:
+        client.query(sent)
+    assert "KQL syntax error at line 1, column 5" in str(ei.value)
+    assert "on line [1,5]" in str(ei.value)
+    assert ei.value.__notes__ == ["1 | T | where EventID == 4625\n  |     ^"]
+
+
+def test_error_inside_the_batch_prefix_has_no_position(client):
+    from security_notebook_tools._batch import _prefix
+
+    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    leaf = {"code": "SYN0002", "message": "bad", "line": 1, "pos": 5}
+    client._mock.query_workspace.side_effect = _log_analytics_error(_syntax_inner(leaf=leaf))
+    with pytest.raises(QueryError) as ei:
+        client.query(_prefix((stamp, stamp)) + KQL)
+    assert "KQL syntax error: bad" in str(ei.value)
+    assert not hasattr(ei.value, "__notes__")
+
+
+def test_syntax_error_without_position_has_no_note(client):
+    leaf = {"code": "SYN0002", "message": "Query could not be parsed"}
+    client._mock.query_workspace.side_effect = _log_analytics_error(_syntax_inner(leaf=leaf))
+    with pytest.raises(QueryError) as ei:
+        client.query(KQL)
+    assert "KQL syntax error: Query could not be parsed (service error code:" in str(ei.value)
+    assert not hasattr(ei.value, "__notes__")
+
+
+def test_syntax_error_position_out_of_range_has_no_note(client):
+    leaf = {"code": "SYN0002", "message": "bad", "line": 9, "pos": 1}
+    client._mock.query_workspace.side_effect = _log_analytics_error(_syntax_inner(leaf=leaf))
+    with pytest.raises(QueryError, match="line 9, column 1") as ei:
+        client.query(KQL)
+    assert not hasattr(ei.value, "__notes__")
+
+
+def test_other_bad_requests_keep_the_hints_and_the_chain(client):
+    exc = _log_analytics_error({"code": "PathNotFoundError", "message": "no table"})
+    client._mock.query_workspace.side_effect = exc
+    with pytest.raises(QueryError, match="Inner error") as ei:
+        client.query(KQL)
+    assert ei.value.__cause__ is exc
