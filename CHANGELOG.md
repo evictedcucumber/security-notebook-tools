@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `compare_performance` renders a short analysis after the table in a notebook: the best query per
+  category and overall, judged by clear wins outside the run-to-run noise, with a note when a
+  query ran once. The overall verdict weights categories: Time and CPU 2, Data scanned, Memory
+  and Network 1, Cache 0. `to_html()` and `.data` are unchanged.
+
 ## 11.0.0 - 2026-11-17
 
 ### Breaking

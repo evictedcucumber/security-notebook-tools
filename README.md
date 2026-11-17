@@ -322,7 +322,8 @@ df = exec_query("SigninLogs | take 100", profile=True)
 ```
 
 To compare the statistics of two or more profiled results side by side, with each query's change
-from the best one in every row (red when worse, a clear winner in green), use `compare_performance`:
+from the best one in every row (red when worse, a clear winner in green) and a short analysis of
+the best query per category and overall, use `compare_performance`:
 
 ```python
 from security_notebook_tools import compare_performance
