@@ -2,6 +2,7 @@ import math
 
 import pandas as pd
 import pytest
+from pandas.io.formats.style import Styler
 
 from security_notebook_tools import compare_performance
 from security_notebook_tools._compare import BETTER_COLOR, WORSE_COLOR
@@ -496,3 +497,118 @@ def test_best_value_green_only_when_clear_of_every_other_query(queries, expected
 def test_green_best_value_stays_bold():
     css = _css(compare_performance(_runs(1, 2), _runs(3, 4)))
     assert "bold" in css[EXEC, ("Query 1", "Value")]
+
+
+def _summary(*queries, **kwargs):
+    return compare_performance(*queries, **kwargs).summary
+
+
+def test_summary_best_per_category_and_overall_with_trade_off(pair):
+    summary = _summary(*pair)
+    assert dict(summary.categories) == {
+        "Time": "Query 2 (Execution time (service) -25.0% vs next best)",
+        "CPU": "Query 1 (Total -33.3% vs next best)",
+        "Memory": "Query 2 (Peak per node -50.0% vs next best)",
+        "Data scanned": "no clear winner (within run-to-run noise)",
+    }
+    assert summary.overall == (
+        "Query 2, 3 of 6 points (Time \u00d72, Memory). Query 1 is best in CPU."
+    )
+
+
+def test_summary_clear_overall_winner_without_trade_off():
+    a = _frame(**_profile(execution="00:00:02", cpu="00:00:04", peak=2000))
+    b = _frame(**_profile())
+    summary = _summary(a, b, labels=["A", "B"])
+    assert summary.overall == "B, 5 of 6 points (Time \u00d72, CPU \u00d72, Memory)"
+
+
+def test_summary_category_tie():
+    a = _frame(**_profile(execution="00:00:01", wall=1.0))
+    b = _frame(**_profile(execution="00:00:00.75", wall=2.0))
+    categories = dict(_summary(a, b, labels=["A", "B"]).categories)
+    assert categories["Time"] == "tie between A and B"
+
+
+def test_summary_overall_tie():
+    a = _frame(**_profile(execution="00:00:02", cpu="00:00:01"))
+    b = _frame(**_profile(execution="00:00:01", cpu="00:00:03"))
+    overall = _summary(a, b, labels=["A", "B"]).overall
+    assert overall == "No single best overall: A and B each have 2 of 6 points."
+
+
+def test_summary_within_noise_for_overlapping_runs():
+    summary = _summary(_runs(1, 3), _runs(2, 4))
+    assert dict(summary.categories)["Time"] == "no clear winner (within run-to-run noise)"
+    assert summary.overall == (
+        "No clear best overall: the differences in the weighted categories are within "
+        "run-to-run noise."
+    )
+    assert summary.note is None
+
+
+def test_summary_clear_win_with_separated_runs():
+    summary = _summary(_runs(1, 2), _runs(5, 6))
+    assert dict(summary.categories)["Time"].startswith("Query 1 (Execution time (service) -")
+
+
+def test_summary_notes_single_runs(pair):
+    note = _summary(*pair).note
+    assert note == (
+        "Query 1 and Query 2 ran once, so run-to-run noise cannot be judged and any difference "
+        "counts; use exec_query_runs for 3 or more runs."
+    )
+    assert _summary(_runs(1, 2), _runs(1, 2)).note is None
+    assert _summary(_runs(1, 2), _runs(1), labels=["m", "s"]).note.startswith("s ran once,")
+
+
+def test_summary_follows_table_in_repr_html(pair):
+    styler = compare_performance(*pair)
+    html = styler._repr_html_()
+    assert html.index("</table>") < html.index("<strong>Best overall:</strong>")
+    assert "<li><strong>Time:</strong> Query 2 (" in html
+    assert html.endswith("</div>")
+
+
+def test_summary_not_in_to_html_and_still_a_styler(pair):
+    styler = compare_performance(*pair)
+    assert isinstance(styler, Styler)
+    assert "Best overall" not in styler.to_html()
+    assert list(styler.data.columns.get_level_values(0).unique()) == ["Query 1", "Query 2"]
+
+
+def test_summary_html_escapes_labels(pair):
+    html = compare_performance(*pair, labels=["<b>", "y&z"])._repr_html_()
+    summary = html[html.index("<div><p>") :]
+    assert "<b>" not in summary
+    assert "&lt;b&gt;" in summary
+    assert "y&amp;z" in summary
+
+
+def _cache_pair(hit_a, hit_b, **kwargs):
+    return (
+        _frame(**_profile(hit=hit_a, **kwargs)),
+        _frame(**_profile(hit=hit_b, **kwargs)),
+    )
+
+
+def test_cache_category_is_not_counted_overall():
+    a, b = _cache_pair((90, 10), (50, 50))
+    summary = _summary(a, b, labels=["A", "B"])
+    assert dict(summary.categories)["Cache"] == (
+        "A (Hot shard hit +40.0 pp vs next best) (not counted overall)"
+    )
+    assert summary.overall.startswith("No clear best overall")
+
+
+def test_cache_without_winner_has_suffix():
+    a, b = _cache_pair((50, 50), (50, 50))
+    cache = dict(_summary(a, b).categories)["Cache"]
+    assert cache == "no clear winner (within run-to-run noise) (not counted overall)"
+
+
+def test_double_weight_category_outweighs_single_weight_one():
+    a = _frame(**_profile(execution="00:00:01", peak=2000))
+    b = _frame(**_profile(execution="00:00:02", peak=1000))
+    overall = _summary(a, b, labels=["A", "B"]).overall
+    assert overall == "A, 2 of 6 points (Time \u00d72). B is best in Memory."

@@ -18,7 +18,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "11.0.0"
+security_notebook_tools.__version__  # "11.1.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -1000,6 +1000,17 @@ and stays uncoloured. A query with fewer than two runs has no range, so its chan
 red. The best value of a row is bold, and also green when it is the only best and its run range
 overlaps that of no other query (a clear winner); spreads are not coloured.
 
+In a notebook, a short analysis follows the table (the `Styler` renders it in `_repr_html_`;
+`to_html()` stays the table only). A query clearly beats another on a row when its median is
+better and its run range does not overlap the other's (a single run has no range, so any
+difference counts). Each category (a section with directional rows) goes to the query with the
+highest clear wins minus clear losses, if it has a clear win; otherwise it reads "no clear winner
+(within run-to-run noise)" or "tie between ...". Each category won scores points: Time and CPU 2,
+Data scanned, Memory and Network 1, Cache 0 (cache hits reflect earlier queries, not this query),
+so a Cache line is marked "(not counted overall)". The overall line names the query with the most
+points, lists the categories other queries win, or reports a tie or no clear best. A note appears
+when a query ran once.
+
 ### Raises
 
 `ConfigurationError` (also a `ValueError`) if fewer than two queries are given, an argument is
@@ -1177,7 +1188,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"11.0.0"`.
+The installed version string, e.g. `"11.1.0"`.
 
 ### Query profile
 

@@ -42,6 +42,7 @@ _FORMATS: dict[str, Callable[[float], str]] = {
     "percent": "{:.1f}%".format,
 }
 _LOWER, _HIGHER, _NEUTRAL = -1, 1, 0
+_WEIGHTS = {"Time": 2, "CPU": 2, "Data scanned": 1, "Memory": 1, "Network": 1, "Cache": 0}
 
 
 class _Metric(NamedTuple):
@@ -255,12 +256,170 @@ def _styles(data: pd.DataFrame, metrics: list[_Metric], ranges: _Ranges) -> pd.D
     return css
 
 
-def _style(data: pd.DataFrame, metrics: list[_Metric], ranges: _Ranges, caption: str) -> Styler:
+_UNCOUNTED = " (not counted overall)"
+
+
+class _Summary(NamedTuple):
+    overall: str
+    categories: list[tuple[str, str]]
+    note: str | None
+
+
+class _Comparison(Styler):
+    """A Styler that renders its analysis after the table in a notebook."""
+
+    summary: _Summary | None = None
+
+    def _repr_html_(self) -> str | None:
+        table = super()._repr_html_()
+        if table is None or self.summary is None:
+            return table
+        return table + _summary_html(self.summary)
+
+
+def _summary_html(summary: _Summary) -> str:
+    """The analysis as HTML, every text escaped."""
+    items = "".join(
+        f"<li><strong>{html.escape(section)}:</strong> {html.escape(text)}</li>"
+        for section, text in summary.categories
+    )
+    note = f"<p>{html.escape(summary.note)}</p>" if summary.note else ""
+    return (
+        f"<div><p><strong>Best overall:</strong> {html.escape(summary.overall)}</p>"
+        f"<ul>{items}</ul>{note}</div>"
+    )
+
+
+def _join(names: list[str]) -> str:
+    """Names as "A", "A and B" or "A, B and C"."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _beats(metric: _Metric, ranges: list, medians: list[float], q: int, r: int) -> bool:
+    """Whether query q clearly beats r: a strictly better median outside the noise."""
+    if pd.isna(medians[q]) or pd.isna(medians[r]) or _overlap(ranges[q], ranges[r]):
+        return False
+    return medians[q] > medians[r] if metric.direction == _HIGHER else medians[q] < medians[r]
+
+
+def _winner_detail(
+    rows: list[int], metrics: list[_Metric], ranges: _Ranges, medians: list[list[float]], q: int
+) -> str:
+    """The rows where q has the best median and clearly beats the runner-up, with the change."""
+    parts = []
+    for i in rows:
+        metric, row = metrics[i], medians[i]
+        others = [k for k in range(len(row)) if k != q and not pd.isna(row[k])]
+        if pd.isna(row[q]) or not others:
+            continue
+        pick = max if metric.direction == _HIGHER else min
+        runner_up = pick(others, key=lambda k, row=row: row[k])
+        if _beats(metric, ranges[i], row, q, runner_up):
+            change = _format_change(metric.unit)(_change(metric, row[runner_up], row[q]))
+            parts.append(f"{metric.name} {change}")
+    return f" ({', '.join(parts)} vs next best)" if parts else ""
+
+
+def _category(
+    rows: list[int],
+    metrics: list[_Metric],
+    ranges: _Ranges,
+    medians: list[list[float]],
+    labels: list[str],
+) -> tuple[int | None, str]:
+    """The winning query of a section (or None) and the line describing the result."""
+    count = len(labels)
+    wins = [0] * count
+    losses = [0] * count
+    for i in rows:
+        for q in range(count):
+            for r in range(count):
+                if q != r and _beats(metrics[i], ranges[i], medians[i], q, r):
+                    wins[q] += 1
+                    losses[r] += 1
+    if not any(wins):
+        return None, "no clear winner (within run-to-run noise)"
+    scores = [w - lost for w, lost in zip(wins, losses, strict=True)]
+    leaders = [q for q in range(count) if scores[q] == max(scores)]
+    if len(leaders) > 1 or not wins[leaders[0]]:
+        return None, f"tie between {_join([labels[q] for q in leaders])}"
+    winner = leaders[0]
+    return winner, labels[winner] + _winner_detail(rows, metrics, ranges, medians, winner)
+
+
+def _overall(winners: dict[str, int | None], labels: list[str]) -> str:
+    """The best query overall by weighted category wins, with trade-offs of the others."""
+    won = {q: [s for s, w in winners.items() if w == q] for q in range(len(labels))}
+    points = {q: sum(_WEIGHTS[s] for s in sections) for q, sections in won.items()}
+    top = max(points.values(), default=0)
+    if top == 0:
+        return (
+            "No clear best overall: the differences in the weighted categories are within "
+            "run-to-run noise."
+        )
+    leaders = [q for q, p in points.items() if p == top]
+    total = sum(_WEIGHTS[s] for s in winners)
+    if len(leaders) > 1:
+        names = _join([labels[q] for q in leaders])
+        return f"No single best overall: {names} each have {top} of {total} points."
+    best = leaders[0]
+    shown = ", ".join(s + (f" \u00d7{_WEIGHTS[s]}" if _WEIGHTS[s] > 1 else "") for s in won[best])
+    sentences = [f"{labels[best]}, {top} of {total} points ({shown})"]
+    sentences += [
+        f"{labels[q]} is best in {_join(sections)}"
+        for q, sections in won.items()
+        if q != best and sections
+    ]
+    return ". ".join(sentences) + ("." if len(sentences) > 1 else "")
+
+
+def _summarize(
+    data: pd.DataFrame,
+    metrics: list[_Metric],
+    ranges: _Ranges,
+    labels: list[str],
+    single_runs: list[str],
+) -> _Summary:
+    """The best query per category and overall, judged by clear wins outside the noise."""
+    medians = data.xs("Value", axis=1, level=1)[labels].to_numpy().tolist()
+    sections: dict[str, list[int]] = {}
+    for i, metric in enumerate(metrics):
+        if metric.direction != _NEUTRAL:
+            sections.setdefault(metric.section, []).append(i)
+    results = {s: _category(rows, metrics, ranges, medians, labels) for s, rows in sections.items()}
+    winners = {s: winner for s, (winner, _) in results.items()}
+    logger.debug(
+        "Summarised %d categories, %d with a clear winner",
+        len(winners),
+        sum(w is not None for w in winners.values()),
+    )
+    note = None
+    if single_runs:
+        note = (
+            f"{_join(single_runs)} ran once, so run-to-run noise cannot be judged and any "
+            "difference counts; use exec_query_runs for 3 or more runs."
+        )
+    return _Summary(
+        _overall(winners, labels),
+        [(s, text + _UNCOUNTED if _WEIGHTS[s] == 0 else text) for s, (_, text) in results.items()],
+        note,
+    )
+
+
+def _style(
+    data: pd.DataFrame,
+    metrics: list[_Metric],
+    ranges: _Ranges,
+    caption: str,
+    summary: _Summary | None = None,
+) -> Styler:
     value_columns = [c for c in data.columns if c[1] == "Value"]
     spread_columns = [c for c in data.columns if c[1] == "Spread"]
     change_columns = [c for c in data.columns if c[1] == VS_BEST]
     with dependency_call(logger, "pandas Styler", rows=len(data.index), columns=len(data.columns)):
-        styler = data.style.hide(names=True, axis="index").set_caption(html.escape(caption))
+        styler = _Comparison(data)
+        styler.summary = summary
+        styler = styler.hide(names=True, axis="index").set_caption(html.escape(caption))
         for (section, name), metric in zip(data.index, metrics, strict=True):
             row = [(section, name)]
             styler = (
@@ -352,7 +511,12 @@ def compare_performance(
     that of none of the best queries; an overlapping change is within run-to-run noise and stays
     uncoloured (a query with fewer than two runs has no range, so its change is always red). The
     best value of a row is bold, and also green when it is the only best and its run range
-    overlaps that of no other query. Rows no query reports are left out. A batch result is totalled
+    overlaps that of no other query. Rows no query reports are left out. In a notebook, a short
+    analysis follows the table: the best query per category (a section with directional rows) and
+    overall, by clear wins (a better median outside the other query's run range), a tie or "no
+    clear winner" within the noise, and a note when a query ran once. Overall, each category won
+    scores points: Time and CPU 2, Data scanned, Memory and Network 1, and Cache 0, as cache hits
+    reflect earlier queries rather than this one. A batch result is totalled
     over its windows and has no wall time. The frames are not modified.
 
     Args:
@@ -394,4 +558,6 @@ def compare_performance(
         data, metrics, ranges = _build(runs, names)
         logger.debug("Compared %d queries over %d metrics", len(queries), len(metrics))
         call.update(metrics=len(metrics))
-        return _style(data, metrics, ranges, CAPTION)
+        single_runs = [n for n, r in zip(names, runs, strict=True) if len(r) == 1]
+        summary = _summarize(data, metrics, ranges, names, single_runs)
+        return _style(data, metrics, ranges, CAPTION, summary)
