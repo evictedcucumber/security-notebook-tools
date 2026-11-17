@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `compare_performance(*queries, labels=None)` shows the `profile=True` statistics of two or more
+  queries side by side, with the change against the first query and the better or worse side
+  coloured. A query can be a list of runs: its value is the median and a "Spread" column shows
+  the range. With several runs, a change is coloured only when the runs' ranges do not overlap.
+  `labels` names the columns.
+- `exec_query_runs(kql, runs, ...)` runs a query 1 to 100 times, one after another and profiled,
+  and returns one DataFrame per run (`attrs["run"]` is the run number), for `compare_performance`.
+  `warmup` (default 2) unmeasured runs go first, so cold data caches do not skew the measurements.
+
+### Fixed
+
+- `profile=True` on Sentinel could report the statistics of a response the Log Analytics API served
+  from its 2-minute cache; it now sends `Cache-Control: no-cache`.
+
 ## 10.3.0 - 2026-11-16
 
 ### Changed

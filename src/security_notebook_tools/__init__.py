@@ -24,7 +24,10 @@ Public API:
 
 * ``exec_query``: run KQL against Sentinel or ADX and get a DataFrame.
 * ``exec_query_file``: run the KQL in a ``.kql`` file with ``exec_query``.
+* ``exec_query_runs``: run one query several times, profiled, and get one DataFrame per run.
 * ``exec_batch_query``: run KQL once per time window and merge the results.
+* ``compare_performance``: compare the query profiles of two or more queries (each one result or
+  a list of runs: median and spread) side by side, with optional ``labels``.
 * ``format_dataframe``: display a result with values formatted by their KQL type.
 * ``format_dataframe_by``: display one headed, formatted table per distinct value of a column.
 * ``merge_dataframe``: group a DataFrame (or several) by key columns and aggregate columns.
@@ -38,11 +41,12 @@ Logging: every record at INFO and above from every module is appended to ``noteb
 the project root (see ``security_notebook_tools._log`` for the levels), and so are WARNING and
 above from the ``azure`` SDK loggers; nothing is printed to the cell by default. Every line is
 redacted: KQL text, result values, environment variable values, tokens and URL query strings are
-never written. Gitignore the file. ``exec_query``, ``exec_query_file``, ``exec_batch_query``,
-``format_dataframe``, ``format_dataframe_by``, ``merge_dataframe``, ``pivot_dataframe`` and
-``render_dataframe`` take ``debug=True``: for that call, and everything it calls, the records at
-DEBUG and above are also printed to the cell's output, unredacted (raw KQL, workspace IDs,
-cluster URIs).
+never written. Gitignore the file. ``exec_query``, ``exec_query_file``, ``exec_query_runs``,
+``exec_batch_query``, ``format_dataframe``, ``format_dataframe_by``, ``merge_dataframe``,
+``pivot_dataframe``,
+``render_dataframe`` and ``compare_performance`` take ``debug=True``: for that call, and
+everything it calls, the records at DEBUG and above are also printed to the cell's output,
+unredacted (raw KQL, workspace IDs, cluster URIs).
 DEBUG records are never written to the file. The ``security_notebook_tools`` logger does not
 propagate to the root logger (a ``logging.basicConfig`` handler does not see these records); a
 handler you attach to it sees every record, DEBUG included, unredacted. Control and bidirectional
@@ -60,10 +64,11 @@ Use ``help(function)`` for details. Submodules are private and may change.
 """
 
 from ._batch import exec_batch_query
+from ._compare import compare_performance
 from ._format import format_dataframe, format_dataframe_by, show_row_counts
 from ._merge import merge_dataframe
 from ._pivot import pivot_dataframe
-from ._query import clear_cache, exec_query, exec_query_file
+from ._query import clear_cache, exec_query, exec_query_file, exec_query_runs
 from ._render import render_dataframe
 
 __version__ = "10.3.0"
@@ -73,9 +78,11 @@ del show_row_counts
 
 __all__ = [
     "clear_cache",
+    "compare_performance",
     "exec_batch_query",
     "exec_query",
     "exec_query_file",
+    "exec_query_runs",
     "format_dataframe",
     "format_dataframe_by",
     "merge_dataframe",

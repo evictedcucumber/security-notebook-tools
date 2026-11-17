@@ -15,9 +15,11 @@ from security_notebook_tools._tablepolicy import TablePolicy
 
 PUBLIC = {
     "clear_cache",
+    "compare_performance",
     "exec_batch_query",
     "exec_query",
     "exec_query_file",
+    "exec_query_runs",
     "format_dataframe",
     "format_dataframe_by",
     "merge_dataframe",
@@ -2687,3 +2689,117 @@ def test_batch_without_profile_has_no_attr_and_shows_nothing(sentinel, capsys):
     df = snt.exec_batch_query(FILTER, D0, _days(2))
     assert "profile" not in df.attrs
     assert "Query profile" not in capsys.readouterr().err
+
+
+def _backend(target, sentinel_fixture, adx_fixture):
+    return (sentinel_fixture if target == "sentinel" else adx_fixture)[0].return_value.query_tables
+
+
+@pytest.mark.parametrize("target", ["sentinel", "adx"])
+def test_exec_query_runs_runs_fresh_and_profiled(target, sentinel, adx, monkeypatch):
+    backend = _backend(target, sentinel, adx)
+    backend.side_effect = lambda *a, **k: [pd.DataFrame({"a": [1]})]
+    shown = []
+    monkeypatch.setattr(_query, "show_profile", lambda *a: shown.append(a))
+    frames = snt.exec_query_runs("T | take 1", 3, warmup=0, target=target)
+    assert backend.call_count == 3
+    assert len({id(f) for f in frames}) == 3
+    assert [f.attrs["run"] for f in frames] == [1, 2, 3]
+    assert all("client_elapsed_seconds" in f.attrs["profile"] for f in frames)
+    assert shown == []
+    snt.exec_query_runs("T | take 1", 1, warmup=0, target=target)
+    assert backend.call_count == 4  # not served from the result cache
+
+
+def test_exec_query_runs_does_not_fill_the_cache(sentinel):
+    backend = sentinel[0].return_value.query_tables
+    snt.exec_query_runs("T | take 1", 2, warmup=0)
+    snt.exec_query("T | take 1")
+    assert backend.call_count == 3
+
+
+def test_exec_query_profile_still_shows(sentinel, monkeypatch):
+    shown = []
+    monkeypatch.setattr(_query, "show_profile", lambda *a: shown.append(a))
+    snt.exec_query("T | take 1", profile=True)
+    assert len(shown) == 1
+
+
+@pytest.mark.parametrize("runs", [0, -1, 101, True, 2.0, "3", None])
+def test_exec_query_runs_rejects_bad_runs(sentinel, runs):
+    with pytest.raises(ConfigurationError, match="runs must be an int from 1 to 100") as err:
+        snt.exec_query_runs("T | take 1", runs)
+    assert isinstance(err.value, ValueError)
+    assert sentinel[0].return_value.query_tables.call_count == 0
+
+
+@pytest.mark.parametrize("runs", [1, 100])
+def test_exec_query_runs_accepts_bounds(sentinel, runs):
+    assert len(snt.exec_query_runs("T | take 1", runs)) == runs
+
+
+def test_exec_query_runs_validates_like_exec_query(sentinel):
+    with pytest.raises(ConfigurationError):
+        snt.exec_query_runs("T | take 1", 2, timeout="5")
+    with pytest.raises(ConfigurationError):
+        snt.exec_query_runs("", 2)
+    assert sentinel[0].return_value.query_tables.call_count == 0
+
+
+def test_exec_query_runs_adx_rejects_timespan(adx):
+    with pytest.raises(ConfigurationError, match="timespan only applies to Sentinel"):
+        snt.exec_query_runs("T | take 1", 2, timespan="1d", target="adx")
+
+
+def test_exec_query_runs_error_on_second_run_propagates(sentinel):
+    backend = sentinel[0].return_value.query_tables
+    backend.side_effect = [[pd.DataFrame({"a": [1]})], RuntimeError("boom"), AssertionError]
+    with pytest.raises(Exception, match="boom"):
+        snt.exec_query_runs("T | take 1", 3, warmup=0)
+    assert backend.call_count == 2
+
+
+def _numbered_frames(backend, count):
+    backend.side_effect = [[pd.DataFrame({"n": [k]})] for k in range(count)]
+
+
+@pytest.mark.parametrize(("warmup", "calls"), [(None, 5), (0, 3), (1, 4), (4, 7)])
+def test_exec_query_runs_warmup_count(sentinel, warmup, calls):
+    backend = sentinel[0].return_value.query_tables
+    _numbered_frames(backend, calls)
+    kwargs = {} if warmup is None else {"warmup": warmup}
+    frames = snt.exec_query_runs("T | take 1", 3, **kwargs)
+    assert backend.call_count == calls
+    assert [f.attrs["run"] for f in frames] == [1, 2, 3]
+    assert [f["n"][0] for f in frames] == list(range(calls - 3, calls))
+
+
+@pytest.mark.parametrize("warmup", [-1, 101, True, 1.0, "2", None])
+def test_exec_query_runs_rejects_bad_warmup(sentinel, warmup):
+    with pytest.raises(ConfigurationError, match="warmup must be an int from 0 to 100") as err:
+        snt.exec_query_runs("T | take 1", 2, warmup=warmup)
+    assert isinstance(err.value, ValueError)
+    assert sentinel[0].return_value.query_tables.call_count == 0
+
+
+def test_exec_query_runs_error_in_warmup_propagates(sentinel):
+    backend = sentinel[0].return_value.query_tables
+    backend.side_effect = [[pd.DataFrame({"a": [1]})], RuntimeError("boom"), AssertionError]
+    with pytest.raises(Exception, match="boom"):
+        snt.exec_query_runs("T | take 1", 3, warmup=2)
+    assert backend.call_count == 2
+
+
+def test_exec_query_runs_logs_warmup_and_runs_without_kql(sentinel, caplog):
+    kql = "SecretTable | take 1"
+    with caplog.at_level(logging.INFO, logger="security_notebook_tools.query"):
+        snt.exec_query_runs(kql, 2, warmup=2)
+    messages = [r.getMessage() for r in caplog.records if "exec_query_runs:" in r.getMessage()]
+    prefixes = [m.split(" took")[0] for m in messages if " took " in m]
+    assert prefixes == [
+        "exec_query_runs: warm-up run 1 of 2",
+        "exec_query_runs: warm-up run 2 of 2",
+        "exec_query_runs: run 1 of 2",
+        "exec_query_runs: run 2 of 2",
+    ]
+    assert "SecretTable" not in caplog.text

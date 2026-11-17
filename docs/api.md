@@ -6,11 +6,13 @@ The public API is exactly these names, importable from `security_notebook_tools`
 from security_notebook_tools import (
     exec_query,
     exec_query_file,
+    exec_query_runs,
     exec_batch_query,
     format_dataframe,
     format_dataframe_by,
     pivot_dataframe,
     merge_dataframe,
+    compare_performance,
     render_dataframe,
     clear_cache,
 )
@@ -378,6 +380,66 @@ from security_notebook_tools import exec_query_file
 
 df = exec_query_file("queries/failed_signins.kql")
 df = exec_query_file("queries/events.kql", target="adx")
+```
+
+## exec_query_runs
+
+```python
+exec_query_runs(
+    kql: str,
+    runs: int,
+    timespan: Timespan | None = None,
+    *,
+    target: Literal["sentinel", "adx"] = "sentinel",
+    timeout: int = 300,
+    warmup: int = 2,
+    raise_on_partial: bool = False,
+    debug: bool = False,
+) -> list[pandas.DataFrame]
+```
+
+Run the same query several times, one after another, and return one DataFrame per run, for
+[`compare_performance`](#compare_performance). Each run is profiled like `exec_query(...,
+profile=True)`: it skips the local result cache, on ADX the service's results cache and on Sentinel
+the Log Analytics response cache (`Cache-Control: no-cache`), so every run executes on the service.
+The service's own data caches still warm up, so `warmup` unmeasured runs go first and are
+discarded: they fill those caches so cold-cache runs do not skew the measurements. Warm-up runs count
+against the service (and, for Sentinel, its query limits) like any run. No profile table is shown per
+run. Validation, the [cost guard](#cost-guard-sentinel-only) and time range rules are the
+same as for `exec_query`.
+
+### Parameters
+
+| Name | Description |
+| --- | --- |
+| `kql` | The KQL query, as for `exec_query`. |
+| `runs` | How many times to run it: an `int` from 1 to 100 (a cap against a typo hammering the service). |
+| `warmup` | Keyword-only. How many unmeasured, discarded runs to do first: an `int` from 0 to 100. Default 2. |
+
+`timespan`, `target`, `timeout`, `raise_on_partial` and `debug` are as for [`exec_query`](#exec_query),
+and `target` onward are keyword-only.
+
+### Returns
+
+A list of `runs` independent DataFrames in run order. Each has the attributes of
+`exec_query(..., profile=True)` (see [Query profile](#query-profile)) and `df.attrs["run"]`, the
+1-based run number (warm-up runs are not returned). If a run, warm-up included, fails its error is raised and no list is returned.
+
+### Raises
+
+- `ConfigurationError` (also a `ValueError`): `runs` is not an `int` from 1 to 100, `warmup` is not
+  an `int` from 0 to 100, or `exec_query`
+  raises it for the other arguments.
+- `QueryError` and `PartialResultError`: as for [`exec_query`](#exec_query).
+
+### Examples
+
+```python
+from security_notebook_tools import compare_performance, exec_query_runs
+
+a = exec_query_runs("SigninLogs | take 100", 5)
+b = exec_query_runs("SigninLogs | where ResultType == 0 | take 100", 5)
+compare_performance(a, b, labels=["all", "success"])
 ```
 
 ## exec_batch_query
@@ -887,6 +949,67 @@ raw = exec_query("SigninLogs | project UserPrincipalName, AppDisplayName")
 apps = merge_dataframe(raw, "UserPrincipalName", "AppDisplayName", "nunique")  # apps per user
 ```
 
+## compare_performance
+
+Compare the query-performance statistics of two or more queries side by side.
+
+```python
+compare_performance(
+    *queries: pd.DataFrame | Sequence[pd.DataFrame],
+    labels: Sequence[str] | None = None,
+    debug: bool = False,
+) -> Styler
+```
+
+Run each query with `profile=True` first, or with [`exec_query_runs`](#exec_query_runs) for several
+runs. Each argument is one query: a DataFrame (one run) or a non-empty list or tuple of DataFrames
+(several runs of the same query). A query's value for a metric is the median over its runs (runs
+without the metric are ignored). The first query is the baseline. Rows are grouped by section (Time,
+CPU, Memory, Data scanned, Cache, Network, Result); a row no query reports is left out. A batch
+result is totalled over its windows (like the batch summary) and has no wall time, and is then
+medianed with the other runs. The frames are not modified.
+
+| Name | Description |
+| --- | --- |
+| `*queries` | Two or more queries: each a DataFrame or a list or tuple of DataFrames from `exec_query`, `exec_query_file`, `exec_query_runs` or `exec_batch_query` called with `profile=True`. |
+| `labels` | Optional column names: one non-empty, distinct string per query, in argument order. Default "Query 1" ... "Query N". |
+| `debug` | If true, also print this call's log records, at DEBUG and above, to the notebook cell's output while it runs. Default false. The lines are printed unredacted. See [Debug output](#debug-output-in-the-cell). |
+
+`labels` and `debug` are keyword-only.
+
+### Returns
+
+A pandas `Styler` with the caption "Query performance comparison (baseline: <first label>)". Its
+`.data` is the numeric DataFrame: a (Section, Metric) row index and, per query, a `(label, Value)`
+column (the median). A query given as two or more runs also has `(label, Spread)`: max minus min
+across the runs, as a percent of the median, or in percentage points for cache hit rates (NaN with
+fewer than two runs having the metric, or a median of 0 and a nonzero range). Every query after the
+first has `(label, vs <first label>)`: the relative change of the median in percent, or the
+difference in percentage points for cache hit rates (NaN when either side is missing, or when the
+baseline is 0 and the value is not). When any query has more than one run, a neutral `Result / Runs`
+row gives each query's run count. Cache hit rows are higher-is-better, Result rows are neutral,
+everything else is lower-is-better. In the display, better changes are green, worse ones red, and
+the best value of a row is bold; spreads are not coloured. When both queries have at least two runs
+with the metric, a change is coloured only if their run ranges (min to max) do not overlap; an
+overlapping change is within run-to-run noise and stays uncoloured. With fewer runs it is coloured
+by sign.
+
+### Raises
+
+`ConfigurationError` (also a `ValueError`) if fewer than two queries are given, an argument is
+neither a DataFrame nor a list of them, a list is empty or holds a non-DataFrame, a frame has no
+profile (the message names the argument and, in a list, the run), `labels` is not a sequence of
+non-empty distinct strings (a bare `str` is rejected) with one item per query, or `debug` is not a
+bool.
+
+```python
+from security_notebook_tools import compare_performance, exec_query_runs
+
+a = exec_query_runs("SigninLogs | take 100", 5)
+b = exec_query_runs("SigninLogs | where ResultType == 0 | take 100", 5)
+compare_performance(a, b, labels=["all", "success"])
+```
+
 ## clear_cache
 
 ```python
@@ -1077,7 +1200,8 @@ the target (Sentinel or ADX). If the service returned no statistics it holds onl
 `client_elapsed_seconds`.
 
 `profile=True` always sends the query: it skips the local result cache and, on ADX, the service's
-results cache, like `cache=False`, so the statistics come from a real run. Failing to read or show
+results cache, like `cache=False`, and on Sentinel it sends `Cache-Control: no-cache` to bypass the
+Log Analytics response cache (2 minutes), so the statistics come from a real run. Failing to read or show
 the statistics never fails the query. The statistics are not written to `notebooks.log`.
 
 With `exec_batch_query(..., profile=True)` every window runs fresh, like `cache=False`. The
@@ -1093,10 +1217,12 @@ that window's flat metrics), see [`exec_batch_query`](#exec_batch_query).
 df = exec_query("SigninLogs | take 100", profile=True)
 ```
 
+To run a query several times, see [`exec_query_runs`](#exec_query_runs); to compare the profiles of several results, see [`compare_performance`](#compare_performance).
+
 ### Debug output in the cell
 
-`exec_query`, `exec_query_file`, `exec_batch_query`, `format_dataframe`, `format_dataframe_by`,
-`pivot_dataframe` and `merge_dataframe` take a keyword-only `debug=False`. With it, the package's
+`exec_query`, `exec_query_file`, `exec_query_runs`, `exec_batch_query`, `format_dataframe`,
+`format_dataframe_by`, `pivot_dataframe`, `merge_dataframe` and `compare_performance` take a keyword-only `debug=False`. With it, the package's
 log records at DEBUG and above are also printed to that notebook cell's output for as long as the
 call runs, in the same format as the file but unredacted: KQL text, workspace IDs and cluster URIs are shown in full. Debug
 output is not written to the file; be careful when sharing a notebook saved with debug output:

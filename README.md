@@ -55,11 +55,13 @@ The public API is these names, all importable from the top-level package:
 from security_notebook_tools import (
     exec_query,
     exec_query_file,
+    exec_query_runs,
     exec_batch_query,
     format_dataframe,
     format_dataframe_by,
     pivot_dataframe,
     merge_dataframe,
+    compare_performance,
     clear_cache,
 )
 ```
@@ -307,7 +309,7 @@ df = exec_query("SigninLogs | summarize count() by UserPrincipalName", timeout=6
 `profile=True` returns the DataFrame as usual and shows a "Query profile" summary: wall time, the
 service's execution time, CPU, memory, data scanned, cache, network and result size, with a share
 bar where a ratio applies. Other statistics are in a collapsible list. The query always runs,
-skipping the caches. The statistics are not written to `notebooks.log`. They are also on the frame
+skipping the local result cache and, for Sentinel, the Log Analytics response cache. The statistics are not written to `notebooks.log`. They are also on the frame
 as `df.attrs["profile"]`, a flat dict.
 
 `exec_batch_query(..., profile=True)` runs every window fresh and shows the same summary for the
@@ -317,6 +319,27 @@ with one dict per window.
 
 ```python
 df = exec_query("SigninLogs | take 100", profile=True)
+```
+
+To compare the statistics of two or more profiled results side by side, with the change against the
+first (green is better, red worse), use `compare_performance`:
+
+```python
+from security_notebook_tools import compare_performance
+
+compare_performance(df, other_df)
+```
+
+For a reliable measurement, run each query several times with `exec_query_runs` (one after another,
+profiled, 1 to 100 runs after 2 discarded warm-up runs, `warmup=`). `compare_performance` takes the median of each list and shows the spread, and colours a change
+only when the runs' ranges do not overlap; `labels=` names the columns:
+
+```python
+from security_notebook_tools import compare_performance, exec_query_runs
+
+a = exec_query_runs("SigninLogs | take 100", 5)
+b = exec_query_runs("SigninLogs | where ResultType == 0 | take 100", 5)
+compare_performance(a, b, labels=["all", "success"])
 ```
 
 ### Display
@@ -487,8 +510,9 @@ same caveat. `notebooks.log` is unchanged.
 
 ### Debug output in the cell
 
-To see what a call does, pass `debug=True` to `exec_query`, `exec_query_file`, `exec_batch_query`,
-`format_dataframe`, `format_dataframe_by`, `pivot_dataframe` or `merge_dataframe`. While that call
+To see what a call does, pass `debug=True` to `exec_query`, `exec_query_file`, `exec_query_runs`, `exec_batch_query`,
+`format_dataframe`, `format_dataframe_by`, `pivot_dataframe`, `merge_dataframe` or
+`compare_performance`. While that call
 runs, the package's log records at DEBUG and above are also printed to the cell's output, in the
 same line format as the file but unredacted (KQL text, workspace IDs and cluster URIs are shown in full):
 

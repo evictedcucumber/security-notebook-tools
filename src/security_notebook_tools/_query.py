@@ -496,6 +496,47 @@ def clear_cache() -> None:
     )
 
 
+def _run_query(
+    kql: str,
+    timespan: Timespan | None,
+    *,
+    target: Target,
+    timeout: int,
+    cache: bool,
+    raise_on_partial: bool,
+    debug: bool,
+    profile: bool,
+) -> tuple[pd.DataFrame, list[pd.DataFrame]]:
+    """Validate the arguments, run the query and return its first table and all tables."""
+    _check_kql(kql)
+    _check_timeout(timeout)
+    _check_bool("cache", cache)
+    _check_bool("raise_on_partial", raise_on_partial)
+    _check_bool("debug", debug)
+    _check_bool("profile", profile)
+    if target == "sentinel":
+        validate_timespan(timespan)
+        tables = _query_sentinel(
+            kql,
+            resolve_timespan(kql, timespan),
+            timeout,
+            cache=cache,
+            raise_on_partial=raise_on_partial,
+            profile=profile,
+        )
+    elif target == "adx":
+        if timespan is not None:
+            raise ConfigurationError(
+                "timespan only applies to Sentinel; filter on time in the KQL for ADX."
+            )
+        tables = _query_adx(kql, timeout, cache=cache, profile=profile)
+    else:
+        raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
+    df = tables[0] if tables else pd.DataFrame()
+    df.attrs.setdefault("partial", False)
+    return df, tables
+
+
 def exec_query(
     kql: str,
     timespan: Timespan | None = None,
@@ -630,7 +671,8 @@ def exec_query(
         profile: If true, also show the query's performance statistics (everything the service
             returns: CPU, memory, cache, data scanned, execution time ...) as a table in the
             notebook cell's output; the returned DataFrame is unchanged. The query always runs
-            fresh, as with ``cache=False``. Default false.
+            fresh, as with ``cache=False``, and on Sentinel it also bypasses the Log Analytics
+            response cache (``Cache-Control: no-cache``). Default false.
 
     Returns:
         The first result table as a DataFrame, or an empty DataFrame if the query returned no
@@ -709,32 +751,16 @@ def exec_query(
         profile=profile,
         kql=fingerprint(kql),
     ) as call:
-        _check_kql(kql)
-        _check_timeout(timeout)
-        _check_bool("cache", cache)
-        _check_bool("raise_on_partial", raise_on_partial)
-        _check_bool("debug", debug)
-        _check_bool("profile", profile)
-        if target == "sentinel":
-            validate_timespan(timespan)
-            tables = _query_sentinel(
-                kql,
-                resolve_timespan(kql, timespan),
-                timeout,
-                cache=cache,
-                raise_on_partial=raise_on_partial,
-                profile=profile,
-            )
-        elif target == "adx":
-            if timespan is not None:
-                raise ConfigurationError(
-                    "timespan only applies to Sentinel; filter on time in the KQL for ADX."
-                )
-            tables = _query_adx(kql, timeout, cache=cache, profile=profile)
-        else:
-            raise ConfigurationError(f"Unknown target {target!r}; use 'sentinel' or 'adx'.")
-        df = tables[0] if tables else pd.DataFrame()
-        df.attrs.setdefault("partial", False)
+        df, tables = _run_query(
+            kql,
+            timespan,
+            target=target,
+            timeout=timeout,
+            cache=cache,
+            raise_on_partial=raise_on_partial,
+            debug=debug,
+            profile=profile,
+        )
         if profile:
             show_profile(df.attrs[PROFILE_ATTR], df.shape)
         call.update(tables=len(tables), rows=len(df), columns=len(df.columns))
@@ -814,3 +840,110 @@ def exec_query_file(
             debug=debug,
             profile=profile,
         )
+
+
+MAX_RUNS = 100
+
+
+def exec_query_runs(
+    kql: str,
+    runs: int,
+    timespan: Timespan | None = None,
+    *,
+    target: Target = "sentinel",
+    timeout: int = DEFAULT_TIMEOUT,
+    warmup: int = 2,
+    raise_on_partial: bool = False,
+    debug: bool = False,
+) -> list[pd.DataFrame]:
+    """Run the same query several times, profiled, and return one DataFrame per run.
+
+    Use it to measure a query reliably: pass the list to ``compare_performance``, which takes the
+    median of the runs and shows their spread. The runs go one after another, never in parallel.
+    Each run is profiled like ``exec_query(..., profile=True)``: it skips the local result cache,
+    on ADX the service's results cache, and on Sentinel the Log Analytics response cache, so every
+    run executes on the service. The service's own data caches still warm up, so ``warmup``
+    unmeasured runs go first and are discarded: they fill those caches so cold-cache runs do not
+    skew the measurements. No profile table is shown per run. The arguments, cost guard and time
+    range rules are those of ``exec_query``.
+
+    Warm-up runs count against the service and, for Sentinel, its query limits like any run;
+    ``runs`` and ``warmup`` are each capped at 100.
+
+    Args:
+        kql: The KQL query, as for ``exec_query``.
+        runs: How many times to run it, an ``int`` from 1 to 100.
+        timespan: As for ``exec_query``.
+        target: ``"sentinel"`` (default) or ``"adx"``.
+        timeout: Server-side timeout in seconds per run (default 300).
+        warmup: How many unmeasured runs to do first, an ``int`` from 0 to 100. Default 2.
+        raise_on_partial: As for ``exec_query``. Default false.
+        debug: If true, also print this call's log records, at DEBUG and above, to the
+            notebook cell's output while it runs. Default false. The lines are printed unredacted
+            (debug output is not written to the file; be careful when sharing a notebook saved
+            with debug output). See the logging section of the README.
+
+    Returns:
+        A list of ``runs`` independent DataFrames, in run order. Each has the attributes of
+        ``exec_query(..., profile=True)`` plus ``df.attrs["run"]``, the 1-based run number. If a
+        run, warm-up included, fails, its error is raised and no list is returned.
+
+    Raises:
+        ConfigurationError: ``runs`` is not an ``int`` from 1 to 100, ``warmup`` is not an
+            ``int`` from 0 to 100, or any error
+            ``exec_query`` raises for the other arguments. It is also a ``ValueError``.
+        QueryError: As for ``exec_query``.
+        PartialResultError: As for ``exec_query``.
+
+    Example:
+        >>> from security_notebook_tools import compare_performance, exec_query_runs
+        >>> a = exec_query_runs("SigninLogs | take 100", 5)
+        >>> b = exec_query_runs("SigninLogs | where ResultType == 0 | take 100", 5)
+        >>> compare_performance(a, b, labels=["all", "success"])
+    """
+    with public_call(
+        logger,
+        "exec_query_runs",
+        runs=runs,
+        warmup=warmup,
+        target=target,
+        timeout=timeout,
+        raise_on_partial=raise_on_partial,
+        debug=debug,
+        kql=fingerprint(kql),
+    ) as call:
+        if isinstance(runs, bool) or not isinstance(runs, int) or not 1 <= runs <= MAX_RUNS:
+            raise ConfigurationError(f"runs must be an int from 1 to {MAX_RUNS}, got {runs!r}.")
+        if isinstance(warmup, bool) or not isinstance(warmup, int) or not 0 <= warmup <= MAX_RUNS:
+            raise ConfigurationError(f"warmup must be an int from 0 to {MAX_RUNS}, got {warmup!r}.")
+
+        def run(kind: str, number: int, total: int) -> pd.DataFrame:
+            started = time.perf_counter()
+            df, _ = _run_query(
+                kql,
+                timespan,
+                target=target,
+                timeout=timeout,
+                cache=False,
+                raise_on_partial=raise_on_partial,
+                debug=debug,
+                profile=True,
+            )
+            logger.info(
+                "exec_query_runs: %s %d of %d took %.2fs",
+                kind,
+                number,
+                total,
+                time.perf_counter() - started,
+            )
+            return df
+
+        for number in range(1, warmup + 1):
+            run("warm-up run", number, warmup)
+        frames = []
+        for number in range(1, runs + 1):
+            df = run("run", number, runs)
+            df.attrs["run"] = number
+            frames.append(df)
+        call.update(rows=len(frames[-1]))
+        return frames
