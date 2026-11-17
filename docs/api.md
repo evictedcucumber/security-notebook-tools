@@ -967,8 +967,8 @@ compare_performance(
 Run each query with `profile=True` first, or with [`exec_query_runs`](#exec_query_runs) for several
 runs. Each argument is one query: a DataFrame (one run) or a non-empty list or tuple of DataFrames
 (several runs of the same query). A query's value for a metric is the median over its runs (runs
-without the metric are ignored). The first query is the baseline. Rows are grouped by section (Time,
-CPU, Memory, Data scanned, Cache, Network, Result); a row no query reports is left out. A batch
+without the metric are ignored). Rows are grouped by section (Time, CPU, Memory, Data scanned,
+Cache, Network, Result); a row no query reports is left out. A batch
 result is totalled over its windows (like the batch summary) and has no wall time, and is then
 medianed with the other runs. The frames are not modified.
 
@@ -982,20 +982,23 @@ medianed with the other runs. The frames are not modified.
 
 ### Returns
 
-A pandas `Styler` with the caption "Query performance comparison (baseline: <first label>)". Its
-`.data` is the numeric DataFrame: a (Section, Metric) row index and, per query, a `(label, Value)`
+A pandas `Styler` with the caption "Query performance comparison", styled like
+[`format_dataframe`](#format_dataframe) (right-aligned numbers, borders, zebra rows, escaped
+headers). Its `.data` is the numeric DataFrame: a (Section, Metric) row index and, per query, a `(label, Value)`
 column (the median). A query given as two or more runs also has `(label, Spread)`: max minus min
 across the runs, as a percent of the median, or in percentage points for cache hit rates (NaN with
-fewer than two runs having the metric, or a median of 0 and a nonzero range). Every query after the
-first has `(label, vs <first label>)`: the relative change of the median in percent, or the
-difference in percentage points for cache hit rates (NaN when either side is missing, or when the
-baseline is 0 and the value is not). When any query has more than one run, a neutral `Result / Runs`
-row gives each query's run count. Cache hit rows are higher-is-better, Result rows are neutral,
-everything else is lower-is-better. In the display, better changes are green, worse ones red, and
-the best value of a row is bold; spreads are not coloured. When both queries have at least two runs
-with the metric, a change is coloured only if their run ranges (min to max) do not overlap; an
-overlapping change is within run-to-run noise and stays uncoloured. With fewer runs it is coloured
-by sign.
+fewer than two runs having the metric, or a median of 0 and a nonzero range). Every query has
+`(label, vs best)`: the change of its median from the best median of the row (the lowest, or the
+highest for cache hit rates), as a relative change in percent of the best, or as a difference in
+percentage points for cache hit rates. It is 0 for the best query, and NaN (blank) for neutral rows,
+rows where fewer than two queries have a value, and when the best is 0 and the value is not. When
+any query has more than one run, a neutral `Result / Runs` row gives each query's run count. Cache
+hit rows are higher-is-better, Result rows are neutral, everything else is lower-is-better. In the
+display, a change from the best is red when the query's run range (min to max) overlaps the range
+of none of the best queries (ties are possible); an overlapping change is within run-to-run noise
+and stays uncoloured. A query with fewer than two runs has no range, so its change is always
+red. The best value of a row is bold, and also green when it is the only best and its run range
+overlaps that of no other query (a clear winner); spreads are not coloured.
 
 ### Raises
 

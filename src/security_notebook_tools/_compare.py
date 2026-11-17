@@ -13,6 +13,8 @@ from pandas.io.formats.style import Styler
 
 from ._errors import public_call
 from ._exceptions import ConfigurationError
+from ._format import _TABLE_STYLES
+from ._log import dependency_call
 from ._profile import PROFILE_ATTR, total_profile
 from ._profile_render import (
     _INPUT,
@@ -28,7 +30,8 @@ from ._query import _check_bool
 
 logger = logging.getLogger("security_notebook_tools.compare")
 
-CAPTION = "Query performance comparison (baseline: {})"
+CAPTION = "Query performance comparison"
+VS_BEST = "vs best"
 BETTER_COLOR = "#2e7d32"
 WORSE_COLOR = "#c62828"
 
@@ -141,6 +144,14 @@ def _stats(frame: pd.DataFrame) -> _Stats:
     return _Stats(profile, (frame.shape[0], frame.shape[1]))
 
 
+def _best(metric: _Metric, medians: list[float]) -> float:
+    """The best median of a row; NaN for a neutral row or fewer than two values."""
+    values = [m for m in medians if not pd.isna(m)]
+    if metric.direction == _NEUTRAL or len(values) < 2:
+        return float("nan")
+    return max(values) if metric.direction == _HIGHER else min(values)
+
+
 def _change(metric: _Metric, base: float, value: float) -> float:
     """Percentage points for percent metrics, else the relative change in percent."""
     if pd.isna(base) or pd.isna(value):
@@ -186,14 +197,12 @@ def _build(
         ranges.append([(min(v), max(v)) if len(v) > 1 else None for v in found])
         medians = [statistics.median(v) if v else float("nan") for v in found]
         row: dict[tuple[str, str], float] = {}
+        best = _best(metric, medians)
         for k, (label, values, median) in enumerate(zip(labels, found, medians, strict=True)):
             row[(label, "Value")] = median
             if len(queries[k]) > 1:
                 row[(label, "Spread")] = _spread(metric, values)
-            if k > 0:
-                row[(label, f"vs {labels[0]}")] = (
-                    float("nan") if metric is _RUNS else _change(metric, medians[0], median)
-                )
+            row[(label, VS_BEST)] = _change(metric, best, median)
         metrics.append(metric)
         rows.append(row)
     index = pd.MultiIndex.from_tuples([(m.section, m.name) for m in metrics])
@@ -204,7 +213,7 @@ def _build(
 
 def _format_change(unit: str) -> Callable[[float], str]:
     suffix = " pp" if unit == "percent" else "%"
-    return lambda x: f"{x:+.1f}{suffix}"
+    return lambda x: f"0.0{suffix}" if x == 0 else f"{x:+.1f}{suffix}"
 
 
 def _format_spread(unit: str) -> Callable[[float], str]:
@@ -218,44 +227,63 @@ def _overlap(a: tuple[float, float] | None, b: tuple[float, float] | None) -> bo
 
 
 def _styles(data: pd.DataFrame, metrics: list[_Metric], ranges: _Ranges) -> pd.DataFrame:
-    """CSS per cell: bold best values, green or red changes outside the run-to-run noise."""
+    """CSS per cell: bold best values, green clear winners, red changes outside the noise."""
     css = pd.DataFrame("", index=data.index, columns=data.columns)
+    labels = list(dict.fromkeys(c[0] for c in data.columns))
     for position, metric in enumerate(metrics):
         if metric.direction == _NEUTRAL:
             continue
-        row = data.iloc[position]
-        values = row.xs("Value", level=1).dropna()
+        values = data.iloc[position].xs("Value", level=1).dropna()
+        best = values.max() if metric.direction == _HIGHER else values.min()
+        winners = [labels.index(q) for q in values.index[values == best]]
         if values.nunique() > 1:
-            best = values.max() if metric.direction == _HIGHER else values.min()
             for query in values.index[values == best]:
                 css.iloc[position, css.columns.get_loc((query, "Value"))] = "font-weight: bold"
-        labels = list(dict.fromkeys(c[0] for c in data.columns))
-        for column, change in row.items():
-            if column[1] not in ("Value", "Spread") and pd.notna(change) and change != 0:
-                if _overlap(ranges[position][0], ranges[position][labels.index(column[0])]):
-                    continue
-                color = BETTER_COLOR if change * metric.direction > 0 else WORSE_COLOR
-                css.iloc[position, css.columns.get_loc(column)] = f"color: {color}"
+        if len(winners) == 1 and len(values) > 1:
+            winner = winners[0]
+            others = [labels.index(q) for q in values.index if labels.index(q) != winner]
+            if not any(_overlap(ranges[position][winner], ranges[position][k]) for k in others):
+                css.iloc[position, css.columns.get_loc((labels[winner], "Value"))] = (
+                    f"font-weight: bold; color: {BETTER_COLOR}"
+                )
+        for k, label in enumerate(labels):
+            change = data.iloc[position][(label, VS_BEST)]
+            if pd.isna(change) or change == 0:
+                continue
+            if not any(_overlap(ranges[position][k], ranges[position][w]) for w in winners):
+                css.iloc[position, css.columns.get_loc((label, VS_BEST))] = f"color: {WORSE_COLOR}"
     return css
 
 
 def _style(data: pd.DataFrame, metrics: list[_Metric], ranges: _Ranges, caption: str) -> Styler:
-    styler = (
-        data.style.hide(names=True, axis="index")
-        .format_index(escape="html", axis=1)
-        .set_caption(html.escape(caption))
-    )
     value_columns = [c for c in data.columns if c[1] == "Value"]
     spread_columns = [c for c in data.columns if c[1] == "Spread"]
-    change_columns = [c for c in data.columns if c[1] not in ("Value", "Spread")]
-    for (section, name), metric in zip(data.index, metrics, strict=True):
-        row = [(section, name)]
+    change_columns = [c for c in data.columns if c[1] == VS_BEST]
+    with dependency_call(logger, "pandas Styler", rows=len(data.index), columns=len(data.columns)):
+        styler = data.style.hide(names=True, axis="index").set_caption(html.escape(caption))
+        for (section, name), metric in zip(data.index, metrics, strict=True):
+            row = [(section, name)]
+            styler = (
+                styler.format(_FORMATS[metric.unit], subset=(row, value_columns), na_rep="")
+                .format(_format_spread(metric.unit), subset=(row, spread_columns), na_rep="")
+                .format(_format_change(metric.unit), subset=(row, change_columns), na_rep="")
+            )
         styler = (
-            styler.format(_FORMATS[metric.unit], subset=(row, value_columns), na_rep="")
-            .format(_format_spread(metric.unit), subset=(row, spread_columns), na_rep="")
-            .format(_format_change(metric.unit), subset=(row, change_columns), na_rep="")
+            styler.format_index(escape="html", axis=0)
+            .format_index(escape="html", axis=1)
+            .format_index_names(escape="html", axis=1)
+            .set_table_styles(_TABLE_STYLES)
+            .set_table_styles(
+                {
+                    column: [
+                        {"selector": sel, "props": "text-align: right;"} for sel in ("th", "td")
+                    ]
+                    for column in data.columns
+                },
+                overwrite=False,
+            )
         )
-    return styler.apply(_styles, metrics=metrics, ranges=ranges, axis=None)
+        return styler.apply(_styles, metrics=metrics, ranges=ranges, axis=None)
 
 
 def _runs_of(number: int, query: object) -> list[pd.DataFrame]:
@@ -317,13 +345,15 @@ def compare_performance(
     network, result size) and a "Value" column per query: the median over its runs. A query given
     as two or more runs also has a "Spread" column, the range of the runs (max minus min) as a
     percent of the median (percentage points for cache hit rates), and a "Runs" row shows the run
-    counts. The first query is the baseline: every later query has a "vs <first label>" column
-    with the relative change in percent of the median (percentage points for cache hit rates).
-    Green is better, red is worse, but only when the two queries' run ranges (min to max) do not
-    overlap; an overlapping change is within run-to-run noise and stays uncoloured (a query with
-    fewer than two runs has no range, so its changes are coloured by sign). The best value of a
-    row is bold. Rows no query reports are left out. A batch result is totalled over its
-    windows and has no wall time. The frames are not modified.
+    counts. Every query has a "vs best" column: the change of its median from the best query's
+    in that row (the lowest, or the highest for cache hit rates), in percent of the best
+    (percentage points for cache hit rates); the best query shows 0, and neutral rows (result
+    size, runs) are blank. A change is red only when the query's run range (min to max) overlaps
+    that of none of the best queries; an overlapping change is within run-to-run noise and stays
+    uncoloured (a query with fewer than two runs has no range, so its change is always red). The
+    best value of a row is bold, and also green when it is the only best and its run range
+    overlaps that of no other query. Rows no query reports are left out. A batch result is totalled
+    over its windows and has no wall time. The frames are not modified.
 
     Args:
         *queries: Two or more queries. Each is a DataFrame or a non-empty list or tuple of
@@ -338,7 +368,7 @@ def compare_performance(
 
     Returns:
         A pandas ``Styler``; its ``.data`` is the numeric DataFrame with a (Section, Metric) row
-        index and (Label, Value / Spread / vs <first label>) columns.
+        index and (Label, Value / Spread / vs best) columns.
 
     Raises:
         ConfigurationError: fewer than two queries, an argument that is neither a DataFrame nor a
@@ -364,4 +394,4 @@ def compare_performance(
         data, metrics, ranges = _build(runs, names)
         logger.debug("Compared %d queries over %d metrics", len(queries), len(metrics))
         call.update(metrics=len(metrics))
-        return _style(data, metrics, ranges, CAPTION.format(names[0]))
+        return _style(data, metrics, ranges, CAPTION)

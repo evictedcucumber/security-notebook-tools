@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- `compare_performance` now compares every query with the best one in each row: each query has a
+  `vs best` column, instead of `vs <first label>` columns for the later queries. Worse changes
+  are red; the best value is green only when its runs clear every other query's. The caption no
+  longer names a baseline.
+
+### Changed
+
+- The `compare_performance` Styler uses the `format_dataframe` table style: alignment, borders,
+  zebra rows and escaped headers.
+
 ## 10.5.0 - 2026-11-17
 
 ### Added

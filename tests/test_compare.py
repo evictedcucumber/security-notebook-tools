@@ -6,6 +6,7 @@ import pytest
 from security_notebook_tools import compare_performance
 from security_notebook_tools._compare import BETTER_COLOR, WORSE_COLOR
 from security_notebook_tools._exceptions import ConfigurationError
+from security_notebook_tools._format import _TABLE_STYLES
 
 EXEC = ("Time", "Execution time (service)")
 CPU = ("CPU", "Total")
@@ -83,10 +84,11 @@ def test_columns_for_three_frames(pair):
     data = compare_performance(*pair, pair[0]).data
     assert list(data.columns) == [
         ("Query 1", "Value"),
+        ("Query 1", "vs best"),
         ("Query 2", "Value"),
-        ("Query 2", "vs Query 1"),
+        ("Query 2", "vs best"),
         ("Query 3", "Value"),
-        ("Query 3", "vs Query 1"),
+        ("Query 3", "vs best"),
     ]
     assert data.index.names == [None, None]
 
@@ -105,23 +107,27 @@ def test_missing_value_in_one_query_is_nan(pair):
     partial = _frame(**{"ExecutionTime": "00:00:02"})
     data = compare_performance(pair[0], partial).data
     assert math.isnan(data.loc[CPU, ("Query 2", "Value")])
-    assert math.isnan(data.loc[CPU, ("Query 2", "vs Query 1")])
+    assert math.isnan(data.loc[CPU, ("Query 2", "vs best")])
     assert data.loc[EXEC, ("Query 2", "Value")] == 2.0
 
 
 def test_relative_change(pair):
     data = compare_performance(*pair).data
-    assert data.loc[EXEC, ("Query 2", "vs Query 1")] == pytest.approx(-25.0)
-    assert data.loc[CPU, ("Query 2", "vs Query 1")] == pytest.approx(50.0)
-    assert data.loc[ROWS, ("Query 2", "vs Query 1")] == 0.0
+    assert data.loc[EXEC, ("Query 1", "vs best")] == pytest.approx(100 / 3)
+    assert data.loc[EXEC, ("Query 2", "vs best")] == 0.0
+    assert data.loc[CPU, ("Query 1", "vs best")] == 0.0
+    assert data.loc[CPU, ("Query 2", "vs best")] == pytest.approx(50.0)
+    assert data.loc[ROWS, ("Query 1", "vs best")] == 0.0
+    assert data.loc[ROWS, ("Query 2", "vs best")] == 0.0
 
 
 def test_zero_baseline():
     a = _frame(**_profile(scanned=0, peak=0))
     b = _frame(**_profile(scanned=5, peak=0))
     data = compare_performance(a, b).data
-    assert math.isnan(data.loc[ROWS, ("Query 2", "vs Query 1")])
-    assert data.loc[MEMORY, ("Query 2", "vs Query 1")] == 0.0
+    assert math.isnan(data.loc[ROWS, ("Query 2", "vs best")])
+    assert data.loc[ROWS, ("Query 1", "vs best")] == 0.0
+    assert data.loc[MEMORY, ("Query 2", "vs best")] == 0.0
 
 
 def test_percent_rows_use_percentage_points():
@@ -130,7 +136,8 @@ def test_percent_rows_use_percentage_points():
     data = compare_performance(a, b).data
     assert data.loc[HOT, ("Query 1", "Value")] == pytest.approx(50.0)
     assert data.loc[HOT, ("Query 2", "Value")] == pytest.approx(90.0)
-    assert data.loc[HOT, ("Query 2", "vs Query 1")] == pytest.approx(40.0)
+    assert data.loc[HOT, ("Query 1", "vs best")] == pytest.approx(-40.0)
+    assert data.loc[HOT, ("Query 2", "vs best")] == 0.0
 
 
 def test_batch_frame_is_totalled_without_wall_time():
@@ -152,8 +159,9 @@ def test_result_rows_come_from_frame_shape(pair):
     a = _frame(rows=4, cols=2, **_profile())
     b = _frame(rows=6, cols=3, **_profile())
     data = compare_performance(a, b).data
-    assert data.loc[("Result", "Rows returned")].tolist() == [4, 6, 50.0]
-    assert data.loc[("Result", "Columns returned")].tolist() == [2, 3, 50.0]
+    for row, values in [("Rows returned", [4, 6]), ("Columns returned", [2, 3])]:
+        assert data.loc[("Result", row)].xs("Value", level=1).tolist() == values
+        assert data.loc[("Result", row)].xs("vs best", level=1).isna().all()
 
 
 def test_best_value_bold_in_lower_is_better_row(pair):
@@ -170,14 +178,18 @@ def test_best_cache_hit_is_highest():
     css = _css(compare_performance(a, b))
     assert "bold" in css[HOT, ("Query 2", "Value")]
     assert "bold" not in css.get((HOT, ("Query 1", "Value")), "")
-    assert BETTER_COLOR in css[HOT, ("Query 2", "vs Query 1")]
+    assert WORSE_COLOR in css[HOT, ("Query 1", "vs best")]
+    assert "color" not in css.get((HOT, ("Query 2", "vs best")), "")
 
 
 def test_change_colours(pair):
     css = _css(compare_performance(*pair))
-    assert BETTER_COLOR in css[EXEC, ("Query 2", "vs Query 1")]
-    assert WORSE_COLOR in css[CPU, ("Query 2", "vs Query 1")]
-    assert "color" not in css.get((ROWS, ("Query 2", "vs Query 1")), "")
+    assert WORSE_COLOR in css[EXEC, ("Query 1", "vs best")]
+    assert "color" not in css.get((EXEC, ("Query 2", "vs best")), "")
+    assert WORSE_COLOR in css[CPU, ("Query 2", "vs best")]
+    assert "color" not in css.get((CPU, ("Query 1", "vs best")), "")
+    assert "color" not in css.get((ROWS, ("Query 2", "vs best")), "")
+    assert not [k for k in css if k[1][1] == "vs best" and BETTER_COLOR in css[k]]
 
 
 def test_result_rows_are_not_styled():
@@ -191,8 +203,11 @@ def test_change_formats():
     a = _frame(**_profile(hit=(50, 50)))
     b = _frame(**_profile(hit=(90, 10), cpu="00:00:03"))
     html = compare_performance(a, b).to_html()
-    assert "+40.0 pp" in html
+    assert "-40.0 pp" in html
     assert "+50.0%" in html
+    assert "0.0 pp" in html
+    assert "0.0%" in html
+    assert "+0.0" not in html
 
 
 def test_input_attrs_not_modified(pair):
@@ -219,7 +234,8 @@ def test_list_value_is_median(executions, median):
 def test_tuple_accepted_and_vs_uses_medians():
     data = compare_performance(tuple(_runs(1, 2, 9)), _runs(1)).data
     assert data.loc[EXEC, ("Query 1", "Value")] == 2.0
-    assert data.loc[EXEC, ("Query 2", "vs Query 1")] == pytest.approx(-50.0)
+    assert data.loc[EXEC, ("Query 1", "vs best")] == pytest.approx(100.0)
+    assert data.loc[EXEC, ("Query 2", "vs best")] == 0.0
 
 
 def test_run_missing_a_metric_is_ignored_in_median():
@@ -262,11 +278,12 @@ def test_spread_column_only_for_multi_run_queries():
     assert list(data.columns) == [
         ("Query 1", "Value"),
         ("Query 1", "Spread"),
+        ("Query 1", "vs best"),
         ("Query 2", "Value"),
-        ("Query 2", "vs Query 1"),
+        ("Query 2", "vs best"),
         ("Query 3", "Value"),
         ("Query 3", "Spread"),
-        ("Query 3", "vs Query 1"),
+        ("Query 3", "vs best"),
     ]
 
 
@@ -280,7 +297,7 @@ def test_runs_row_when_any_query_has_several_runs():
     data = compare_performance(_runs(1, 2, 3), _runs(1)).data
     assert data.loc[RUNS, ("Query 1", "Value")] == 3
     assert data.loc[RUNS, ("Query 2", "Value")] == 1
-    assert math.isnan(data.loc[RUNS, ("Query 2", "vs Query 1")])
+    assert data.loc[RUNS].xs("vs best", level=1).isna().all()
     assert math.isnan(data.loc[RUNS, ("Query 1", "Spread")])
 
 
@@ -294,10 +311,11 @@ def test_labels_name_columns_vs_and_caption():
     styler = compare_performance(*_pair_frames(), labels=["old", "new"])
     assert list(styler.data.columns) == [
         ("old", "Value"),
+        ("old", "vs best"),
         ("new", "Value"),
-        ("new", "vs old"),
+        ("new", "vs best"),
     ]
-    assert styler.caption == "Query performance comparison (baseline: old)"
+    assert styler.caption == "Query performance comparison"
 
 
 def _pair_frames():
@@ -332,7 +350,33 @@ def test_labels_and_caption_are_html_escaped():
     assert "<b>x</b>" not in html
     assert "&lt;b&gt;x&lt;/b&gt;" in html
     assert "y&amp;z" in html
-    assert "baseline: &lt;b&gt;x&lt;/b&gt;" in html
+
+
+def test_index_labels_are_html_escaped():
+    styler = compare_performance(*_pair_frames())
+    styler.data.index = pd.MultiIndex.from_tuples(
+        [("<i>s</i>", f"a&b{k}") for k in range(len(styler.data))]
+    )
+    html = styler.to_html()
+    assert "<i>s</i>" not in html
+    assert "&lt;i&gt;s&lt;/i&gt;" in html
+    assert "a&amp;b" in html
+
+
+def test_uses_format_dataframe_table_styles():
+    styler = compare_performance(*_pair_frames())
+    selectors = [style["selector"] for style in styler.table_styles]
+    assert selectors[: len(_TABLE_STYLES)] == [style["selector"] for style in _TABLE_STYLES]
+    assert "tbody tr:nth-child(even)" in styler.to_html()
+
+
+def test_every_data_column_is_right_aligned():
+    styler = compare_performance(_runs(1, 2), _runs(1), _runs(2))
+    html = styler.to_html()
+    for position in range(len(styler.data.columns)):
+        for kind in ("th", "td"):
+            assert f"{kind}.col{position} {{\n  text-align: right;\n}}" in html
+    assert "text-align: left" in html
 
 
 def test_list_argument_errors_name_the_run():
@@ -346,9 +390,13 @@ def test_list_argument_errors_name_the_run():
         compare_performance([], good)
 
 
-def _verdict(*queries, row=EXEC, column="Query 2"):
-    css = _css(compare_performance(*queries)).get((row, (column, "vs Query 1")), "")
-    return "better" if BETTER_COLOR in css else "worse" if WORSE_COLOR in css else "none"
+def _verdict(*queries, row=EXEC):
+    """Whether each query's vs-best cell is red or uncoloured."""
+    css = _css(compare_performance(*queries))
+    return tuple(
+        "worse" if WORSE_COLOR in css.get((row, (f"Query {k}", "vs best")), "") else "none"
+        for k in range(1, len(queries) + 1)
+    )
 
 
 def _hit_runs(*hits):
@@ -358,14 +406,14 @@ def _hit_runs(*hits):
 @pytest.mark.parametrize(
     ("a", "b", "expected"),
     [
-        ((1, 3), (2, 4), "none"),
-        ((1, 3), (3, 5), "none"),
-        ((1, 3), (3.5, 5), "worse"),
-        ((4, 6), (1, 3), "better"),
-        ((1, 5), (2, 3), "none"),
-        ((1,), (3, 4), "worse"),
-        ((4, 5), (1,), "better"),
-        ((1,), (1,), "none"),
+        ((1, 3), (2, 4), ("none", "none")),
+        ((1, 3), (3, 5), ("none", "none")),
+        ((1, 3), (3.5, 5), ("none", "worse")),
+        ((4, 6), (1, 3), ("worse", "none")),
+        ((1, 5), (2, 3), ("none", "none")),
+        ((1,), (3, 4), ("none", "worse")),
+        ((4, 5), (1,), ("worse", "none")),
+        ((1,), (1,), ("none", "none")),
     ],
 )
 def test_change_coloured_only_outside_run_noise(a, b, expected):
@@ -375,10 +423,10 @@ def test_change_coloured_only_outside_run_noise(a, b, expected):
 @pytest.mark.parametrize(
     ("a", "b", "expected"),
     [
-        ((50, 70), (60, 80), "none"),
-        ((50, 70), (70, 90), "none"),
-        ((50, 52), (90, 92), "better"),
-        ((90, 92), (50, 52), "worse"),
+        ((50, 70), (60, 80), ("none", "none")),
+        ((50, 70), (70, 90), ("none", "none")),
+        ((50, 52), (90, 92), ("worse", "none")),
+        ((90, 92), (50, 52), ("none", "worse")),
     ],
 )
 def test_cache_hit_change_coloured_only_outside_run_noise(a, b, expected):
@@ -388,19 +436,63 @@ def test_cache_hit_change_coloured_only_outside_run_noise(a, b, expected):
 def test_metric_reported_by_one_run_of_a_query_is_coloured_by_sign():
     sparse = [_frame(**_profile(cpu="00:00:02")), _frame(**{"ExecutionTime": "00:00:01"})]
     full = [_frame(**_profile(cpu="00:00:09")), _frame(**_profile(cpu="00:00:10"))]
-    assert _verdict(sparse, full, row=CPU) == "worse"
-    assert _verdict(full, sparse, row=CPU) == "better"
-    assert _verdict(full, sparse, row=EXEC) == "none"
+    assert _verdict(sparse, full, row=CPU) == ("none", "worse")
+    assert _verdict(full, sparse, row=CPU) == ("worse", "none")
+    assert _verdict(full, sparse, row=EXEC) == ("none", "none")
 
 
 def test_bold_best_is_kept_when_ranges_overlap():
     css = _css(compare_performance(_runs(1, 3), _runs(2, 4)))
     assert "bold" in css[EXEC, ("Query 1", "Value")]
-    assert "color" not in css.get((EXEC, ("Query 2", "vs Query 1")), "")
+    assert "color" not in css.get((EXEC, ("Query 2", "vs best")), "")
 
 
-def test_each_vs_column_is_judged_against_the_baseline():
-    styled = compare_performance(_runs(1, 3), _runs(2, 4), _runs(5, 6))
-    css = _css(styled)
-    assert "color" not in css.get((EXEC, ("Query 2", "vs Query 1")), "")
-    assert WORSE_COLOR in css[EXEC, ("Query 3", "vs Query 1")]
+def test_each_query_is_judged_against_the_best():
+    verdicts = _verdict(_runs(1, 3), _runs(2, 4), _runs(5, 6))
+    assert verdicts == ("none", "none", "worse")
+
+
+def test_ties_are_judged_against_every_best_query():
+    best_a, best_b = _runs(1, 3), _runs(2, 2)
+    data = compare_performance(best_a, best_b, _runs(2.5, 3.5)).data
+    assert data.loc[EXEC, ("Query 1", "vs best")] == data.loc[EXEC, ("Query 2", "vs best")] == 0
+    assert _verdict(best_a, best_b, _runs(2.5, 3.5)) == ("none", "none", "none")
+    assert _verdict(best_a, best_b, _runs(3.5, 4.5)) == ("none", "none", "worse")
+
+
+def test_one_query_with_a_value_has_no_best():
+    partial = _frame(**{"ExecutionTime": "00:00:02"})
+    data = compare_performance(_frame(**_profile()), partial).data
+    assert data.loc[CPU].xs("vs best", level=1).isna().all()
+    assert _verdict(_frame(**_profile()), partial, row=CPU) == ("none", "none")
+
+
+def _winner(*queries, row=EXEC):
+    """The queries whose Value cell is green."""
+    css = _css(compare_performance(*queries))
+    return [
+        k
+        for k in range(1, len(queries) + 1)
+        if BETTER_COLOR in css.get((row, (f"Query {k}", "Value")), "")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("queries", "expected"),
+    [
+        (((1, 2), (3, 4)), [1]),
+        (((3, 4), (1, 2), (5, 6)), [2]),
+        (((1, 3), (2, 4)), []),
+        (((1, 2), (3, 4), (1.5, 5)), []),
+        (((1,), (2,)), [1]),
+        (((1,), (1,)), []),
+        (((1,), (1,), (2,)), []),
+    ],
+)
+def test_best_value_green_only_when_clear_of_every_other_query(queries, expected):
+    assert _winner(*(_runs(*q) for q in queries)) == expected
+
+
+def test_green_best_value_stays_bold():
+    css = _css(compare_performance(_runs(1, 2), _runs(3, 4)))
+    assert "bold" in css[EXEC, ("Query 1", "Value")]

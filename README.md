@@ -321,8 +321,8 @@ with one dict per window.
 df = exec_query("SigninLogs | take 100", profile=True)
 ```
 
-To compare the statistics of two or more profiled results side by side, with the change against the
-first (green is better, red worse), use `compare_performance`:
+To compare the statistics of two or more profiled results side by side, with each query's change
+from the best one in every row (red when worse, a clear winner in green), use `compare_performance`:
 
 ```python
 from security_notebook_tools import compare_performance
@@ -332,7 +332,7 @@ compare_performance(df, other_df)
 
 For a reliable measurement, run each query several times with `exec_query_runs` (one after another,
 profiled, 1 to 100 runs after 2 discarded warm-up runs, `warmup=`). `compare_performance` takes the median of each list and shows the spread, and colours a change
-only when the runs' ranges do not overlap; `labels=` names the columns:
+only when the run range does not overlap the best query's; `labels=` names the columns:
 
 ```python
 from security_notebook_tools import compare_performance, exec_query_runs
