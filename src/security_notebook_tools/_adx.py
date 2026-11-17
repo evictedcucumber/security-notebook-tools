@@ -45,7 +45,9 @@ from ._errors import (
     describe_network_error,
     hints_for,
     is_timeout,
+    kql_query_error,
     kusto_error_codes,
+    kusto_kql_error,
     unexpected_errors,
 )
 from ._exceptions import (
@@ -253,6 +255,8 @@ class ADXClient:
             # KustoApiError / KustoMultiApiError are KustoServiceErrors with error codes.
             status = _status(exc) if isinstance(exc, KustoServiceError) else None
             codes = kusto_error_codes(exc)
+            if kql_error := kusto_kql_error(exc):
+                raise kql_query_error(f"ADX {kind} failed", kql_error, codes, text) from None
             message = f"ADX {kind} failed: {exc}{hints_for(status, codes)}"
             if _throttled(exc, status, codes):
                 error = QueryThrottledError
@@ -348,10 +352,12 @@ class ADXClient:
                 plugin (it could reach the Sentinel data lake or a workspace), or, on a workspace
                 URL, the database is not that workspace or the cost guard rejects the query.
             QueryError: The table plans of a workspace URL could not be verified (the query is
-                then not sent), or the service returned an error. The message adds hints for the
-                HTTP status and the Kusto error code (``BadRequest_SyntaxError`` ...). An error
-                nobody anticipated is logged at ERROR with its traceback and raised as a
-                ``QueryError`` that chains the original.
+                then not sent), or the service returned an error. A KQL syntax or
+                semantic error (``BadRequest_SyntaxError`` ...) is reported as one short message
+                with its line and column, and a note showing the offending query line with a
+                caret (the SDK traceback is not chained). Other messages add hints for the HTTP
+                status and the Kusto error code. An error nobody anticipated is logged at ERROR
+                with its traceback and raised as a ``QueryError`` that chains the original.
             QueryConnectionError: The connection failed before a response arrived; it is a
                 ``QueryTransientError``.
             QueryThrottledError: The service throttled the request (HTTP 429 or a throttling

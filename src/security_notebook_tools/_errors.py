@@ -17,14 +17,16 @@ from __future__ import annotations
 
 import errno
 import logging
+import re
 import socket
 import threading
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 from ._exceptions import ConfigurationError, QueryError, SecurityNotebookToolsError
+from ._kql import _PREFIX_RE
 from ._log import (
     clear_failure_mark,
     debug_scope,
@@ -284,6 +286,162 @@ def hints_for(status: int | None, codes: Iterable[str]) -> str:
         text = f"{text}; " if text else ""
         text += "service error code: " + ", ".join(codes)
     return f" ({text})" if text else ""
+
+
+class KqlError(NamedTuple):
+    """A KQL syntax or semantic error: its kind, the service message and the 1-based position."""
+
+    kind: str
+    message: str
+    line: int | None
+    column: int | None
+
+
+_KINDS = (
+    ("syntaxerror", "syntax"),
+    ("syntaxexception", "syntax"),
+    ("semanticerror", "semantic"),
+    ("semanticexception", "semantic"),
+)
+# Kusto often names the kind only in the text: "...: Semantic error: SEM0100: ..."
+_KUSTO_KIND = re.compile(r"\b(Syntax|Semantic) error:\s*", re.IGNORECASE)
+_POSITIONS = (
+    (re.compile(r"\[line:position=(\d+):(\d+)\]"), "[line:position={}:{}]"),
+    (re.compile(r"on line \[(\d+),\s*(\d+)\]"), "on line [{},{}]"),
+)
+
+
+def _kql_kind(codes: Iterable[str]) -> str | None:
+    """``"syntax"`` or ``"semantic"`` when a service error code says so, else None."""
+    return next((kind for code in codes for needle, kind in _KINDS if needle in code.lower()), None)
+
+
+def _as_position(line: Any, column: Any) -> tuple[int | None, int | None]:
+    """The position when both parts are positive integers (1-based), else ``(None, None)``."""
+    ok = all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in (line, column))
+    return (line, column) if ok else (None, None)
+
+
+def _parse_position(message: str) -> tuple[int | None, int | None]:
+    """The position a service message states, as ``[line:position=1:5]`` or ``on line [1,5]``."""
+    for pattern, _ in _POSITIONS:
+        if found := pattern.search(message):
+            return _as_position(int(found[1]), int(found[2]))
+    return None, None
+
+
+def azure_kql_error(exc: BaseException) -> KqlError | None:
+    """The KQL error in a Log Analytics ``HttpResponseError``, or None when it is another one.
+
+    The message is the innermost one of the ``innererror`` chain; the position comes from its
+    ``line`` and ``pos`` fields, or else from the message text. ``pos`` is read as 1-based.
+    """
+    try:
+        error = getattr(exc, "error", None)
+        kind = _kql_kind(azure_error_codes(exc))
+        if kind is None:
+            return None
+        message, line, column = getattr(error, "message", None), None, None
+        inner = getattr(error, "innererror", None)
+        for _ in range(_MAX_DEPTH):
+            if not isinstance(inner, dict):
+                break
+            message = inner.get("message") or message
+            line, column = inner.get("line"), inner.get("pos")
+            inner = inner.get("innererror")
+        if not isinstance(message, str) or not message:
+            return None
+        line, column = _as_position(line, column)
+        if line is None:
+            line, column = _parse_position(message)
+        return KqlError(kind, " ".join(message.split()), line, column)
+    except Exception:
+        return None
+
+
+def kusto_kql_error(exc: BaseException) -> KqlError | None:
+    """The KQL error in a Kusto API error, or None when it is another one.
+
+    The kind comes from the error's ``code``, its ``@type`` (``...SyntaxException``), or the
+    ``Syntax error:``/``Semantic error:`` in its ``description`` (else ``message``), which is the
+    message from there on. The position is parsed from it when present.
+    """
+    try:
+        errors = exc.get_api_errors() if hasattr(exc, "get_api_errors") else [exc.get_api_error()]
+        for error in errors:
+            message = error.description or error.message
+            if not isinstance(message, str) or not message:
+                continue
+            kind = _kql_kind(n for n in (error.code, error.type) if isinstance(n, str))
+            if found := _KUSTO_KIND.search(message):
+                kind = kind or found[1].lower()
+                message = message[found.end() :]
+            if kind:
+                return KqlError(kind, " ".join(message.split()), *_parse_position(message))
+    except Exception:
+        pass
+    return None
+
+
+def _user_position(kql: str, error: KqlError) -> tuple[str, int | None, int | None]:
+    """The query as the user wrote it and the error's position in it.
+
+    A batch sends one ``let`` line before the user's query; it is dropped and the line number
+    lowered by one. An error inside that line has no position in the user's query.
+    """
+    if error.line is None or error.column is None:
+        return kql, None, None
+    if found := _PREFIX_RE.match(kql):
+        kql = kql[found.end() :]
+        return kql, (error.line - 1 or None), error.column
+    return kql, error.line, error.column
+
+
+def _excerpt(kql: str, line: int, column: int) -> str | None:
+    """The numbered query line with a caret under the column, or None when out of range."""
+    lines = kql.splitlines()
+    if not 1 <= line <= len(lines) or column > len(lines[line - 1]) + 1:
+        return None
+    text = lines[line - 1]
+    gutter = " " * len(str(line))
+    pad = "".join(c if c == "\t" else " " for c in text[: column - 1])
+    return f"{line} | {text}\n{gutter} | {pad}^"
+
+
+def kql_query_error(prefix: str, error: KqlError, codes: Iterable[str], kql: str) -> QueryError:
+    """Build the ``QueryError`` for a KQL syntax or semantic error, to raise ``from None``.
+
+    The message names the problem and position; the offending query line with a caret is
+    added as a note, so it never reaches the log (which holds exception messages only).
+
+    Args:
+        prefix: The start of the message, e.g. ``"Sentinel query failed"``.
+        error: The recognised error.
+        codes: The service error codes, listed at the end of the message.
+        kql: The text that was sent (with the batch's ``let`` line, if it is a batch).
+
+    Returns:
+        The error, with the excerpt as a note when the position is known and in range.
+    """
+    sent, line, column = _user_position(kql, error)
+    where = f" at line {line}, column {column}" if line and column else ""
+    message = error.message
+    if line and column and sent != kql:
+        message = _rewrite_position(message, line, column)
+    text = f"{prefix}: KQL {error.kind} error{where}: {message}"
+    if codes := list(codes):
+        text += f" (service error code: {', '.join(codes)})"
+    result = QueryError(text)
+    if line and column and (excerpt := _excerpt(sent, line, column)):
+        result.add_note(excerpt)
+    return result
+
+
+def _rewrite_position(message: str, line: int, column: int) -> str:
+    """Replace the position the service states in ``message`` with the user's query numbers."""
+    for pattern, template in _POSITIONS:
+        message = pattern.sub(template.format(line, column), message)
+    return message
 
 
 def log_unexpected(logger: logging.Logger, operation: str, exc: BaseException) -> None:

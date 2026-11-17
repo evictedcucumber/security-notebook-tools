@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import logging
 import random
-import re
 import sys
 import threading
 import time
@@ -30,7 +29,7 @@ from ._exceptions import (
     SecurityNotebookToolsError,
 )
 from ._format import KQL_TYPES_ATTR
-from ._kql import Token, tokenize
+from ._kql import _PREFIX_RE, Token, tokenize
 from ._log import (
     dependency_call,
     describe_exception,
@@ -140,12 +139,6 @@ def _literal(value: datetime) -> str:
 def _prefix(bounds: tuple[datetime, datetime]) -> str:
     """The ``let`` statements that define ``BatchStart`` and ``BatchEnd`` for a window."""
     return f"let BatchStart = {_literal(bounds[0])}; let BatchEnd = {_literal(bounds[1])};\n"
-
-
-# Exactly the text _prefix produces, for any bounds: only the digits of the literals vary, so
-# the cost guard's verdict on one window holds for every window (see _tablepolicy.batch_check).
-_STAMP = r'datetime\("\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"\)'
-_PREFIX_RE = re.compile(rf"let BatchStart = {_STAMP}; let BatchEnd = {_STAMP};\n", re.ASCII)
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)

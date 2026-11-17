@@ -18,6 +18,14 @@
 - `profile=True` on Sentinel could report the statistics of a response the Log Analytics API served
   from its 2-minute cache; it now sends `Cache-Control: no-cache`.
 
+## 10.4.0 - 2026-11-17
+
+### Changed
+
+- A KQL syntax or semantic error from Sentinel or ADX is now one short `QueryError` message with
+  the problem, line and column, plus a note showing the offending query line with a caret. The
+  SDK's raw JSON, stacked hints and chained traceback are no longer shown.
+
 ## 10.3.0 - 2026-11-16
 
 ### Changed
