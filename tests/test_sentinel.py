@@ -109,6 +109,7 @@ def test_success(client):
     assert df["TimeGenerated"].dt.tz is not None
     kwargs = client._mock.query_workspace.call_args.kwargs
     assert kwargs["timespan"] is None
+    assert "headers" not in kwargs
     assert len(client.query_tables("T")) == 2
 
 
@@ -718,7 +719,9 @@ def test_profile_requests_and_attaches_statistics(client):
         tables=[_table(), _table("U")], statistics=stats
     )
     tables = client.query_tables("T", profile=True)
-    assert client._mock.query_workspace.call_args.kwargs["include_statistics"] is True
+    kwargs = client._mock.query_workspace.call_args.kwargs
+    assert kwargs["include_statistics"] is True
+    assert kwargs["headers"] == {"Cache-Control": "no-cache"}
     assert tables[0].attrs["_statistics"] == stats
     assert "_statistics" not in tables[1].attrs
 

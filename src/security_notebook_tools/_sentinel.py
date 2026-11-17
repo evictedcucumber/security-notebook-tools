@@ -269,6 +269,8 @@ class SentinelClient:
                 ``_CLIENT_SERVER_DELTA`` seconds in total.
         """
         transport: dict[str, Any] = {}
+        if profile:
+            transport["headers"] = {"Cache-Control": "no-cache"}
         deadline = _deadline_for(server_timeout)
         if server_timeout:
             transport["read_timeout"] = server_timeout + _CLIENT_SERVER_DELTA
