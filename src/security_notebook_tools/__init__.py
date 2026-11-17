@@ -71,7 +71,7 @@ from ._pivot import pivot_dataframe
 from ._query import clear_cache, exec_query, exec_query_file, exec_query_runs
 from ._render import render_dataframe
 
-__version__ = "10.4.0"
+__version__ = "10.5.0"
 
 show_row_counts()
 del show_row_counts

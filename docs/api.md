@@ -18,7 +18,7 @@ from security_notebook_tools import (
 )
 import security_notebook_tools
 
-security_notebook_tools.__version__  # "10.4.0"
+security_notebook_tools.__version__  # "10.5.0"
 ```
 
 Submodules are private and may change. The exception classes are not exported.
@@ -1174,7 +1174,7 @@ treatment as above.
 
 ## `__version__`
 
-The installed version string, e.g. `"10.4.0"`.
+The installed version string, e.g. `"10.5.0"`.
 
 ### Query profile
 
