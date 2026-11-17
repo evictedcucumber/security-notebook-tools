@@ -16,6 +16,12 @@ from typing import NamedTuple
 
 from ._exceptions import ConfigurationError
 
+# Exactly the text the batch's `_prefix` produces, for any bounds: only the digits of the
+# literals vary, so the cost guard's verdict on one window holds for every window (see
+# _tablepolicy.batch_check).
+_STAMP = r'datetime\("\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z"\)'
+_PREFIX_RE = re.compile(rf"let BatchStart = {_STAMP}; let BatchEnd = {_STAMP};\n", re.ASCII)
+
 # Order matters: comments and strings are consumed before identifiers and punctuation so that
 # their contents are never scanned as code. Verbatim strings (@"..." / @'...') double the quote
 # instead of using backslash escapes; multi-line strings (``` ... ``` and ~~~ ... ~~~) have no
